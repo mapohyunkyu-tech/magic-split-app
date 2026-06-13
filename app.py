@@ -1,7 +1,9 @@
 # =====================================================
 # 매직스플릿 Streamlit 안정형 앱
+# v7_STREAMLIT_FDR_ENGINE_20260614
+# 핵심: pykrx 실시간 유니버스 0개 문제를 피하기 위해 FinanceDataReader 기반으로 TOP50 계산
 # 저장소: Google Sheets
-# 메뉴: 1. 요양원 2. 운영판단기 3. TOP50
+# 메뉴: 1. 요양원 2. 운영판단기 3. TOP50 4. 도움말
 # =====================================================
 
 import re
@@ -14,20 +16,19 @@ import streamlit as st
 
 from google.oauth2.service_account import Credentials
 import gspread
-from pykrx import stock
+import FinanceDataReader as fdr
 
 # =====================================================
 # 기본 설정
 # =====================================================
+
+APP_VERSION = "v7_STREAMLIT_FDR_ENGINE_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
     page_icon="📈",
     layout="wide"
 )
-
-
-APP_VERSION = "v6_SHEET_TOP50_VIEWER_20260614"
 
 NURSING_COLUMNS = [
     "코드", "종목", "입력명", "상태", "차수",
@@ -50,7 +51,6 @@ NAME_ALIAS = {
     "금호석화": "금호석유",
 }
 
-# 이름으로 안 잡히는 종목은 여기에 수동 등록
 MANUAL_CODE_MAP = {
     "성광벤드": ("014620", "성광벤드"),
     "성광벤드 014620": ("014620", "성광벤드"),
@@ -58,21 +58,19 @@ MANUAL_CODE_MAP = {
     "태광 023160": ("023160", "태광"),
 }
 
-# TOP50 유니버스에 강제로 포함하고 싶은 종목
 FORCE_UNIVERSE = {
     "014620": "성광벤드",
     "023160": "태광",
 }
-
-# =====================================================
-# Streamlit / Google Sheets 연결
-# =====================================================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
+# =====================================================
+# Google Sheets 연결
+# =====================================================
 
 def require_secrets():
     if "spreadsheet_id" not in st.secrets or "gcp_service_account" not in st.secrets:
@@ -85,7 +83,7 @@ spreadsheet_id = "구글시트_ID"
 type = "service_account"
 project_id = "..."
 private_key_id = "..."
-private_key = """-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"""
+private_key = ''' + '"""' + '''-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n''' + '"""' + '''
 client_email = "서비스계정이메일"
 client_id = "..."
 auth_uri = "https://accounts.google.com/o/oauth2/auth"
@@ -100,29 +98,15 @@ universe_domain = "googleapis.com"
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
     require_secrets()
-
-    # Streamlit Secrets는 AttrDict 형태라 Google 인증 함수가 바로 못 읽는 경우가 있어
-    # 일반 dict로 바꾸고, private_key의 \n 줄바꿈을 실제 줄바꿈으로 보정한다.
     service_account_info = dict(st.secrets["gcp_service_account"])
 
-    private_key = str(service_account_info.get("private_key", ""))
-
-    # 실수로 JSON의 따옴표까지 같이 붙여넣은 경우 제거
-    private_key = private_key.strip()
+    private_key = str(service_account_info.get("private_key", "")).strip()
     if (private_key.startswith('"') and private_key.endswith('"')) or (private_key.startswith("'") and private_key.endswith("'")):
         private_key = private_key[1:-1]
-
-    # JSON에서 온 \n을 실제 줄바꿈으로 변환
-    private_key = private_key.replace("\\n", "\n")
-    private_key = private_key.replace("\r\n", "\n")
-    private_key = private_key.strip()
-
+    private_key = private_key.replace("\\n", "\n").replace("\r\n", "\n").strip()
     service_account_info["private_key"] = private_key
 
-    credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=SCOPES
-    )
+    credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
     return gspread.authorize(credentials)
 
 
@@ -131,48 +115,6 @@ def get_spreadsheet():
     client = get_gspread_client()
     spreadsheet_id = st.secrets["spreadsheet_id"]
     return client.open_by_key(spreadsheet_id)
-
-
-def ensure_worksheet(sheet, title, headers):
-    try:
-        ws = sheet.worksheet(title)
-    except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=title, rows=1000, cols=max(len(headers), 10))
-        ws.update([headers])
-        return ws
-
-    values = ws.get_all_values()
-    if len(values) == 0:
-        ws.update([headers])
-    else:
-        current_header = values[0]
-        if current_header != headers:
-            # 기존 데이터 보존하면서 누락 헤더만 맞춤
-            all_rows = values[1:]
-            old_df = pd.DataFrame(all_rows, columns=current_header) if current_header else pd.DataFrame()
-            for c in headers:
-                if c not in old_df.columns:
-                    old_df[c] = ""
-            old_df = old_df[headers]
-            write_worksheet(ws, old_df, headers)
-    return ws
-
-
-def get_ws(title, headers):
-    sheet = get_spreadsheet()
-    return ensure_worksheet(sheet, title, headers)
-
-
-def read_worksheet_df(ws, headers):
-    records = ws.get_all_records()
-    df = pd.DataFrame(records)
-    for c in headers:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[headers].copy()
-    if "코드" in df.columns and len(df) > 0:
-        df["코드"] = df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
-    return df
 
 
 def clean_value(v):
@@ -198,6 +140,47 @@ def write_worksheet(ws, df, headers):
         values.append([clean_value(row[c]) for c in headers])
     ws.clear()
     ws.update(values)
+
+
+def ensure_worksheet(sheet, title, headers):
+    try:
+        ws = sheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = sheet.add_worksheet(title=title, rows=1000, cols=max(len(headers), 10))
+        ws.update([headers])
+        return ws
+
+    values = ws.get_all_values()
+    if len(values) == 0:
+        ws.update([headers])
+    else:
+        current_header = values[0]
+        if current_header != headers:
+            all_rows = values[1:]
+            old_df = pd.DataFrame(all_rows, columns=current_header) if current_header else pd.DataFrame()
+            for c in headers:
+                if c not in old_df.columns:
+                    old_df[c] = ""
+            old_df = old_df[headers]
+            write_worksheet(ws, old_df, headers)
+    return ws
+
+
+def get_ws(title, headers):
+    sheet = get_spreadsheet()
+    return ensure_worksheet(sheet, title, headers)
+
+
+def read_worksheet_df(ws, headers):
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
+    for c in headers:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[headers].copy()
+    if "코드" in df.columns and len(df) > 0:
+        df["코드"] = df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+    return df
 
 
 def now_str():
@@ -238,27 +221,20 @@ def save_top50_df(df):
 # 공통 유틸
 # =====================================================
 
-
 def parse_won(x):
-    s = str(x).strip()
-    s = s.replace(",", "").replace("원", "").replace(" ", "")
-
+    s = str(x).strip().replace(",", "").replace("원", "").replace(" ", "")
     if s == "":
         return 0
-
     neg = False
     if s.startswith("-"):
         neg = True
         s = s[1:]
-
     total = 0
-
     if "억" in s:
         a, b = s.split("억", 1)
         if a:
             total += float(a) * 100_000_000
         s = b
-
     if "만" in s:
         a = s.replace("만", "")
         if a:
@@ -266,7 +242,6 @@ def parse_won(x):
     else:
         if total == 0 and s:
             total += float(s)
-
     total = int(total)
     return -total if neg else total
 
@@ -300,93 +275,77 @@ def calc_magic_buy_amount(price, target_amount):
     price = float(price)
     target_amount = int(target_amount)
     max_allowed = get_allowed_amount(target_amount)
-
     if price <= 0:
         return 0, 0, "가격오류"
     if price > max_allowed:
         return 0, 0, "매수불가"
-
     floor_shares = int(target_amount // price)
     if floor_shares < 1:
         floor_shares = 1
-
     floor_amount = floor_shares * price
     ceil_shares = floor_shares + 1
     ceil_amount = ceil_shares * price
-
     if ceil_amount <= max_allowed:
         shares = ceil_shares
         amount = ceil_amount
     else:
         shares = floor_shares
         amount = floor_amount
-
     if amount > max_allowed:
         return 0, 0, "매수불가"
-
     return int(shares), int(amount), "OK"
 
+# =====================================================
+# FinanceDataReader 데이터 엔진
+# =====================================================
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_krx_master_fdr():
+    try:
+        krx = fdr.StockListing("KRX")
+    except Exception:
+        return pd.DataFrame(columns=["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"])
+
+    if krx is None or len(krx) == 0:
+        return pd.DataFrame(columns=["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"])
+
+    krx = krx.copy()
+
+    if "Code" not in krx.columns and "Symbol" in krx.columns:
+        krx = krx.rename(columns={"Symbol": "Code"})
+    if "Code" not in krx.columns:
+        first_col = krx.columns[0]
+        krx = krx.rename(columns={first_col: "Code"})
+
+    if "Name" not in krx.columns:
+        krx["Name"] = krx["Code"].astype(str)
+    if "Market" not in krx.columns:
+        krx["Market"] = "KRX"
+    if "Close" not in krx.columns:
+        krx["Close"] = np.nan
+    if "Amount" not in krx.columns:
+        krx["Amount"] = 0
+    if "Marcap" not in krx.columns:
+        krx["Marcap"] = 0
+    if "Volume" not in krx.columns:
+        krx["Volume"] = 0
+
+    krx["Code"] = krx["Code"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+    krx["Name"] = krx["Name"].astype(str)
+    krx["Market"] = krx["Market"].astype(str)
+
+    for c in ["Close", "Amount", "Marcap", "Volume"]:
+        krx[c] = pd.to_numeric(krx[c], errors="coerce").fillna(0)
+
+    krx = krx.drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+    return krx[["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"]]
+
+
 def find_valid_krx_date(end_date=None, max_back=30):
-    """
-    실제 OHLCV 거래대금이 잡히는 최근 거래일을 찾는다.
-    주말/휴일에는 ticker list만으로는 날짜가 유효해 보일 수 있어서
-    get_market_ohlcv_by_ticker의 거래대금 합계로 검증한다.
-    """
+    # FDR은 날짜를 굳이 거래일로 강제하지 않아도 마지막 거래일까지 반환한다.
     if end_date is None:
-        end_date = datetime.today().strftime("%Y%m%d")
-
-    d = pd.to_datetime(str(end_date))
-
-    for _ in range(max_back):
-        ds = d.strftime("%Y%m%d")
-        try:
-            snap = stock.get_market_ohlcv_by_ticker(ds, market="KOSPI")
-            if snap is not None and len(snap) > 100:
-                amount_sum = 0
-                if "거래대금" in snap.columns:
-                    amount_sum = pd.to_numeric(snap["거래대금"], errors="coerce").fillna(0).sum()
-                if amount_sum > 0:
-                    return ds
-        except Exception:
-            pass
-
-        try:
-            snap = stock.get_market_ohlcv_by_ticker(ds, market="KOSDAQ")
-            if snap is not None and len(snap) > 100:
-                amount_sum = 0
-                if "거래대금" in snap.columns:
-                    amount_sum = pd.to_numeric(snap["거래대금"], errors="coerce").fillna(0).sum()
-                if amount_sum > 0:
-                    return ds
-        except Exception:
-            pass
-
-        d = d - pd.Timedelta(days=1)
-
-    return (pd.to_datetime(str(end_date)) - pd.Timedelta(days=1)).strftime("%Y%m%d")
-
-
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_krx_master(asof_date):
-    rows = []
-    for market in ["KOSPI", "KOSDAQ"]:
-        try:
-            tickers = stock.get_market_ticker_list(asof_date, market=market)
-            for code in tickers:
-                name = stock.get_market_ticker_name(code)
-                rows.append({
-                    "Code": str(code).zfill(6),
-                    "Name": str(name),
-                    "Market": market
-                })
-        except Exception:
-            pass
-    krx = pd.DataFrame(rows)
-    if len(krx) == 0:
-        return pd.DataFrame(columns=["Code", "Name", "Market"])
-    return krx.drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+        return datetime.today().strftime("%Y%m%d")
+    return pd.to_datetime(str(end_date)).strftime("%Y%m%d")
 
 
 def find_stock_by_name(input_name, krx):
@@ -460,57 +419,19 @@ def get_nursing_exclude_codes():
 # 운영판단기
 # =====================================================
 
-
 def get_account_stage(book_asset):
     book_asset = int(book_asset)
-
     if book_asset < 90_000_000:
-        return {
-            "단계": "15만원 / 120종목 구간",
-            "기본매수금액": 150000,
-            "목표종목수": 120,
-            "최대종목수": 120,
-            "20만원슬롯한도": 0
-        }
+        return {"단계": "15만원 / 120종목 구간", "기본매수금액": 150000, "목표종목수": 120, "최대종목수": 120, "20만원슬롯한도": 0}
     if book_asset < 120_000_000:
-        return {
-            "단계": "15만원 / 120~150종목 확장 구간",
-            "기본매수금액": 150000,
-            "목표종목수": 140,
-            "최대종목수": 150,
-            "20만원슬롯한도": 10
-        }
+        return {"단계": "15만원 / 120~150종목 확장 구간", "기본매수금액": 150000, "목표종목수": 140, "최대종목수": 150, "20만원슬롯한도": 10}
     if book_asset < 150_000_000:
-        return {
-            "단계": "15만원 기본 + 20만원 슬롯 확대 구간",
-            "기본매수금액": 150000,
-            "목표종목수": 160,
-            "최대종목수": 170,
-            "20만원슬롯한도": 40
-        }
+        return {"단계": "15만원 기본 + 20만원 슬롯 확대 구간", "기본매수금액": 150000, "목표종목수": 160, "최대종목수": 170, "20만원슬롯한도": 40}
     if book_asset < 200_000_000:
-        return {
-            "단계": "20만원 기본 검토 구간",
-            "기본매수금액": 200000,
-            "목표종목수": 180,
-            "최대종목수": 200,
-            "20만원슬롯한도": 999
-        }
+        return {"단계": "20만원 기본 검토 구간", "기본매수금액": 200000, "목표종목수": 180, "최대종목수": 200, "20만원슬롯한도": 999}
     if book_asset < 300_000_000:
-        return {
-            "단계": "25만원 기본 검토 구간",
-            "기본매수금액": 250000,
-            "목표종목수": 210,
-            "최대종목수": 240,
-            "20만원슬롯한도": 999
-        }
-    return {
-        "단계": "30만원 이상 금액확대 구간",
-        "기본매수금액": 300000,
-        "목표종목수": 230,
-        "최대종목수": 280,
-        "20만원슬롯한도": 999
-    }
+        return {"단계": "25만원 기본 검토 구간", "기본매수금액": 250000, "목표종목수": 210, "최대종목수": 240, "20만원슬롯한도": 999}
+    return {"단계": "30만원 이상 금액확대 구간", "기본매수금액": 300000, "목표종목수": 230, "최대종목수": 280, "20만원슬롯한도": 999}
 
 
 def downgrade_mode(current_mode, new_mode):
@@ -521,7 +442,6 @@ def downgrade_mode(current_mode, new_mode):
 def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, target_holdings_input=None, used_20_slots=0):
     book_asset = cash + cost
     stage = get_account_stage(book_asset)
-
     base_amount = stage["기본매수금액"]
     stage_target = stage["목표종목수"]
     max_holdings = stage["최대종목수"]
@@ -557,13 +477,11 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     if total_holdings > target_holdings:
         mode = downgrade_mode(mode, "회수모드")
         reasons.append("현재 보유종목수가 목표종목수 초과")
-
     if total_holdings >= max_holdings:
         mode = downgrade_mode(mode, "강한 회수모드")
         reasons.append("현재 보유종목수가 최대종목수 이상")
 
     room_to_target = max(target_holdings - total_holdings, 0)
-
     if mode in ["강한 회수모드", "회수모드"]:
         new_buy_count = 0
     elif mode == "제한매수모드":
@@ -611,13 +529,14 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     }
 
 # =====================================================
-# 주가 / 점수 / TOP50
+# TOP50 계산
 # =====================================================
-
 
 def ms_prepare_indicator_df(raw_df):
     df = raw_df.copy()
     rename_map = {
+        "Open": "open", "High": "high", "Low": "low", "Close": "close",
+        "Volume": "volume", "Change": "change",
         "시가": "open", "고가": "high", "저가": "low", "종가": "close",
         "거래량": "volume", "거래대금": "amount"
     }
@@ -625,6 +544,8 @@ def ms_prepare_indicator_df(raw_df):
     for c in ["open", "high", "low", "close", "volume", "amount"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "volume" not in df.columns:
+        df["volume"] = 0
     if "amount" not in df.columns:
         df["amount"] = df["close"] * df["volume"]
     df = df.dropna(subset=["close"]).copy()
@@ -642,19 +563,20 @@ def ms_prepare_indicator_df(raw_df):
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def get_ohlcv_by_date_cached(start_date, end_date, code):
+def get_ohlcv_fdr_cached(code, start_date, end_date):
     try:
-        df = stock.get_market_ohlcv_by_date(start_date, end_date, code)
+        start = pd.to_datetime(str(start_date)).strftime("%Y-%m-%d")
+        end = pd.to_datetime(str(end_date)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(str(code).zfill(6), start, end)
         return df.copy()
     except Exception:
         return pd.DataFrame()
 
 
 def ms_regime_asof_from_etf(asof_date):
-    etf_code = "069500"
     start = (pd.to_datetime(asof_date) - pd.DateOffset(days=300)).strftime("%Y%m%d")
     try:
-        raw = get_ohlcv_by_date_cached(start, asof_date, etf_code)
+        raw = get_ohlcv_fdr_cached("069500", start, asof_date)
         df = ms_prepare_indicator_df(raw)
         if len(df) < 120:
             return "장세불명"
@@ -686,34 +608,32 @@ def liquid500_excluded(name):
     return any(w.lower() in n.lower() for w in bad_words)
 
 
-def liquid500_score_candidate(df, name, regime="장세불명", high_price_limit=160000):
-    if df is None or len(df) < 160:
+def score_candidate_core(df, name, regime="장세불명", high_price_limit=160000, strict=True):
+    if df is None or len(df) < 60:
         return None
     if liquid500_excluded(name):
         return None
-    clean = df.dropna()
-    if len(clean) < 120:
+    clean = df.dropna(subset=["close"]).copy()
+    if len(clean) < 40:
         return None
     last = clean.iloc[-1]
     price = float(last["close"])
     if price <= 0 or price > high_price_limit:
         return None
-    amount60 = float(last.get("amount_ma60", 0))
-    amount20 = float(last.get("amount_ma20", 0))
-    if amount60 < 300_000_000:
+    amount60 = float(last.get("amount_ma60", 0)) if pd.notna(last.get("amount_ma60", np.nan)) else 0
+    amount20 = float(last.get("amount_ma20", 0)) if pd.notna(last.get("amount_ma20", np.nan)) else 0
+    if strict and amount60 < 50_000_000:
         return None
-
-    ret20 = float(last.get("ret20", 0))
-    ret60 = float(last.get("ret60", 0))
-    ret120 = float(last.get("ret120", 0))
-    pullback = float(last.get("pullback120", 0))
+    ret20 = float(last.get("ret20", 0)) if pd.notna(last.get("ret20", np.nan)) else 0
+    ret60 = float(last.get("ret60", 0)) if pd.notna(last.get("ret60", np.nan)) else 0
+    ret120 = float(last.get("ret120", 0)) if pd.notna(last.get("ret120", np.nan)) else 0
+    pullback = float(last.get("pullback120", 0)) if pd.notna(last.get("pullback120", np.nan)) else 0
     close = float(last["close"])
-    ma20 = float(last.get("ma20", np.nan))
-    ma60 = float(last.get("ma60", np.nan))
-    ma120 = float(last.get("ma120", np.nan))
+    ma20 = float(last.get("ma20", np.nan)) if pd.notna(last.get("ma20", np.nan)) else np.nan
+    ma60 = float(last.get("ma60", np.nan)) if pd.notna(last.get("ma60", np.nan)) else np.nan
+    ma120 = float(last.get("ma120", np.nan)) if pd.notna(last.get("ma120", np.nan)) else np.nan
 
     trading_score = min(amount60 / 10_000_000_000 * 25, 25)
-
     temp = df.copy()
     temp["r20"] = temp["close"].pct_change(20) * 100
     recent = temp.tail(750)
@@ -721,11 +641,11 @@ def liquid500_score_candidate(df, name, regime="장세불명", high_price_limit=
     rotate_score = min(rotate_count / 25 * 25, 25)
 
     tech_score = 0
-    if close > ma20:
+    if pd.notna(ma20) and close > ma20:
         tech_score += 5
-    if close > ma60:
+    if pd.notna(ma60) and close > ma60:
         tech_score += 7
-    if close > ma120:
+    if pd.notna(ma120) and close > ma120:
         tech_score += 7
     if ret20 > 0:
         tech_score += 3
@@ -758,14 +678,17 @@ def liquid500_score_candidate(df, name, regime="장세불명", high_price_limit=
         regime_score = 5
 
     total_score = trading_score + rotate_score + tech_score + pullback_score + regime_score
-    if total_score >= 85:
-        grade = "A"
-    elif total_score >= 70:
-        grade = "B"
-    elif total_score >= 60:
-        grade = "C"
+    if strict:
+        if total_score >= 85:
+            grade = "A"
+        elif total_score >= 70:
+            grade = "B"
+        elif total_score >= 60:
+            grade = "C"
+        else:
+            grade = "D"
     else:
-        grade = "D"
+        grade = "완화"
 
     return {
         "종목": name,
@@ -785,92 +708,12 @@ def liquid500_score_candidate(df, name, regime="장세불명", high_price_limit=
     }
 
 
+def liquid500_score_candidate(df, name, regime="장세불명", high_price_limit=160000):
+    return score_candidate_core(df, name, regime, high_price_limit, strict=True)
+
+
 def relaxed_score_candidate(df, name, regime="장세불명", high_price_limit=160000):
-    """
-    엄격 필터에서 후보가 0개일 때 쓰는 완화 점수.
-    Colab처럼 일단 TOP50이 보이게 만드는 안전장치.
-    """
-    try:
-        if df is None or len(df) < 80:
-            return None
-        if liquid500_excluded(name):
-            return None
-        clean = df.dropna(subset=["close"]).copy()
-        if len(clean) < 60:
-            return None
-        # 지표가 NaN이어도 마지막 유효값 기준으로 처리
-        last = clean.iloc[-1]
-        price = float(last.get("close", 0))
-        if price <= 0 or price > high_price_limit:
-            return None
-
-        amount60 = float(last.get("amount_ma60", 0) or 0)
-        amount20 = float(last.get("amount_ma20", 0) or 0)
-        ret20 = float(last.get("ret20", 0) or 0)
-        ret60 = float(last.get("ret60", 0) or 0)
-        ret120 = float(last.get("ret120", 0) or 0)
-        pullback = float(last.get("pullback120", 0) or 0)
-        close = float(last.get("close", 0))
-        ma20 = float(last.get("ma20", np.nan))
-        ma60 = float(last.get("ma60", np.nan))
-        ma120 = float(last.get("ma120", np.nan))
-
-        trading_score = min(max(amount60, amount20) / 5_000_000_000 * 25, 25)
-
-        temp = clean.copy()
-        temp["r20"] = temp["close"].pct_change(20) * 100
-        recent = temp.tail(750)
-        rotate_count = int((recent["r20"] >= 8).sum()) if "r20" in recent.columns else 0
-        rotate_score = min(rotate_count / 20 * 25, 25)
-
-        tech_score = 0
-        if np.isfinite(ma20) and close > ma20: tech_score += 6
-        if np.isfinite(ma60) and close > ma60: tech_score += 7
-        if np.isfinite(ma120) and close > ma120: tech_score += 7
-        if ret20 > -3: tech_score += 3
-        if ret60 > -5: tech_score += 2
-        tech_score = min(tech_score, 25)
-
-        if -25 <= pullback <= -2:
-            pullback_score = 15
-        elif -35 <= pullback < -25:
-            pullback_score = 10
-        elif -2 < pullback <= 5:
-            pullback_score = 8
-        else:
-            pullback_score = 5
-
-        if "상승" in str(regime): regime_score = 8
-        elif "폭등" in str(regime): regime_score = 6
-        elif "횡보" in str(regime): regime_score = 7
-        elif "약세" in str(regime): regime_score = 4
-        elif "하락" in str(regime): regime_score = 2
-        else: regime_score = 5
-
-        total_score = trading_score + rotate_score + tech_score + pullback_score + regime_score
-        if total_score >= 85: grade = "A"
-        elif total_score >= 70: grade = "B"
-        elif total_score >= 60: grade = "C"
-        else: grade = "D"
-
-        return {
-            "종목": name,
-            "등급": grade,
-            "점수": round(total_score, 2),
-            "현재가": int(price),
-            "거래대금60억": round(amount60 / 100_000_000, 1),
-            "거래대금20억": round(amount20 / 100_000_000, 1),
-            "회전점수": round(rotate_score, 2),
-            "거래대금점수": round(trading_score, 2),
-            "기술점수": round(tech_score, 2),
-            "눌림점수": round(pullback_score, 2),
-            "눌림률": round(pullback, 2),
-            "20일수익률": round(ret20, 2),
-            "60일수익률": round(ret60, 2),
-            "120일수익률": round(ret120, 2)
-        }
-    except Exception:
-        return None
+    return score_candidate_core(df, name, regime, high_price_limit, strict=False)
 
 
 def adjust_new_buy_by_regime(new_buy_limit, regime):
@@ -891,177 +734,66 @@ def adjust_new_buy_by_regime(new_buy_limit, regime):
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def build_universe(asof_date, price_limit, max_codes):
-    """TOP50 계산 대상 유니버스 생성.
-
-    Streamlit 서버에서 pykrx의 get_market_ohlcv_by_ticker()가 빈 값으로
-    떨어지는 경우가 있어, 1차 스냅샷 방식 실패 시 2차 티커 리스트 방식으로
-    강제 유니버스를 만든다.
-    """
-    max_codes = int(max_codes)
-
-    debug = {
-        "KOSPI_rows": 0,
-        "KOSDAQ_rows": 0,
-        "merged_rows": 0,
+def build_universe_fdr(price_limit, max_codes):
+    diag = {
+        "engine": "FinanceDataReader",
+        "listing_rows": 0,
+        "market_filtered": 0,
         "price_filtered": 0,
-        "amount_filtered": 0,
+        "amount_or_size_sorted": 0,
         "final_universe": 0,
-        "fallback_used": False,
-        "KOSPI_ticker_list": 0,
-        "KOSDAQ_ticker_list": 0,
-        "fallback_selected": 0,
+        "error": ""
     }
+    try:
+        krx = load_krx_master_fdr()
+        diag["listing_rows"] = len(krx)
+        if len(krx) == 0:
+            raise RuntimeError("FDR StockListing KRX 0 rows")
+        df = krx.copy()
+        df = df[df["Market"].isin(["KOSPI", "KOSDAQ", "KONEX", "KRX"])]
+        # KONEX는 제외하고 싶으면 아래에서 자동으로 시총/거래대금 낮아서 밀림
+        diag["market_filtered"] = len(df)
 
-    rows = []
+        if "Close" in df.columns and df["Close"].sum() > 0:
+            df = df[(df["Close"] > 0) & (df["Close"] <= price_limit)]
+        diag["price_filtered"] = len(df)
 
-    # 1차: 시장 전체 스냅샷 방식
-    for market in ["KOSPI", "KOSDAQ"]:
-        try:
-            snap = stock.get_market_ohlcv_by_ticker(asof_date, market=market)
+        df = df[~df["Name"].apply(liquid500_excluded)]
 
-            if snap is None or len(snap) == 0:
-                continue
+        # Amount가 있으면 거래대금순, 없으면 시총/거래량 순
+        sort_cols = []
+        if "Amount" in df.columns and pd.to_numeric(df["Amount"], errors="coerce").fillna(0).sum() > 0:
+            sort_cols.append("Amount")
+        if "Marcap" in df.columns and pd.to_numeric(df["Marcap"], errors="coerce").fillna(0).sum() > 0:
+            sort_cols.append("Marcap")
+        if "Volume" in df.columns and pd.to_numeric(df["Volume"], errors="coerce").fillna(0).sum() > 0:
+            sort_cols.append("Volume")
 
-            snap = snap.reset_index()
+        if sort_cols:
+            df = df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+        diag["amount_or_size_sorted"] = len(df)
 
-            # pykrx 버전마다 첫 컬럼명이 티커/인덱스 등으로 달라질 수 있어 첫 컬럼을 Code로 통일
-            first_col = snap.columns[0]
-            snap = snap.rename(columns={first_col: "Code", "종가": "Close", "거래대금": "Amount"})
-
-            if "Code" not in snap.columns or "Close" not in snap.columns:
-                continue
-
-            if "Amount" not in snap.columns:
-                if "거래량" in snap.columns:
-                    snap["Amount"] = pd.to_numeric(snap["Close"], errors="coerce") * pd.to_numeric(snap["거래량"], errors="coerce")
-                else:
-                    snap["Amount"] = 0
-
-            snap["Code"] = snap["Code"].astype(str).str.zfill(6)
-            snap["Name"] = snap["Code"].apply(lambda c: stock.get_market_ticker_name(c))
-            snap["Market"] = market
-            snap["Close"] = pd.to_numeric(snap["Close"], errors="coerce")
-            snap["Amount"] = pd.to_numeric(snap["Amount"], errors="coerce").fillna(0)
-            snap = snap.dropna(subset=["Close"])
-
-            debug[f"{market}_rows"] = len(snap)
-            rows.append(snap[["Code", "Name", "Market", "Close", "Amount"]])
-
-        except Exception:
-            pass
-
-    universe = {}
-
-    if len(rows) > 0:
-        df = pd.concat(rows, ignore_index=True)
-        debug["merged_rows"] = len(df)
-
-        df = df[df["Close"] <= float(price_limit)].copy()
-        debug["price_filtered"] = len(df)
-
-        # 거래대금 필터는 후보가 너무 줄면 자동 완화
-        filtered = df[df["Amount"] >= 300_000_000].copy()
-        if len(filtered) < 80:
-            filtered = df[df["Amount"] >= 100_000_000].copy()
-        if len(filtered) < 80:
-            filtered = df[df["Amount"] >= 50_000_000].copy()
-        if len(filtered) < 80:
-            filtered = df.copy()
-
-        df = filtered
-        debug["amount_filtered"] = len(df)
-
-        df = df[~df["Name"].apply(liquid500_excluded)].copy()
-        df = df.sort_values("Amount", ascending=False).head(max_codes).copy()
-
+        df = df.head(int(max_codes)).copy()
         universe = dict(zip(df["Code"], df["Name"]))
 
-    # 2차 fallback: 스냅샷이 0개거나 결과가 너무 적으면 티커 리스트로 강제 생성
-    if len(universe) < 50:
-        debug["fallback_used"] = True
+    except Exception as e:
         universe = {}
+        diag["error"] = str(e)
 
-        try:
-            kospi_codes = stock.get_market_ticker_list(asof_date, market="KOSPI")
-        except Exception:
-            kospi_codes = []
-
-        try:
-            kosdaq_codes = stock.get_market_ticker_list(asof_date, market="KOSDAQ")
-        except Exception:
-            kosdaq_codes = []
-
-        kospi_codes = [str(c).zfill(6) for c in kospi_codes]
-        kosdaq_codes = [str(c).zfill(6) for c in kosdaq_codes]
-
-        debug["KOSPI_ticker_list"] = len(kospi_codes)
-        debug["KOSDAQ_ticker_list"] = len(kosdaq_codes)
-
-        # 회전주는 KOSDAQ 쪽 비중이 커서 KOSDAQ 65%, KOSPI 35%로 구성
-        kosdaq_quota = int(max_codes * 0.65)
-        kospi_quota = max_codes - kosdaq_quota
-
-        selected = kosdaq_codes[:kosdaq_quota] + kospi_codes[:kospi_quota]
-        debug["fallback_selected"] = len(selected)
-
-        for code in selected:
-            try:
-                name = stock.get_market_ticker_name(code)
-            except Exception:
-                name = code
-
-            if liquid500_excluded(name):
-                continue
-
-            universe[str(code).zfill(6)] = name
-
-    # 강제 포함 종목
     for code, name in FORCE_UNIVERSE.items():
         universe[str(code).zfill(6)] = name
 
-    debug["final_universe"] = len(universe)
-
-    return universe, debug
-
-    df = pd.concat(rows, ignore_index=True)
-    debug["merged_rows"] = len(df)
-
-    # 1차: 매수 가능 가격대
-    df = df[df["Close"] <= float(price_limit)].copy()
-    debug["price_filtered"] = len(df)
-
-    # 2차: 너무 빡세면 후보가 0이 되므로 거래대금 필터 완화
-    amount_cut = 300_000_000
-    filtered = df[df["Amount"] >= amount_cut].copy()
-    if len(filtered) < 80:
-        amount_cut = 100_000_000
-        filtered = df[df["Amount"] >= amount_cut].copy()
-    if len(filtered) < 80:
-        filtered = df.copy()
-
-    df = filtered
-    debug["amount_filtered"] = len(df)
-
-    df = df[~df["Name"].apply(liquid500_excluded)].copy()
-    df = df.sort_values("Amount", ascending=False).head(int(max_codes)).copy()
-
-    universe = dict(zip(df["Code"], df["Name"]))
-    for code, name in FORCE_UNIVERSE.items():
-        universe[str(code).zfill(6)] = name
-
-    debug["final_universe"] = len(universe)
-    return universe, debug
+    diag["final_universe"] = len(universe)
+    return universe, diag
 
 # =====================================================
 # 화면
 # =====================================================
 
 st.title("📈 매직스플릿 관리기 안정형")
-st.caption(APP_VERSION)
+st.caption(f"{APP_VERSION}")
 st.caption("요양원 목록은 Google Sheets에 저장됩니다. 서버가 재시작돼도 목록은 유지됩니다.")
 
-# 연결 상태 확인
 try:
     sheet = get_spreadsheet()
     get_ws("요양원목록", NURSING_COLUMNS)
@@ -1081,10 +813,7 @@ menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP
 
 if menu == "1. 요양원":
     st.header("1. 요양원")
-
-    asof = find_valid_krx_date()
-    krx = load_krx_master(asof)
-
+    krx = load_krx_master_fdr()
     df = load_nursing_df()
     nursing_count = int((df["상태"] == "요양원").sum()) if len(df) else 0
     grad_count = int((df["상태"] == "졸업후재진입금지").sum()) if len(df) else 0
@@ -1099,16 +828,11 @@ if menu == "1. 요양원":
         st.info("등록된 요양원 종목이 없습니다.")
     else:
         st.dataframe(df, use_container_width=True)
-        st.download_button(
-            "요양원 목록 CSV 다운로드",
-            data=df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="magic_split_nursing_list.csv",
-            mime="text/csv"
-        )
+        st.download_button("요양원 목록 CSV 다운로드", data=df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_nursing_list.csv", mime="text/csv")
 
     st.divider()
     st.subheader("요양원 추가")
-    add_text = st.text_area("추가할 종목명", placeholder="예: 금호석유화학, 동진쎄미켐, 성광벤드 014620", height=100)
+    add_text = st.text_area("추가할 종목명", placeholder="예: 금호석유화학, 동진쎄미켐, 성광벤드 014620, 태광 023160", height=100)
     if st.button("요양원 추가", type="primary"):
         names = normalize_name_text(add_text)
         if len(names) == 0:
@@ -1123,15 +847,9 @@ if menu == "1. 요양원":
                     not_found.append(name)
                     continue
                 rows.append({
-                    "코드": found["코드"],
-                    "종목": found["종목"],
-                    "입력명": found["입력명"],
-                    "상태": "요양원",
-                    "차수": 5,
-                    "등록일": today_str(),
-                    "졸업일": "",
-                    "재진입금지해제일": "",
-                    "메모": "자동 5차 요양원"
+                    "코드": found["코드"], "종목": found["종목"], "입력명": found["입력명"],
+                    "상태": "요양원", "차수": 5, "등록일": today_str(), "졸업일": "",
+                    "재진입금지해제일": "", "메모": "자동 5차 요양원"
                 })
             if len(rows) == 0:
                 st.error("추가된 종목 0개")
@@ -1151,7 +869,7 @@ if menu == "1. 요양원":
 
     st.divider()
     st.subheader("요양원 졸업 처리")
-    grad_text = st.text_area("졸업 처리할 종목명", placeholder="예: 금호석유화학, 동진쎄미켐", height=80)
+    grad_text = st.text_area("졸업 처리할 종목명", placeholder="예: 금호석유화학, 동진쎄미켐, 태광 023160", height=80)
     if st.button("요양원 졸업 처리"):
         names = normalize_name_text(grad_text)
         if len(names) == 0:
@@ -1203,7 +921,6 @@ if menu == "1. 요양원":
 
 elif menu == "2. 운영판단기":
     st.header("2. 운영판단기")
-
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
 
@@ -1261,69 +978,174 @@ elif menu == "2. 운영판단기":
 
 elif menu == "3. TOP50":
     st.header("3. TOP50")
-    st.caption("v6_SHEET_TOP50_VIEWER")
+    st.caption(f"TOP50 엔진: {APP_VERSION}")
+    st.caption("pykrx가 아니라 FinanceDataReader로 계산합니다. Colab 업로드 필요 없습니다.")
 
-    st.warning(
-        "Streamlit Cloud에서 pykrx/KRX 전체 종목 데이터가 0으로 내려와서, "
-        "앱 안에서 TOP50 실시간 생성은 막아두었습니다. "
-        "Colab에서 만든 TOP50 CSV를 업로드하면 Google Sheets의 TOP50 탭에 저장하고 여기서 바로 볼 수 있습니다."
-    )
+    nursing_df = load_nursing_df()
+    auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
 
-    st.subheader("현재 Google Sheets TOP50")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        cash_text = st.text_input("예수금", value="849만", key="top_cash")
+    with col2:
+        cost_text = st.text_input("매입금액", value="7607만", key="top_cost")
+    with col3:
+        unreal_text = st.text_input("평가손익", value="-915만", key="top_unreal")
 
-    top_ws = get_ws("TOP50", TOP50_COLUMNS)
-    top_df = read_worksheet_df(top_ws, TOP50_COLUMNS)
+    col4, col5, col6, col7, col8 = st.columns(5)
+    with col4:
+        total_holdings = st.number_input("총 보유종목수", min_value=0, value=126, step=1, key="top_total")
+    with col5:
+        nursing_count = st.number_input("요양원 종목수", min_value=0, value=auto_nursing_count, step=1, key="top_nursing")
+    with col6:
+        target_holdings = st.number_input("목표종목수 0이면 자동", min_value=0, value=0, step=1, key="top_target")
+    with col7:
+        used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=0, step=1, key="top_slot")
+    with col8:
+        max_codes = st.number_input("계산 종목수", min_value=50, max_value=700, value=300, step=50)
 
-    col_a, col_b = st.columns(2)
+    st.info("처음엔 300개로 돌려보고, 잘 되면 500~700으로 올리세요. 무료 서버라 700개는 오래 걸릴 수 있습니다.")
 
-    with col_a:
-        if st.button("TOP50 새로고침", type="primary"):
-            st.cache_data.clear()
-            st.rerun()
+    if st.button("TOP50 생성", type="primary"):
+        cash = parse_won(cash_text)
+        cost = parse_won(cost_text)
+        unrealized = parse_won(unreal_text)
+        op = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
 
-    with col_b:
-        st.caption("Colab 결과 CSV를 올리면 TOP50 시트가 교체됩니다.")
+        target_amount = op["기본매수금액"]
+        price_limit = op["허용상한"]
+        new_buy_limit = op["신규매수가능개수"]
+        mode_name = op["운영모드"]
 
-    uploaded = st.file_uploader("Colab TOP50 CSV 업로드", type=["csv"])
+        exclude_codes = get_nursing_exclude_codes()
+        asof_date = find_valid_krx_date()
+        regime = ms_regime_asof_from_etf(asof_date)
+        original_new_buy_limit = new_buy_limit
+        new_buy_limit, regime_buy_comment = adjust_new_buy_by_regime(new_buy_limit, regime)
 
-    if uploaded is not None:
-        try:
-            uploaded_df = pd.read_csv(uploaded)
+        st.write("기준일:", asof_date)
+        st.write("장세:", regime)
+        st.write("운영모드:", mode_name)
+        st.write("신규매수:", original_new_buy_limit, "→", new_buy_limit, "/", regime_buy_comment)
+        st.write("요양원/재진입금지 제외 종목수:", len(exclude_codes))
 
-            for c in TOP50_COLUMNS:
-                if c not in uploaded_df.columns:
-                    uploaded_df[c] = ""
+        universe, universe_diag = build_universe_fdr(price_limit, int(max_codes))
+        codes = list(universe.keys())
+        st.write("유니버스 진단:", universe_diag)
+        st.write("계산 대상 종목수:", len(codes))
 
-            uploaded_df = uploaded_df[TOP50_COLUMNS].copy()
-            save_top50_df(uploaded_df)
+        data_start = (pd.to_datetime(asof_date) - pd.DateOffset(days=1400)).strftime("%Y%m%d")
+        rows = []
+        relaxed_rows = []
+        diag = {
+            "요양원제외": 0,
+            "가격데이터없음": 0,
+            "지표계산실패": 0,
+            "엄격점수탈락": 0,
+            "엄격수량탈락": 0,
+            "엄격후보통과": 0,
+            "완화후보통과": 0,
+            "예외": 0,
+        }
 
-            st.success(f"TOP50 업로드/저장 완료: {len(uploaded_df)}개")
-            st.dataframe(uploaded_df, use_container_width=True)
+        prog = st.progress(0)
+        status_box = st.empty()
+
+        for idx, code in enumerate(codes, 1):
+            code = str(code).zfill(6)
+            if code in exclude_codes:
+                diag["요양원제외"] += 1
+                prog.progress(idx / max(len(codes), 1))
+                continue
+            name = universe.get(code, "")
+            status_box.text(f"계산 중: {idx}/{len(codes)} {name}")
+            try:
+                raw_df = get_ohlcv_fdr_cached(code, data_start, asof_date)
+                if raw_df is None or len(raw_df) == 0:
+                    diag["가격데이터없음"] += 1
+                    prog.progress(idx / max(len(codes), 1))
+                    continue
+                try:
+                    df = ms_prepare_indicator_df(raw_df)
+                except Exception:
+                    diag["지표계산실패"] += 1
+                    prog.progress(idx / max(len(codes), 1))
+                    continue
+
+                info = liquid500_score_candidate(df, name, regime=regime, high_price_limit=price_limit)
+                if info is not None:
+                    price = info["현재가"]
+                    shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
+                    if buy_status == "OK":
+                        info["코드"] = code
+                        info["추천수량"] = shares
+                        info["실제매수금액"] = buy_amount
+                        info["목표매수금액"] = target_amount
+                        info["허용상한"] = price_limit
+                        info["장세"] = regime
+                        info["운영모드"] = mode_name
+                        info["장세매수코멘트"] = regime_buy_comment
+                        rows.append(info)
+                        diag["엄격후보통과"] += 1
+                    else:
+                        diag["엄격수량탈락"] += 1
+                else:
+                    diag["엄격점수탈락"] += 1
+                    relaxed = relaxed_score_candidate(df, name, regime=regime, high_price_limit=price_limit)
+                    if relaxed is not None:
+                        price = relaxed["현재가"]
+                        shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
+                        if buy_status == "OK":
+                            relaxed["코드"] = code
+                            relaxed["추천수량"] = shares
+                            relaxed["실제매수금액"] = buy_amount
+                            relaxed["목표매수금액"] = target_amount
+                            relaxed["허용상한"] = price_limit
+                            relaxed["장세"] = regime
+                            relaxed["운영모드"] = mode_name
+                            relaxed["장세매수코멘트"] = "완화후보"
+                            relaxed_rows.append(relaxed)
+                            diag["완화후보통과"] += 1
+            except Exception:
+                diag["예외"] += 1
+            prog.progress(idx / max(len(codes), 1))
+            time.sleep(0.02)
+
+        status_box.empty()
+        st.write("탈락 진단:", diag)
+        st.write("엄격 후보 수:", len(rows))
+        st.write("완화 후보 수:", len(relaxed_rows))
+
+        use_relaxed = False
+        if len(rows) > 0:
+            result_df = pd.DataFrame(rows)
+        elif len(relaxed_rows) > 0:
+            result_df = pd.DataFrame(relaxed_rows)
+            use_relaxed = True
+            st.warning("엄격 후보가 0개라서 완화 후보를 표시합니다.")
+        else:
+            st.error("후보 없음. 위 진단에서 listing_rows/가격데이터없음 숫자를 확인해야 합니다.")
             st.stop()
 
-        except Exception as e:
-            st.error("CSV 업로드 실패")
-            st.exception(e)
+        result_df = result_df.sort_values(["점수", "거래대금점수", "회전점수", "기술점수"], ascending=False).reset_index(drop=True)
+        result_df["순위"] = np.arange(1, len(result_df) + 1)
 
-    if len(top_df) == 0:
-        st.info("아직 TOP50 시트에 저장된 후보가 없습니다. Colab에서 만든 TOP50 CSV를 위에 업로드하세요.")
-    else:
-        st.success(f"저장된 TOP50 {len(top_df)}개를 불러왔습니다.")
-        st.dataframe(top_df, use_container_width=True)
+        if use_relaxed:
+            result_df["오늘매수"] = "완화후보"
+        elif new_buy_limit <= 0:
+            result_df["오늘매수"] = "참고만"
+        else:
+            result_df["오늘매수"] = np.where(result_df["순위"] <= new_buy_limit, "매수가능", "대기")
 
-        st.download_button(
-            "현재 TOP50 CSV 다운로드",
-            data=top_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="magic_split_top50_from_sheets.csv",
-            mime="text/csv"
-        )
-
-    with st.expander("왜 앱에서 TOP50 생성을 껐냐"):
-        st.markdown("""
-- 방금 진단에서 `KOSPI_rows`, `KOSDAQ_rows`, `ticker_list`가 전부 0이면 Streamlit 서버에서 KRX/pykrx 데이터가 안 내려오는 상태입니다.
-- 이 상태에서는 앱 코드를 더 완화해도 계산할 종목 자체가 0개라 후보가 안 나옵니다.
-- Colab에서는 같은 pykrx가 되는 경우가 많으니, **TOP50 계산은 Colab**, **요양원/운영판단/결과조회는 앱**으로 나누는 게 안정적입니다.
-""")
+        top50 = result_df[TOP50_COLUMNS].head(50).copy()
+        save_top50_df(top50)
+        st.success("TOP50 생성 완료. Google Sheets의 TOP50 탭에도 저장했습니다.")
+        if new_buy_limit <= 0 and not use_relaxed:
+            st.warning("현재 신규매수 0개. 아래 후보는 참고용입니다.")
+        if use_relaxed:
+            st.warning("완화후보는 필터를 낮춘 참고용입니다. 실제 매수는 차트/보유 여부 확인 후 판단.")
+        st.dataframe(top50, use_container_width=True)
+        st.download_button("TOP50 CSV 다운로드", data=top50.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_top50_{asof_date}.csv", mime="text/csv")
 
 # =====================================================
 # 4. 도움말
@@ -1331,12 +1153,16 @@ elif menu == "3. TOP50":
 
 else:
     st.header("4. 도움말")
-    st.markdown("""
-### 저장 구조
+    st.markdown(f"""
+### 버전
 
-- 요양원 목록은 앱 서버가 아니라 **Google Sheets**에 저장됩니다.
-- 서버가 재시작되거나 재배포돼도 요양원 목록은 유지됩니다.
-- 삭제 기능은 일부러 넣지 않았습니다. 실수 방지를 위해 **졸업 처리 + 변경로그** 구조로 갑니다.
+`{APP_VERSION}`
+
+### 이번 버전 핵심
+
+- Colab 없이 Streamlit 안에서 TOP50을 계산합니다.
+- pykrx가 아니라 `FinanceDataReader`를 씁니다.
+- KRX 스냅샷이 0개로 나와도 FDR의 KRX 상장목록과 개별 OHLCV로 계산합니다.
 
 ### 사용 순서
 
@@ -1344,14 +1170,7 @@ else:
 2. 운영판단기에서 오늘 모드 확인
 3. TOP50에서 후보 출력
 
-### 요양원 규칙
+### 주의
 
-- 현재 요양원: TOP50에서 무조건 제외
-- 졸업후재진입금지: 해제일 전까지 TOP50 제외
-- 해제일 이후: 다시 점수 통과하면 TOP50에 등장 가능
-
-### TOP50 계산이 느릴 때
-
-무료 서버에서는 계산 종목수를 150~250으로 두고 테스트하세요.
-캐시가 쌓이면 같은 날 재실행은 더 빨라집니다.
+무료 Streamlit 서버에서는 700개 계산이 오래 걸릴 수 있습니다. 처음에는 300개로 테스트하세요.
 """)
