@@ -1,7 +1,7 @@
 # =====================================================
 # 매직스플릿 Streamlit 안정형 앱
-# v7_STREAMLIT_FDR_ENGINE_20260614
-# 핵심: pykrx 실시간 유니버스 0개 문제를 피하기 위해 FinanceDataReader 기반으로 TOP50 계산
+# v8_COLAB_STYLE_FDR_HYBRID_20260614
+# 핵심: FinanceDataReader 기반 + Colab TOP50 스타일 후보풀 보강
 # 저장소: Google Sheets
 # 메뉴: 1. 요양원 2. 운영판단기 3. TOP50 4. 도움말
 # =====================================================
@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v7_STREAMLIT_FDR_ENGINE_20260614"
+APP_VERSION = "v8_COLAB_STYLE_FDR_HYBRID_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -61,6 +61,61 @@ MANUAL_CODE_MAP = {
 FORCE_UNIVERSE = {
     "014620": "성광벤드",
     "023160": "태광",
+}
+
+# Colab에서 이미 좋게 잡혔던 TOP50을 "강제 매수"가 아니라 "반드시 계산 대상"으로 포함한다.
+# 날짜가 지나도 현재 FDR 가격으로 다시 점수 계산하므로, 정렬/점수는 매번 새로 바뀐다.
+COLAB_STYLE_SEED_UNIVERSE = {
+    "089030": "테크윙",
+    "080220": "제주반도체",
+    "001740": "SK네트웍스",
+    "055550": "신한지주",
+    "178320": "서진시스템",
+    "067310": "하나마이크론",
+    "085620": "미래에셋생명",
+    "001820": "삼화콘덴서",
+    "005290": "동진쎄미켐",
+    "007810": "코리아써키트",
+    "003490": "대한항공",
+    "204320": "HL만도",
+    "183300": "코미코",
+    "417840": "저스템",
+    "064290": "인텍플러스",
+    "388790": "라이콤",
+    "007390": "네이처셀",
+    "161390": "한국타이어앤테크놀로지",
+    "051600": "한전KPS",
+    "242040": "나무기술",
+    "052710": "아모텍",
+    "457370": "한켐",
+    "030000": "제일기획",
+    "005090": "SGC에너지",
+    "098460": "고영",
+    "043260": "성호전자",
+    "319400": "현대무벡스",
+    "086790": "하나금융지주",
+    "166090": "하나머티리얼즈",
+    "271560": "오리온",
+    "122640": "예스티",
+    "336370": "솔루스첨단소재",
+    "078930": "GS",
+    "033640": "네패스",
+    "144960": "뉴파워프라즈마",
+    "000720": "현대건설",
+    "093370": "후성",
+    "089970": "브이엠",
+    "066430": "아이로보틱스",
+    "031980": "피에스케이홀딩스",
+    "074600": "원익QnC",
+    "005950": "이수화학",
+    "170920": "엘티씨",
+    "001450": "현대해상",
+    "252990": "샘씨엔에스",
+    "200470": "에이팩트",
+    "420770": "기가비스",
+    "032640": "LG유플러스",
+    "281820": "케이씨텍",
+    "347850": "디앤디파마텍",
 }
 
 SCOPES = [
@@ -736,52 +791,107 @@ def adjust_new_buy_by_regime(new_buy_limit, regime):
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def build_universe_fdr(price_limit, max_codes):
     diag = {
-        "engine": "FinanceDataReader",
+        "engine": "FinanceDataReader + ColabStyleSeed",
         "listing_rows": 0,
         "market_filtered": 0,
         "price_filtered": 0,
-        "amount_or_size_sorted": 0,
+        "excluded_name_filtered": 0,
+        "sort_proxy": "",
+        "seed_candidates": len(COLAB_STYLE_SEED_UNIVERSE),
+        "seed_included": 0,
+        "listing_included": 0,
         "final_universe": 0,
         "error": ""
     }
+
+    max_codes = int(max_codes)
+    universe = {}
+
+    def add_code(code, name, source="listing"):
+        code = str(code).replace(".0", "").zfill(6)
+        name = str(name)
+        if code in universe:
+            return False
+        if liquid500_excluded(name):
+            return False
+        universe[code] = name
+        if source == "seed":
+            diag["seed_included"] += 1
+        else:
+            diag["listing_included"] += 1
+        return True
+
+    # 1) Colab에서 이미 검증된 후보풀은 반드시 계산 대상으로 먼저 넣는다.
+    #    단, 여기서 바로 TOP50 확정이 아니라 아래 루프에서 현재 데이터로 다시 점수 계산한다.
+    for code, name in COLAB_STYLE_SEED_UNIVERSE.items():
+        if len(universe) >= max_codes:
+            break
+        add_code(code, name, source="seed")
+
+    # 2) FDR 상장목록에서 추가 후보를 만든다.
     try:
         krx = load_krx_master_fdr()
         diag["listing_rows"] = len(krx)
         if len(krx) == 0:
             raise RuntimeError("FDR StockListing KRX 0 rows")
+
         df = krx.copy()
-        df = df[df["Market"].isin(["KOSPI", "KOSDAQ", "KONEX", "KRX"])]
-        # KONEX는 제외하고 싶으면 아래에서 자동으로 시총/거래대금 낮아서 밀림
+
+        # Market 컬럼이 제대로 있으면 KOSPI/KOSDAQ 위주. 전부 KRX로만 오면 그대로 사용.
+        if "Market" in df.columns:
+            market_values = set(df["Market"].astype(str).unique())
+            if len(market_values.intersection({"KOSPI", "KOSDAQ"})) > 0:
+                df = df[df["Market"].isin(["KOSPI", "KOSDAQ"])]
         diag["market_filtered"] = len(df)
 
-        if "Close" in df.columns and df["Close"].sum() > 0:
+        for c in ["Close", "Amount", "Marcap", "Volume"]:
+            if c not in df.columns:
+                df[c] = 0
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+        # 가격 데이터가 상장목록에 있으면 가격 필터 적용. 없으면 개별 OHLCV에서 걸러진다.
+        if df["Close"].sum() > 0:
             df = df[(df["Close"] > 0) & (df["Close"] <= price_limit)]
         diag["price_filtered"] = len(df)
 
+        before_excl = len(df)
         df = df[~df["Name"].apply(liquid500_excluded)]
+        diag["excluded_name_filtered"] = before_excl - len(df)
 
-        # Amount가 있으면 거래대금순, 없으면 시총/거래량 순
-        sort_cols = []
-        if "Amount" in df.columns and pd.to_numeric(df["Amount"], errors="coerce").fillna(0).sum() > 0:
-            sort_cols.append("Amount")
-        if "Marcap" in df.columns and pd.to_numeric(df["Marcap"], errors="coerce").fillna(0).sum() > 0:
-            sort_cols.append("Marcap")
-        if "Volume" in df.columns and pd.to_numeric(df["Volume"], errors="coerce").fillna(0).sum() > 0:
-            sort_cols.append("Volume")
+        # Colab은 거래대금 영향이 크므로 가능한 한 거래대금/거래량 proxy로 정렬한다.
+        # Amount가 없으면 Close*Volume, 그것도 없으면 Volume, 마지막으로 Marcap.
+        if df["Amount"].sum() > 0:
+            df["SortProxy"] = df["Amount"]
+            diag["sort_proxy"] = "Amount"
+        elif (df["Close"] * df["Volume"]).sum() > 0:
+            df["SortProxy"] = df["Close"] * df["Volume"]
+            diag["sort_proxy"] = "Close*Volume"
+        elif df["Volume"].sum() > 0:
+            df["SortProxy"] = df["Volume"]
+            diag["sort_proxy"] = "Volume"
+        elif df["Marcap"].sum() > 0:
+            df["SortProxy"] = df["Marcap"]
+            diag["sort_proxy"] = "Marcap"
+        else:
+            df["SortProxy"] = 0
+            diag["sort_proxy"] = "original_order"
 
-        if sort_cols:
-            df = df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
-        diag["amount_or_size_sorted"] = len(df)
+        df = df.sort_values("SortProxy", ascending=False).copy()
 
-        df = df.head(int(max_codes)).copy()
-        universe = dict(zip(df["Code"], df["Name"]))
+        for _, r in df.iterrows():
+            if len(universe) >= max_codes:
+                break
+            add_code(r["Code"], r["Name"], source="listing")
 
     except Exception as e:
-        universe = {}
         diag["error"] = str(e)
 
+    # 3) 사용자가 따로 넣은 강제 계산 종목
     for code, name in FORCE_UNIVERSE.items():
-        universe[str(code).zfill(6)] = name
+        if len(universe) >= max_codes and str(code).zfill(6) not in universe:
+            # max를 넘더라도 수동 강제종목은 넣는다.
+            pass
+        add_code(code, name, source="seed")
 
     diag["final_universe"] = len(universe)
     return universe, diag
@@ -979,7 +1089,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("pykrx가 아니라 FinanceDataReader로 계산합니다. Colab 업로드 필요 없습니다.")
+    st.caption("FDR로 계산하되, Colab TOP50 스타일 후보풀을 먼저 포함해서 상위 후보가 덜 흔들리게 만든 v8입니다.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
@@ -1004,7 +1114,7 @@ elif menu == "3. TOP50":
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=50, max_value=700, value=300, step=50)
 
-    st.info("처음엔 300개로 돌려보고, 잘 되면 500~700으로 올리세요. 무료 서버라 700개는 오래 걸릴 수 있습니다.")
+    st.info("v8은 Colab식 후보풀 50개를 먼저 계산하고, 나머지는 FDR 거래대금/거래량 후보로 채웁니다. 처음엔 300개, 괜찮으면 500~700으로 올리세요.")
 
     if st.button("TOP50 생성", type="primary"):
         cash = parse_won(cash_text)
@@ -1162,7 +1272,8 @@ else:
 
 - Colab 없이 Streamlit 안에서 TOP50을 계산합니다.
 - pykrx가 아니라 `FinanceDataReader`를 씁니다.
-- KRX 스냅샷이 0개로 나와도 FDR의 KRX 상장목록과 개별 OHLCV로 계산합니다.
+- v7과 달리 Colab TOP50 스타일 후보풀을 먼저 계산 대상에 포함합니다.
+- 포함된 후보도 현재 데이터로 다시 점수 계산하므로, 무조건 고정 순위가 아닙니다.
 
 ### 사용 순서
 
