@@ -94,7 +94,10 @@ universe_domain = "googleapis.com"
 def get_gspread_client():
     require_secrets()
     service_account_info = dict(st.secrets["gcp_service_account"])
-
+if "private_key" in service_account_info:
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    service_account_info["private_key"] = service_account_info["private_key"].strip()
+    
     credentials = Credentials.from_service_account_info(
         service_account_info,
         scopes=SCOPES
