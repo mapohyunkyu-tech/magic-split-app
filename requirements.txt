@@ -1,10 +1,10 @@
 streamlit
 pandas
 numpy
+setuptools
 pykrx
 finance-datareader
 gspread
 google-auth
 openpyxl
 requests
-setuptools
