@@ -1,7 +1,10 @@
-streamlit>=1.35.0
-pandas>=2.0.0
-numpy>=1.24.0
-pykrx>=1.0.45
-gspread>=6.0.0
-google-auth>=2.0.0
-openpyxl>=3.1.0
+streamlit
+pandas
+numpy
+pykrx
+finance-datareader
+gspread
+google-auth
+openpyxl
+requests
+setuptools
