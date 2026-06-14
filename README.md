@@ -1,12 +1,5 @@
-# Magic Split v14 REAL FULL MARKET PULLBACK FILTER
+# Magic Split v15 Entry Decision
 
-- 전체시장 FDR 스캔
-- 바이오/제약성 종목 제외 강화 유지
-- 과열주 감점/제외
-- 눌림후보 우대
-- Google Sheets 저장 유지
-
-업로드 파일:
-- app.py
-- requirements.txt
-- runtime.txt
+- v14 실전 눌림후보형 기반
+- 14:30 이후 신규 진입 판단용 컬럼 추가
+- 최종판정 / 판정사유 / 당일등락률 / 갭상승률 / 추격주의여부 / 요양원여부 추가

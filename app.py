@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v14_REAL_FULL_MARKET_PULLBACK_FILTER_20260614"
+APP_VERSION = "v15_ENTRY_DECISION_1430_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -40,9 +40,10 @@ LOG_COLUMNS = [
 ]
 
 TOP50_COLUMNS = [
-    "순위", "오늘매수", "코드", "종목", "등급", "점수",
+    "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
-    "매수상태", "과열상태", "그룹", "거래대금60억", "눌림률", "20일수익률", "60일수익률",
+    "매수상태", "과열상태", "추격주의여부", "당일등락률", "갭상승률", "요양원여부",
+    "그룹", "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
 ]
@@ -2799,6 +2800,85 @@ def calc_magic_buy_amount(price, target_amount):
         return 0, 0, "매수불가"
     return int(shares), int(amount), "OK"
 
+
+def calc_today_gap_metrics(indicator_df):
+    """마지막 거래일 기준 당일 등락률/갭상승률 계산."""
+    try:
+        df = indicator_df.dropna(subset=["close"]).copy()
+        if len(df) < 2:
+            return 0.0, 0.0
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        prev_close = float(prev["close"])
+        close = float(last["close"])
+        if prev_close <= 0:
+            return 0.0, 0.0
+        day_change = (close / prev_close - 1) * 100
+        if "open" in df.columns and pd.notna(last.get("open", np.nan)):
+            open_price = float(last["open"])
+            gap_change = (open_price / prev_close - 1) * 100
+        else:
+            gap_change = 0.0
+        return round(day_change, 2), round(gap_change, 2)
+    except Exception:
+        return 0.0, 0.0
+
+
+def judge_final_entry(row):
+    """14:30 이후 실제 신규 진입 가능 여부를 한 줄로 판정."""
+    reasons = []
+    critical = False
+
+    mode = str(row.get("운영모드", ""))
+    today_buy = str(row.get("오늘매수", ""))
+    buy_state = str(row.get("매수상태", ""))
+    heat_state = str(row.get("과열상태", ""))
+
+    try:
+        day_pct = float(row.get("당일등락률", 0) or 0)
+    except Exception:
+        day_pct = 0.0
+    try:
+        gap_pct = float(row.get("갭상승률", 0) or 0)
+    except Exception:
+        gap_pct = 0.0
+
+    if mode not in ["정상운용", "제한매수모드"]:
+        reasons.append("운영모드 매수중단")
+        critical = True
+
+    if today_buy != "매수가능":
+        reasons.append(f"오늘매수 {today_buy}")
+
+    if buy_state not in ["OK", "눌림후보"]:
+        reasons.append(f"상태 {buy_state}")
+        if buy_state in ["추격주의", "관찰주의"]:
+            critical = True
+
+    if ("추격" in heat_state) or ("과열" in heat_state):
+        reasons.append(heat_state)
+        critical = True
+
+    if day_pct >= 7:
+        reasons.append(f"당일급등 {day_pct}%")
+        critical = True
+
+    if gap_pct >= 5:
+        reasons.append(f"갭상승 {gap_pct}%")
+        critical = True
+
+    if day_pct <= -7:
+        reasons.append(f"당일급락 {day_pct}%")
+        critical = True
+
+    if not reasons:
+        return "진입가능", "조건통과"
+
+    if critical:
+        return "금지", " / ".join(reasons)
+
+    return "대기", " / ".join(reasons)
+
 # =====================================================
 # FinanceDataReader 데이터 엔진
 # =====================================================
@@ -3755,8 +3835,14 @@ elif menu == "3. TOP50":
                             info["매수상태"] = "추격주의"
                         elif heat_status in ["깊은하락주의", "약세주의"]:
                             info["매수상태"] = "관찰주의"
+                        elif heat_status == "눌림후보":
+                            info["매수상태"] = "눌림후보"
                         else:
                             info["매수상태"] = "OK"
+                        day_pct, gap_pct = calc_today_gap_metrics(df)
+                        info["당일등락률"] = day_pct
+                        info["갭상승률"] = gap_pct
+                        info["요양원여부"] = "N"
                         info["추천수량"] = shares
                         info["실제매수금액"] = buy_amount
                         info["목표매수금액"] = target_amount
@@ -3785,8 +3871,14 @@ elif menu == "3. TOP50":
                                 relaxed["매수상태"] = "추격주의"
                             elif heat_status in ["깊은하락주의", "약세주의"]:
                                 relaxed["매수상태"] = "관찰주의"
+                            elif heat_status == "눌림후보":
+                                relaxed["매수상태"] = "눌림후보"
                             else:
                                 relaxed["매수상태"] = "OK"
+                            day_pct, gap_pct = calc_today_gap_metrics(df)
+                            relaxed["당일등락률"] = day_pct
+                            relaxed["갭상승률"] = gap_pct
+                            relaxed["요양원여부"] = "N"
                             relaxed["추천수량"] = shares
                             relaxed["실제매수금액"] = buy_amount
                             relaxed["목표매수금액"] = target_amount
@@ -3817,8 +3909,8 @@ elif menu == "3. TOP50":
             st.error("후보 없음. 위 진단에서 listing_rows/가격데이터없음 숫자를 확인해야 합니다.")
             st.stop()
 
-        # 실전 정렬: OK/눌림후보를 우선하고 추격주의/관찰주의는 뒤로 보낸다.
-        result_df["매수우선값"] = result_df["매수상태"].map({"OK": 3, "관찰주의": 1, "추격주의": 0}).fillna(2)
+        # 실전 정렬: 눌림후보/OK를 우선하고 추격주의/관찰주의는 뒤로 보낸다.
+        result_df["매수우선값"] = result_df["매수상태"].map({"눌림후보": 4, "OK": 3, "관찰주의": 1, "추격주의": 0}).fillna(2)
         result_df = result_df.sort_values(
             ["매수우선값", "점수", "거래대금점수", "회전점수", "기술점수", "모멘텀점수"],
             ascending=[False, False, False, False, False, False]
@@ -3830,12 +3922,25 @@ elif menu == "3. TOP50":
         elif new_buy_limit <= 0:
             result_df["오늘매수"] = "참고만"
         else:
-            buyable_mask = (result_df["순위"] <= new_buy_limit) & (result_df["매수상태"] == "OK")
+            buyable_mask = (result_df["순위"] <= new_buy_limit) & (result_df["매수상태"].isin(["OK", "눌림후보"]))
             result_df["오늘매수"] = np.where(
                 result_df["매수상태"] == "추격주의",
                 "추격주의",
                 np.where(result_df["매수상태"] == "관찰주의", "관찰주의", np.where(buyable_mask, "매수가능", "대기"))
             )
+
+        result_df["추격주의여부"] = np.where(
+            result_df["매수상태"].astype(str).str.contains("추격|과열", regex=True, na=False)
+            | result_df["과열상태"].astype(str).str.contains("추격|과열", regex=True, na=False),
+            "Y",
+            "N"
+        )
+        if "요양원여부" not in result_df.columns:
+            result_df["요양원여부"] = "N"
+
+        final_judgements = result_df.apply(judge_final_entry, axis=1)
+        result_df["최종판정"] = [x[0] for x in final_judgements]
+        result_df["판정사유"] = [x[1] for x in final_judgements]
 
         for c in TOP50_COLUMNS:
             if c not in result_df.columns:
