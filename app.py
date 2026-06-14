@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v12_REAL_FULL_MARKET_FDR_20260614"
+APP_VERSION = "v13_REAL_FULL_MARKET_BIO_FILTER_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3103,13 +3103,70 @@ def ms_regime_asof_from_etf(asof_date):
         return "장세불명"
 
 
+# =====================================================
+# v13: 숨은 바이오/제약/헬스케어 필터
+# =====================================================
+
+# 이름에 '바이오'가 없어도 실제로 제약/신약/세포/진단/의료AI/덴탈/미용의료 쪽이면 제외한다.
+# 너무 넓은 단어(예: '셀', '레이')는 오탐이 많아서 일부는 정확한 종목명/포함명으로만 처리한다.
+BIO_EXCLUDE_KEYWORDS = [
+    "제약", "약품", "의약", "신약", "임상", "항암", "면역", "치료", "치료제",
+    "진단", "백신", "유전자", "유전체", "지노믹", "제노", "세포", "줄기세포",
+    "바이오", "BIO", "Biopharm", "Pharm", "파마", "파미",
+    "메디", "메드", "헬스", "헬스케어", "의료", "의료기기", "덴탈", "치과",
+    "보툴", "톡스", "필러", "테라퓨틱", "Therapeutics", "랩스", "랩지노믹"
+]
+
+BIO_EXCLUDE_CONTAINS = [
+    # 이름만 보면 애매하지만 시장에서 바이오/신약/세포/진단/헬스케어로 분류되는 쪽
+    "네이처셀", "파미셀", "지씨셀", "강스템", "차바이오", "차헬스", "코아스템", "큐로셀",
+    "셀트리온", "셀리드", "셀바스헬스케어", "HLB", "에이비엘", "알테오젠",
+    "레고켐", "리가켐", "오스코텍", "보로노이", "펩트론", "퓨쳐켐", "큐리언트",
+    "큐라클", "올릭스", "압타머", "앱클론", "박셀", "엔케이맥스", "메드팩토",
+    "에스티큐브", "카이노스", "지놈", "샤페론", "브릿지바이오", "인벤티지랩",
+    "디앤디파마텍", "프로티아", "바이넥스", "서린바이오", "랩지노믹스",
+    "씨젠", "수젠텍", "휴마시스", "엑세스바이오", "바디텍메드", "마크로젠", "툴젠",
+    "루닛", "뷰노", "제이엘케이", "딥노이드", "인바디",
+    "덴티움", "디오", "오스템", "바텍", "레이언스", "나이벡",
+    "메디톡스", "휴젤", "대웅", "한미약품", "한미사이언스", "녹십자", "유한양행",
+    "종근당", "보령", "동아쏘시오", "동아에스티", "일동", "신풍", "부광",
+    "삼천당", "환인", "안국", "JW", "일양", "휴온스", "대한약품", "영진약품",
+    "현대약품", "광동", "동국제약", "대원제약", "에스티팜", "SK바이오", "삼성바이오"
+]
+
+BIO_EXCLUDE_EXACT = {
+    # 너무 짧거나 오탐 우려가 있어서 정확히 종목명이 맞을 때만 제외
+    "레이", "툴젠", "루닛", "뷰노", "휴젤", "씨젠", "나이벡", "바텍", "인바디", "펩트론",
+    "네이처셀", "디앤디파마텍", "파미셀", "지씨셀", "메디톡스", "덴티움", "디오"
+}
+
+
+def is_hidden_bio_name(name):
+    n = str(name).strip()
+    u = n.upper()
+    if n in BIO_EXCLUDE_EXACT or u in {x.upper() for x in BIO_EXCLUDE_EXACT}:
+        return True
+    for w in BIO_EXCLUDE_KEYWORDS:
+        if str(w).upper() in u:
+            return True
+    for w in BIO_EXCLUDE_CONTAINS:
+        if str(w).upper() in u:
+            return True
+    return False
+
+
 def liquid500_excluded(name):
-    bad_words = [
-        "스팩", "SPAC", "리츠", "ETN", "ETF", "우선주", "우B", "우C",
-        "제약", "바이오", "생명과학", "헬스케어", "진단", "백신", "치료제"
+    # 일반 제외: ETF/ETN/리츠/스팩/우선주 등
+    general_bad_words = [
+        "스팩", "SPAC", "리츠", "ETN", "ETF", "우선주", "우B", "우C"
     ]
     n = str(name)
-    return any(w.lower() in n.lower() for w in bad_words)
+    if any(w.lower() in n.lower() for w in general_bad_words):
+        return True
+    # v13: 바이오라고 안 적힌 바이오/제약/헬스케어까지 제거
+    if is_hidden_bio_name(n):
+        return True
+    return False
 
 
 def infer_group_by_name(name):
@@ -3553,7 +3610,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v12입니다.")
+    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v13입니다. 바이오/제약/헬스케어 숨은 이름 필터 강화.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
@@ -3578,7 +3635,7 @@ elif menu == "3. TOP50":
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("v12는 전체시장에서 매일 새 후보를 뽑습니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
+    st.info("v13은 전체시장에서 매일 새 후보를 뽑고, 바이오/제약/헬스케어성 종목을 더 강하게 제외합니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
 
     if st.button("TOP50 생성", type="primary"):
         cash = parse_won(cash_text)
