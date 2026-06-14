@@ -1,4 +1,11 @@
-V11_SHEETS_QUOTA_SAFE
-- Google Sheets 시작 시 3개 탭 전체 확인 제거
-- worksheet 객체 캐시로 429 read quota 완화
-- TOP50 계산은 v10 보정 로직 유지
+# Magic Split v12 Real Full Market
+
+- Streamlit 단독 실행
+- FinanceDataReader 전체시장 스캔
+- Colab 후보 190개 고정 방식 제거
+- Google Sheets quota-safe 구조 유지
+
+업로드 파일:
+- app.py
+- requirements.txt
+- runtime.txt

@@ -6,6 +6,5 @@ numpy
 finance-datareader
 lxml
 beautifulsoup4
-html5lib
 requests
-setuptools<81
+setuptools

@@ -1,7 +1,7 @@
 # =====================================================
 # 매직스플릿 Streamlit 안정형 앱
-# v10_COLAB12_CALIBRATED_FDR_20260614
-# 핵심: FinanceDataReader 기반 + 20260612 Colab 원본 190개 후보풀/점수/순위 보정
+# v12_REAL_FULL_MARKET_FDR_20260614
+# 핵심: FinanceDataReader 기반 전체시장 실전형 매일 후보 발굴
 # 저장소: Google Sheets
 # 메뉴: 1. 요양원 2. 운영판단기 3. TOP50 4. 도움말
 # =====================================================
@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v11_SHEETS_QUOTA_SAFE_20260614"
+APP_VERSION = "v12_REAL_FULL_MARKET_FDR_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3191,24 +3191,19 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
 
     total_score = base_score + trading_score + rotate_score + tech_score + momentum_score
 
-    # v10: 12일 Colab 원본 후보는 원본 세부점수로 보정한다.
-    # 이유: FDR 재계산에서 회전/모멘텀이 쉽게 만점 처리되어 105점 동점이 과도하게 발생했기 때문.
-    seed_code = str(code).replace(".0", "").zfill(6) if code is not None else ""
-    if seed_code in COLAB12_COMPONENT_BY_CODE:
-        comp = COLAB12_COMPONENT_BY_CODE[seed_code]
-        trading_score = float(comp.get("거래대금점수", trading_score))
-        rotate_score = float(comp.get("회전점수", rotate_score))
-        tech_score = float(comp.get("기술점수", tech_score))
-        momentum_score = float(comp.get("모멘텀점수", momentum_score))
-        total_score = float(comp.get("점수", total_score))
+    # v12: Colab 과거 후보 보정은 사용하지 않는다.
+    # 매일 전체시장 데이터로 새 후보를 발굴하는 실전형이므로 현재 데이터만 반영한다.
+    pullback = abs(float(pullback))
 
-        # 표시값도 Colab 원본 방향과 맞춘다. 특히 눌림률은 Colab에서 양수 표기였다.
-        amount60 = float(comp.get("거래대금60억", amount60 / 100_000_000)) * 100_000_000
-        pullback = float(comp.get("눌림률", abs(pullback)))
-        ret20 = float(comp.get("20일수익률", ret20))
-        ret60 = float(comp.get("60일수익률", ret60))
-    else:
-        pullback = abs(float(pullback))
+    # 과열/너무 깊은 하락은 약간 감점, 적당한 눌림은 약간 가점
+    pullback_adj = 0
+    if 3 <= pullback <= 18:
+        pullback_adj = 3
+    elif pullback <= 1 and ret20 > 20:
+        pullback_adj = -4
+    elif pullback >= 35:
+        pullback_adj = -4
+    total_score = total_score + pullback_adj
 
     if strict:
         if total_score >= 85:
@@ -3268,15 +3263,14 @@ def adjust_new_buy_by_regime(new_buy_limit, regime):
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def build_universe_fdr(price_limit, max_codes):
     diag = {
-        "engine": "FinanceDataReader + Colab12Seed190",
+        "engine": "FinanceDataReader RealFullMarket",
         "listing_rows": 0,
         "market_filtered": 0,
         "price_filtered": 0,
         "excluded_name_filtered": 0,
         "sort_proxy": "",
-        "seed_candidates": len(COLAB12_SEED_UNIVERSE),
-        "seed_included": 0,
         "listing_included": 0,
+        "force_included": 0,
         "final_universe": 0,
         "error": ""
     }
@@ -3285,27 +3279,21 @@ def build_universe_fdr(price_limit, max_codes):
     universe = {}
 
     def add_code(code, name, source="listing"):
-        code = str(code).replace(".0", "").zfill(6)
-        name = str(name)
+        code = str(code).replace(".0", "").strip().zfill(6)
+        name = str(name).strip()
+        if code == "000000" or name == "":
+            return False
         if code in universe:
             return False
         if liquid500_excluded(name):
             return False
         universe[code] = name
-        if source == "seed":
-            diag["seed_included"] += 1
+        if source == "force":
+            diag["force_included"] += 1
         else:
             diag["listing_included"] += 1
         return True
 
-    # 1) Colab에서 이미 검증된 후보풀은 반드시 계산 대상으로 먼저 넣는다.
-    #    단, 여기서 바로 TOP50 확정이 아니라 아래 루프에서 현재 데이터로 다시 점수 계산한다.
-    for code, name in COLAB12_SEED_UNIVERSE.items():
-        if len(universe) >= max_codes:
-            break
-        add_code(code, name, source="seed")
-
-    # 2) FDR 상장목록에서 추가 후보를 만든다.
     try:
         krx = load_krx_master_fdr()
         diag["listing_rows"] = len(krx)
@@ -3314,7 +3302,7 @@ def build_universe_fdr(price_limit, max_codes):
 
         df = krx.copy()
 
-        # Market 컬럼이 제대로 있으면 KOSPI/KOSDAQ 위주. 전부 KRX로만 오면 그대로 사용.
+        # KOSPI/KOSDAQ 전체시장 기준. Market 정보가 없으면 전체 KRX 그대로 사용.
         if "Market" in df.columns:
             market_values = set(df["Market"].astype(str).unique())
             if len(market_values.intersection({"KOSPI", "KOSDAQ"})) > 0:
@@ -3326,7 +3314,7 @@ def build_universe_fdr(price_limit, max_codes):
                 df[c] = 0
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-        # 가격 데이터가 상장목록에 있으면 가격 필터 적용. 없으면 개별 OHLCV에서 걸러진다.
+        # 가격 필터: 상장목록에 현재가가 있으면 즉시 적용. 없으면 개별 OHLCV 계산에서 재확인.
         if df["Close"].sum() > 0:
             df = df[(df["Close"] > 0) & (df["Close"] <= price_limit)]
         diag["price_filtered"] = len(df)
@@ -3335,8 +3323,7 @@ def build_universe_fdr(price_limit, max_codes):
         df = df[~df["Name"].apply(liquid500_excluded)]
         diag["excluded_name_filtered"] = before_excl - len(df)
 
-        # Colab은 거래대금 영향이 크므로 가능한 한 거래대금/거래량 proxy로 정렬한다.
-        # Amount가 없으면 Close*Volume, 그것도 없으면 Volume, 마지막으로 Marcap.
+        # 전체시장 실전형: 거래대금/거래량/시총 순으로 오늘 관심도 높은 종목부터 계산.
         if df["Amount"].sum() > 0:
             df["SortProxy"] = df["Amount"]
             diag["sort_proxy"] = "Amount"
@@ -3363,12 +3350,9 @@ def build_universe_fdr(price_limit, max_codes):
     except Exception as e:
         diag["error"] = str(e)
 
-    # 3) 사용자가 따로 넣은 강제 계산 종목
+    # 수동 강제 포함 종목은 max를 넘어도 계산 대상에 포함
     for code, name in FORCE_UNIVERSE.items():
-        if len(universe) >= max_codes and str(code).zfill(6) not in universe:
-            # max를 넘더라도 수동 강제종목은 넣는다.
-            pass
-        add_code(code, name, source="seed")
+        add_code(code, name, source="force")
 
     diag["final_universe"] = len(universe)
     return universe, diag
@@ -3569,7 +3553,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 계산하되, 2026-06-12 Colab 원본 190개 후보의 점수/순위로 보정하는 v10입니다.")
+    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v12입니다.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
@@ -3592,9 +3576,9 @@ elif menu == "3. TOP50":
     with col7:
         used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=0, step=1, key="top_slot")
     with col8:
-        max_codes = st.number_input("계산 종목수", min_value=50, max_value=700, value=300, step=50)
+        max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("v10은 12일 Colab 원본 점수/순위로 105점 몰림을 보정합니다. 처음엔 300개, 괜찮으면 500~700으로 올리세요.")
+    st.info("v12는 전체시장에서 매일 새 후보를 뽑습니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
 
     if st.button("TOP50 생성", type="primary"):
         cash = parse_won(cash_text)
@@ -3668,7 +3652,7 @@ elif menu == "3. TOP50":
                     shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                     if buy_status == "OK":
                         info["코드"] = code
-                        info["그룹"] = COLAB12_GROUP_BY_CODE.get(code, infer_group_by_name(name))
+                        info["그룹"] = infer_group_by_name(name)
                         info["매수상태"] = "OK"
                         info["추천수량"] = shares
                         info["실제매수금액"] = buy_amount
@@ -3689,7 +3673,7 @@ elif menu == "3. TOP50":
                         shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                         if buy_status == "OK":
                             relaxed["코드"] = code
-                            relaxed["그룹"] = COLAB12_GROUP_BY_CODE.get(code, infer_group_by_name(name))
+                            relaxed["그룹"] = infer_group_by_name(name)
                             relaxed["매수상태"] = "OK"
                             relaxed["추천수량"] = shares
                             relaxed["실제매수금액"] = buy_amount
@@ -3721,15 +3705,9 @@ elif menu == "3. TOP50":
             st.error("후보 없음. 위 진단에서 listing_rows/가격데이터없음 숫자를 확인해야 합니다.")
             st.stop()
 
-        result_df["Colab12순위"] = (
-            result_df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
-            .map(COLAB12_RANK_BY_CODE)
-            .fillna(999999)
-            .astype(int)
-        )
         result_df = result_df.sort_values(
-            ["점수", "Colab12순위", "거래대금점수", "모멘텀점수", "회전점수", "기술점수"],
-            ascending=[False, True, False, False, False, False]
+            ["점수", "거래대금점수", "모멘텀점수", "회전점수", "기술점수", "60일수익률"],
+            ascending=[False, False, False, False, False, False]
         ).reset_index(drop=True)
         result_df["순위"] = np.arange(1, len(result_df) + 1)
 
