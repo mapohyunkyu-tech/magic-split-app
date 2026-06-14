@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v15_ENTRY_DECISION_1430_20260614"
+APP_VERSION = "v16_SCORE_SECTOR_DATA_UPGRADE_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -43,8 +43,9 @@ TOP50_COLUMNS = [
     "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
     "매수상태", "과열상태", "추격주의여부", "당일등락률", "갭상승률", "요양원여부",
-    "그룹", "거래대금60억", "눌림률", "20일수익률", "60일수익률",
-    "거래대금점수", "회전점수", "기술점수", "모멘텀점수",
+    "그룹", "섹터신뢰", "데이터기준일", "데이터주의",
+    "거래대금60억", "눌림률", "20일수익률", "60일수익률",
+    "거래대금점수", "회전점수", "회전빈도20", "회전빈도60", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
 ]
 
@@ -3250,21 +3251,76 @@ def liquid500_excluded(name):
 
 
 def infer_group_by_name(name):
-    n = str(name)
-    if any(k in n for k in ["전자", "반도체", "하이닉스", "마이크론", "테크", "칩", "세미", "피에스케이", "원익", "네패스", "코미코", "테스", "고영"]):
-        return "반도체/전자"
-    if any(k in n for k in ["써키트", "PCB", "대덕", "심텍", "이수페타시스", "비에이치"]):
-        return "PCB"
-    if any(k in n for k in ["현대차", "기아", "만도", "타이어", "모비스", "자동차"]):
-        return "자동차"
-    if any(k in n for k in ["한화", "현대로템", "LIG", "풍산", "방산"]):
-        return "방산"
-    if any(k in n for k in ["LS", "전선", "전력", "일진", "효성중공업", "제룡"]):
-        return "전력"
-    if any(k in n for k in ["NAVER", "카카오", "소프트", "인텔리", "웹"]):
-        return "인터넷/소프트웨어"
-    return "기타"
+    """종목명 기반 업종 라벨. 점수에는 직접 큰 영향 없고, 사람이 보기 위한 분류다."""
+    n = str(name).upper().replace(" ", "")
 
+    exact = {
+        "한국타이어앤테크놀로지": "자동차/타이어",
+        "HL만도": "자동차/부품",
+        "화신정공": "자동차/부품",
+        "현대모비스": "자동차/부품",
+        "서진시스템": "전력/장비",
+        "한전KPS": "전력/유틸리티",
+        "SGC에너지": "에너지",
+        "대한항공": "항공/운송",
+        "신한지주": "금융",
+        "더블유게임즈": "게임/콘텐츠",
+        "제일기획": "광고/미디어",
+        "오리온": "음식료/내수",
+        "코웨이": "렌탈/내수",
+        "GS": "지주/에너지",
+        "LG유플러스": "통신",
+        "SKC": "소재/필름",
+        "동진쎄미켐": "반도체소재",
+        "한켐": "화학소재",
+        "라이콤": "통신장비",
+        "뉴파워프라즈마": "반도체장비",
+        "예스티": "반도체장비",
+        "고영": "반도체/검사장비",
+        "티엘비": "PCB",
+        "코리아써키트": "PCB",
+        "대덕전자": "PCB",
+        "심텍": "PCB",
+        "이수페타시스": "PCB",
+        "비에이치": "PCB/FPCB",
+        "하나마이크론": "반도체후공정",
+        "테크윙": "반도체장비",
+        "코미코": "반도체부품",
+        "인텍플러스": "반도체/검사장비",
+        "케이씨텍": "반도체장비",
+        "하나머티리얼즈": "반도체소재",
+        "원익QNC": "반도체소재",
+        "원익QnC": "반도체소재",
+        "유니셈": "반도체장비",
+    }
+    for k, v in exact.items():
+        if k.upper().replace(" ", "") in n:
+            return v
+
+    # 순서 중요: PCB/전력/자동차 같은 명확한 분류를 먼저 본다.
+    if any(k in n for k in ["써키트", "PCB", "FPCB", "대덕", "심텍", "이수페타시스", "비에이치", "티엘비"]):
+        return "PCB"
+    if any(k in n for k in ["타이어", "만도", "모비스", "현대차", "기아", "화신", "자동차", "오토", "HL만도".upper()]):
+        return "자동차/부품"
+    if any(k in n for k in ["전선", "전력", "한전", "LS", "일진", "효성중공업", "제룡", "KPS"]):
+        return "전력/인프라"
+    if any(k in n for k in ["항공", "대한항공", "진에어", "통운", "해운", "운송"]):
+        return "운송"
+    if any(k in n for k in ["지주", "은행", "금융", "증권", "보험", "신한", "하나금융", "KB", "메리츠"]):
+        return "금융"
+    if any(k in n for k in ["게임", "게임즈", "엔터", "미디어", "제일기획", "콘텐츠"]):
+        return "콘텐츠/미디어"
+    if any(k in n for k in ["오리온", "음식", "식품", "농심", "CJ제일제당", "하이트", "빙그레"]):
+        return "음식료/내수"
+    if any(k in n for k in ["유플러스", "텔레콤", "KT", "SK텔레콤", "통신", "라이콤"]):
+        return "통신/장비"
+    if any(k in n for k in ["화학", "켐", "소재", "필름", "SKC", "후성", "동진쎄미켐", "솔브레인", "천보", "QNC", "머티리얼"]):
+        return "소재/화학"
+    if any(k in n for k in ["반도체", "하이닉스", "마이크론", "테크윙", "세미", "피에스케이", "원익", "네패스", "코미코", "테스", "고영", "케이씨텍", "예스티", "인텍플러스", "유니셈", "뉴파워프라즈마"]):
+        return "반도체"
+    if any(k in n for k in ["전자", "전기", "로보", "로봇", "자동화", "무벡스", "시스템"]):
+        return "전자/장비"
+    return "기타"
 
 def score_candidate_core(df, name, regime="장세불명", high_price_limit=160000, strict=True, code=None):
     if df is None or len(df) < 80:
@@ -3303,11 +3359,26 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
     base_score = 20
     trading_score = min(amount60 / 10_000_000_000 * 25, 25)
 
+    # v16: 회전점수 분산 개선
+    # 기존 방식은 20일 +10% 반등 횟수만 보면서 15점 만점이 너무 쉽게 몰렸다.
+    # 이제는 20일 반등 빈도, 60일 중기 반등 빈도, 평균 반등 강도, 변동성을 섞어서 점수 차이를 만든다.
     temp = df.copy()
     temp["r20"] = temp["close"].pct_change(20) * 100
-    recent = temp.tail(750)
-    rotate_count = int((recent["r20"] >= 10).sum())
-    rotate_score = min(rotate_count / 25 * 15, 15)
+    temp["r60"] = temp["close"].pct_change(60) * 100
+    recent = temp.tail(750).copy()
+    rotate_count20 = int((recent["r20"] >= 10).sum())
+    rotate_count60 = int((recent["r60"] >= 20).sum())
+    strong_count20 = int((recent["r20"] >= 20).sum())
+    avg_positive_r20 = float(recent.loc[recent["r20"] > 0, "r20"].mean()) if (recent["r20"] > 0).any() else 0.0
+    vol20 = float(recent["close"].pct_change(20).std() * 100) if len(recent) > 30 else 0.0
+    rotate_score = (
+        min(rotate_count20 / 45 * 5.5, 5.5)
+        + min(rotate_count60 / 25 * 3.5, 3.5)
+        + min(strong_count20 / 18 * 3.0, 3.0)
+        + min(avg_positive_r20 / 25 * 2.0, 2.0)
+        + min(vol20 / 18 * 1.0, 1.0)
+    )
+    rotate_score = min(rotate_score, 15)
 
     tech_score = 0
     if pd.notna(ma20) and close > ma20:
@@ -3391,6 +3462,12 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
     else:
         grade = "완화"
 
+    try:
+        data_date = pd.to_datetime(clean.index[-1]).strftime("%Y-%m-%d")
+    except Exception:
+        data_date = ""
+    data_warning = "FDR일봉"
+
     return {
         "종목": name,
         "등급": grade,
@@ -3400,6 +3477,8 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
         "거래대금20억": round(amount20 / 100_000_000, 1),
         "거래대금점수": round(trading_score, 2),
         "회전점수": round(rotate_score, 2),
+        "회전빈도20": rotate_count20,
+        "회전빈도60": rotate_count60,
         "기술점수": round(tech_score, 2),
         "모멘텀점수": round(momentum_score, 2),
         "과열상태": heat_status,
@@ -3408,7 +3487,9 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
         "눌림률": round(pullback, 2),
         "20일수익률": round(ret20, 2),
         "60일수익률": round(ret60, 2),
-        "120일수익률": round(ret120, 2)
+        "120일수익률": round(ret120, 2),
+        "데이터기준일": data_date,
+        "데이터주의": data_warning
     }
 
 
@@ -3730,7 +3811,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v14입니다. 바이오/제약/헬스케어 숨은 이름 필터 강화.")
+    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v16입니다. 회전점수/업종라벨/데이터기준 보정 포함.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
@@ -3755,7 +3836,7 @@ elif menu == "3. TOP50":
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("v14은 전체시장에서 매일 새 후보를 뽑고, 바이오/제약/헬스케어성 종목을 더 강하게 제외합니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
+    st.info("v16은 전체시장 실전형에 회전점수 분산, 업종 라벨 보정, 데이터 기준일 표시를 추가했습니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
 
     if st.button("TOP50 생성", type="primary"):
         cash = parse_won(cash_text)
@@ -3830,6 +3911,7 @@ elif menu == "3. TOP50":
                     if buy_status == "OK":
                         info["코드"] = code
                         info["그룹"] = infer_group_by_name(name)
+                        info["섹터신뢰"] = "보정" if info["그룹"] != "기타" else "낮음"
                         heat_status = str(info.get("과열상태", "정상"))
                         if heat_status in ["추격주의", "과열주의", "신고가추격주의"]:
                             info["매수상태"] = "추격주의"
@@ -3866,6 +3948,7 @@ elif menu == "3. TOP50":
                         if buy_status == "OK":
                             relaxed["코드"] = code
                             relaxed["그룹"] = infer_group_by_name(name)
+                            relaxed["섹터신뢰"] = "보정" if relaxed["그룹"] != "기타" else "낮음"
                             heat_status = str(relaxed.get("과열상태", "정상"))
                             if heat_status in ["과열제외", "추격주의", "과열주의", "신고가추격주의"]:
                                 relaxed["매수상태"] = "추격주의"
@@ -3912,8 +3995,8 @@ elif menu == "3. TOP50":
         # 실전 정렬: 눌림후보/OK를 우선하고 추격주의/관찰주의는 뒤로 보낸다.
         result_df["매수우선값"] = result_df["매수상태"].map({"눌림후보": 4, "OK": 3, "관찰주의": 1, "추격주의": 0}).fillna(2)
         result_df = result_df.sort_values(
-            ["매수우선값", "점수", "거래대금점수", "회전점수", "기술점수", "모멘텀점수"],
-            ascending=[False, False, False, False, False, False]
+            ["매수우선값", "점수", "거래대금점수", "회전점수", "회전빈도20", "기술점수", "모멘텀점수"],
+            ascending=[False, False, False, False, False, False, False]
         ).reset_index(drop=True)
         result_df["순위"] = np.arange(1, len(result_df) + 1)
 
