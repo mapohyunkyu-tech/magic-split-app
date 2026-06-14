@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v10_COLAB12_CALIBRATED_FDR_20260614"
+APP_VERSION = "v11_SHEETS_QUOTA_SAFE_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -2631,6 +2631,19 @@ def write_worksheet(ws, df, headers):
     ws.update(values)
 
 
+def is_quota_error(e):
+    msg = str(e)
+    return ("429" in msg) or ("Quota exceeded" in msg) or ("Read requests per minute" in msg)
+
+
+@st.cache_resource(show_spinner=False)
+def get_ws_cached(title):
+    # gspread worksheet()가 매번 metadata를 읽어서 429가 잘 나므로
+    # 워크시트 객체를 제목별로 캐시한다.
+    sheet = get_spreadsheet()
+    return sheet.worksheet(title)
+
+
 def ensure_worksheet(sheet, title, headers):
     try:
         ws = sheet.worksheet(title)
@@ -2639,25 +2652,19 @@ def ensure_worksheet(sheet, title, headers):
         ws.update([headers])
         return ws
 
-    values = ws.get_all_values()
-    if len(values) == 0:
-        ws.update([headers])
-    else:
-        current_header = values[0]
-        if current_header != headers:
-            all_rows = values[1:]
-            old_df = pd.DataFrame(all_rows, columns=current_header) if current_header else pd.DataFrame()
-            for c in headers:
-                if c not in old_df.columns:
-                    old_df[c] = ""
-            old_df = old_df[headers]
-            write_worksheet(ws, old_df, headers)
+    # v11: 시작할 때마다 전체 시트를 읽어 헤더 확인하지 않는다.
+    # 이것 때문에 Google Sheets read quota가 빨리 터졌다.
     return ws
 
 
 def get_ws(title, headers):
-    sheet = get_spreadsheet()
-    return ensure_worksheet(sheet, title, headers)
+    try:
+        return get_ws_cached(title)
+    except gspread.WorksheetNotFound:
+        sheet = get_spreadsheet()
+        ws = ensure_worksheet(sheet, title, headers)
+        get_ws_cached.clear()
+        return ws
 
 
 def read_worksheet_df(ws, headers):
@@ -2694,6 +2701,10 @@ def save_nursing_df(df):
         df["코드"] = df["코드"].astype(str).str.zfill(6)
         df = df.drop_duplicates(subset=["코드"], keep="last").reset_index(drop=True)
     write_worksheet(ws, df, NURSING_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
 
 
 def append_log(action, code, name, input_name, status, memo):
@@ -2705,6 +2716,10 @@ def append_log(action, code, name, input_name, status, memo):
 def save_top50_df(df):
     ws = get_ws("TOP50", TOP50_COLUMNS)
     write_worksheet(ws, df, TOP50_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
 
 # =====================================================
 # 공통 유틸
@@ -3367,14 +3382,17 @@ st.caption(f"{APP_VERSION}")
 st.caption("요양원 목록은 Google Sheets에 저장됩니다. 서버가 재시작돼도 목록은 유지됩니다.")
 
 try:
-    sheet = get_spreadsheet()
-    get_ws("요양원목록", NURSING_COLUMNS)
-    get_ws("변경로그", LOG_COLUMNS)
-    get_ws("TOP50", TOP50_COLUMNS)
+    # v11: 앱 시작 때 3개 탭을 전부 읽지 않는다.
+    # Google Sheets 429 쿼터 방지를 위해 연결 확인만 하고,
+    # 실제 탭은 메뉴에서 필요할 때만 읽는다.
+    get_spreadsheet()
     st.success("Google Sheets 연결 완료")
 except Exception as e:
-    st.error("Google Sheets 연결 실패")
-    st.exception(e)
+    if is_quota_error(e):
+        st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요.")
+    else:
+        st.error("Google Sheets 연결 실패")
+        st.exception(e)
     st.stop()
 
 menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 도움말"])
