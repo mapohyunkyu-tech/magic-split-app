@@ -1,8 +1,12 @@
-# Magic Split v13 Real Full Market Bio Filter
+# Magic Split v14 REAL FULL MARKET PULLBACK FILTER
 
-- app.py: Streamlit app
-- requirements.txt: Streamlit packages
-- runtime.txt: Python 3.11
+- 전체시장 FDR 스캔
+- 바이오/제약성 종목 제외 강화 유지
+- 과열주 감점/제외
+- 눌림후보 우대
+- Google Sheets 저장 유지
 
-Version: v13_REAL_FULL_MARKET_BIO_FILTER_20260614
-바이오/제약/헬스케어 숨은 종목 필터 강화형입니다.
+업로드 파일:
+- app.py
+- requirements.txt
+- runtime.txt

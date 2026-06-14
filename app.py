@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v13_REAL_FULL_MARKET_BIO_FILTER_20260614"
+APP_VERSION = "v14_REAL_FULL_MARKET_PULLBACK_FILTER_20260614"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -42,7 +42,7 @@ LOG_COLUMNS = [
 TOP50_COLUMNS = [
     "순위", "오늘매수", "코드", "종목", "등급", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
-    "매수상태", "그룹", "거래대금60억", "눌림률", "20일수익률", "60일수익률",
+    "매수상태", "과열상태", "그룹", "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
 ]
@@ -3104,7 +3104,7 @@ def ms_regime_asof_from_etf(asof_date):
 
 
 # =====================================================
-# v13: 숨은 바이오/제약/헬스케어 필터
+# v14: 숨은 바이오/제약/헬스케어 필터
 # =====================================================
 
 # 이름에 '바이오'가 없어도 실제로 제약/신약/세포/진단/의료AI/덴탈/미용의료 쪽이면 제외한다.
@@ -3163,7 +3163,7 @@ def liquid500_excluded(name):
     n = str(name)
     if any(w.lower() in n.lower() for w in general_bad_words):
         return True
-    # v13: 바이오라고 안 적힌 바이오/제약/헬스케어까지 제거
+    # v14: 바이오라고 안 적힌 바이오/제약/헬스케어까지 제거
     if is_hidden_bio_name(n):
         return True
     return False
@@ -3248,19 +3248,56 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
 
     total_score = base_score + trading_score + rotate_score + tech_score + momentum_score
 
-    # v12: Colab 과거 후보 보정은 사용하지 않는다.
-    # 매일 전체시장 데이터로 새 후보를 발굴하는 실전형이므로 현재 데이터만 반영한다.
-    pullback = abs(float(pullback))
+    # v14: 실전형 과열/눌림 필터
+    # 너무 오른 종목은 "좋은 종목"일 수는 있어도 매직스플릿 1차 신규진입 후보로는 위험하다.
+    # 그래서 과열은 강하게 감점 또는 엄격후보에서 제외하고, 적당히 눌린 강한 종목을 우선한다.
+    raw_pullback = float(pullback)
+    pullback = abs(raw_pullback)
 
-    # 과열/너무 깊은 하락은 약간 감점, 적당한 눌림은 약간 가점
-    pullback_adj = 0
-    if 3 <= pullback <= 18:
-        pullback_adj = 3
+    heat_status = "정상"
+    heat_penalty = 0
+    pullback_bonus = 0
+
+    # 극단 과열: 실전 신규매수 후보에서 제외
+    if ret20 >= 100 or ret60 >= 180:
+        heat_status = "과열제외"
+        heat_penalty = -45
+    # 상당 과열: TOP에는 남길 수 있으나 신규매수는 추격주의
+    elif ret20 >= 60 or ret60 >= 120:
+        heat_status = "추격주의"
+        heat_penalty = -28
+    # 약한 과열
+    elif ret20 >= 40 or ret60 >= 90:
+        heat_status = "과열주의"
+        heat_penalty = -14
+
+    # 적당한 눌림: 강한 종목이 고점에서 -3~-20% 눌린 구간을 우대
+    if 3 <= pullback <= 20 and ret20 < 60 and ret60 < 120:
+        pullback_bonus = 8
+        if heat_status == "정상":
+            heat_status = "눌림후보"
+    elif 20 < pullback <= 35:
+        pullback_bonus = 2
     elif pullback <= 1 and ret20 > 20:
-        pullback_adj = -4
+        heat_penalty -= 8
+        if heat_status == "정상":
+            heat_status = "신고가추격주의"
     elif pullback >= 35:
-        pullback_adj = -4
-    total_score = total_score + pullback_adj
+        heat_penalty -= 10
+        if heat_status == "정상":
+            heat_status = "깊은하락주의"
+
+    # 너무 약해진 종목도 제외/감점
+    if ret20 <= -25 or ret60 <= -35:
+        heat_penalty -= 12
+        if heat_status == "정상":
+            heat_status = "약세주의"
+
+    total_score = total_score + pullback_bonus + heat_penalty
+
+    # 엄격후보에서는 극단 과열은 제외한다. 완화후보에서는 참고용으로만 남길 수 있다.
+    if strict and heat_status == "과열제외":
+        return None
 
     if strict:
         if total_score >= 85:
@@ -3285,6 +3322,9 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
         "회전점수": round(rotate_score, 2),
         "기술점수": round(tech_score, 2),
         "모멘텀점수": round(momentum_score, 2),
+        "과열상태": heat_status,
+        "과열감점": round(heat_penalty, 2),
+        "눌림보너스": round(pullback_bonus, 2),
         "눌림률": round(pullback, 2),
         "20일수익률": round(ret20, 2),
         "60일수익률": round(ret60, 2),
@@ -3610,7 +3650,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v13입니다. 바이오/제약/헬스케어 숨은 이름 필터 강화.")
+    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v14입니다. 바이오/제약/헬스케어 숨은 이름 필터 강화.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
@@ -3635,7 +3675,7 @@ elif menu == "3. TOP50":
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("v13은 전체시장에서 매일 새 후보를 뽑고, 바이오/제약/헬스케어성 종목을 더 강하게 제외합니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
+    st.info("v14은 전체시장에서 매일 새 후보를 뽑고, 바이오/제약/헬스케어성 종목을 더 강하게 제외합니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
 
     if st.button("TOP50 생성", type="primary"):
         cash = parse_won(cash_text)
@@ -3710,14 +3750,23 @@ elif menu == "3. TOP50":
                     if buy_status == "OK":
                         info["코드"] = code
                         info["그룹"] = infer_group_by_name(name)
-                        info["매수상태"] = "OK"
+                        heat_status = str(info.get("과열상태", "정상"))
+                        if heat_status in ["추격주의", "과열주의", "신고가추격주의"]:
+                            info["매수상태"] = "추격주의"
+                        elif heat_status in ["깊은하락주의", "약세주의"]:
+                            info["매수상태"] = "관찰주의"
+                        else:
+                            info["매수상태"] = "OK"
                         info["추천수량"] = shares
                         info["실제매수금액"] = buy_amount
                         info["목표매수금액"] = target_amount
                         info["허용상한"] = price_limit
                         info["장세"] = regime
                         info["운영모드"] = mode_name
-                        info["장세매수코멘트"] = regime_buy_comment
+                        if str(info.get("매수상태", "OK")) != "OK":
+                            info["장세매수코멘트"] = f"{regime_buy_comment} / {info.get('과열상태', '')}"
+                        else:
+                            info["장세매수코멘트"] = regime_buy_comment
                         rows.append(info)
                         diag["엄격후보통과"] += 1
                     else:
@@ -3731,14 +3780,20 @@ elif menu == "3. TOP50":
                         if buy_status == "OK":
                             relaxed["코드"] = code
                             relaxed["그룹"] = infer_group_by_name(name)
-                            relaxed["매수상태"] = "OK"
+                            heat_status = str(relaxed.get("과열상태", "정상"))
+                            if heat_status in ["과열제외", "추격주의", "과열주의", "신고가추격주의"]:
+                                relaxed["매수상태"] = "추격주의"
+                            elif heat_status in ["깊은하락주의", "약세주의"]:
+                                relaxed["매수상태"] = "관찰주의"
+                            else:
+                                relaxed["매수상태"] = "OK"
                             relaxed["추천수량"] = shares
                             relaxed["실제매수금액"] = buy_amount
                             relaxed["목표매수금액"] = target_amount
                             relaxed["허용상한"] = price_limit
                             relaxed["장세"] = regime
                             relaxed["운영모드"] = mode_name
-                            relaxed["장세매수코멘트"] = "완화후보"
+                            relaxed["장세매수코멘트"] = f"완화후보 / {relaxed.get('과열상태', '')}"
                             relaxed_rows.append(relaxed)
                             diag["완화후보통과"] += 1
             except Exception:
@@ -3762,8 +3817,10 @@ elif menu == "3. TOP50":
             st.error("후보 없음. 위 진단에서 listing_rows/가격데이터없음 숫자를 확인해야 합니다.")
             st.stop()
 
+        # 실전 정렬: OK/눌림후보를 우선하고 추격주의/관찰주의는 뒤로 보낸다.
+        result_df["매수우선값"] = result_df["매수상태"].map({"OK": 3, "관찰주의": 1, "추격주의": 0}).fillna(2)
         result_df = result_df.sort_values(
-            ["점수", "거래대금점수", "모멘텀점수", "회전점수", "기술점수", "60일수익률"],
+            ["매수우선값", "점수", "거래대금점수", "회전점수", "기술점수", "모멘텀점수"],
             ascending=[False, False, False, False, False, False]
         ).reset_index(drop=True)
         result_df["순위"] = np.arange(1, len(result_df) + 1)
@@ -3773,7 +3830,12 @@ elif menu == "3. TOP50":
         elif new_buy_limit <= 0:
             result_df["오늘매수"] = "참고만"
         else:
-            result_df["오늘매수"] = np.where(result_df["순위"] <= new_buy_limit, "매수가능", "대기")
+            buyable_mask = (result_df["순위"] <= new_buy_limit) & (result_df["매수상태"] == "OK")
+            result_df["오늘매수"] = np.where(
+                result_df["매수상태"] == "추격주의",
+                "추격주의",
+                np.where(result_df["매수상태"] == "관찰주의", "관찰주의", np.where(buyable_mask, "매수가능", "대기"))
+            )
 
         for c in TOP50_COLUMNS:
             if c not in result_df.columns:
