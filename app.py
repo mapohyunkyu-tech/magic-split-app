@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v21_LIMITED_RECOVERY_A_BUY_20260615"
+APP_VERSION = "v22_PLAIN_GROUP_HEADER_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -2951,9 +2951,14 @@ def normalize_holdings_upload(raw_df, krx):
 
 def parse_manual_group_lot_text(manual_text, krx):
     """
-    v20 묶음입력 파서.
+    v22 묶음입력 파서. [종목명]뿐 아니라 그냥 종목명 한 줄도 헤더로 인식한다.
 
     지원 형식 1) 묶음입력
+    삼성E&A
+    1,64800,3
+    2,58400,3
+
+    지원 형식 1-2) 괄호형 묶음입력도 계속 지원
     [삼성E&A]
     1,64800,3
     2,58400,3
@@ -2986,6 +2991,19 @@ def parse_manual_group_lot_text(manual_text, krx):
             else:
                 current_stock = found
             continue
+
+        # v22: 괄호 없이 종목명 한 줄만 써도 묶음 헤더로 인식한다.
+        # 예:
+        # 삼성E&A
+        # 1,64800,3
+        # 2,58400,3
+        header_candidate = line.rstrip(":：").strip()
+        has_separator = ("," in line) or ("	" in line) or (len(re.split(r"\s+", line)) >= 3)
+        if not has_separator:
+            maybe_stock = find_stock_by_name(header_candidate, krx)
+            if maybe_stock is not None:
+                current_stock = maybe_stock
+                continue
 
         # 구분자는 쉼표 우선. 탭/공백만 있는 경우도 최소 지원.
         if "," in line:
@@ -4692,7 +4710,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v20은 차수별 판단은 유지하되, 수동입력에서 종목명은 [종목명]으로 한 번만 쓰고 아래에 차수만 여러 줄 입력할 수 있습니다.")
+    st.caption("v22는 차수별 판단은 유지하되, 종목명을 괄호 없이 한 번만 쓰고 아래에 차수만 여러 줄 입력할 수 있습니다. [종목명] 방식도 계속 지원합니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
@@ -4710,7 +4728,7 @@ elif menu == "4. 보유종목 판단기":
 
     with st.expander("보유차수 CSV 업로드/저장", expanded=(len(holdings_df) == 0)):
         st.write("CSV에 종목코드/종목명/차수/진입단가/수량/매입금액 중 가능한 컬럼이 있으면 자동 인식합니다.")
-        st.info("예: [삼성E&A] 아래에 1,64800,3 / 2,58400,3 처럼 입력합니다. 평균단가는 입력하지 않습니다.")
+        st.info("예: 삼성E&A 한 줄 입력 후 아래에 1,64800,3 / 2,58400,3 처럼 입력합니다. 평균단가는 입력하지 않습니다.")
         uploaded = st.file_uploader("증권사 보유차수 CSV 업로드", type=["csv"])
         if uploaded is not None:
             try:
@@ -4729,10 +4747,10 @@ elif menu == "4. 보유종목 판단기":
                 st.rerun()
 
         st.divider()
-        st.write("수동 추가: 묶음입력 `[종목명]` 아래에 `차수,진입단가,수량`을 넣습니다. 기존 `종목명,차수,진입단가,수량`도 지원합니다.")
+        st.write("수동 추가: 종목명을 한 줄 쓰고 아래에 `차수,진입단가,수량`을 넣습니다. `[종목명]` 방식과 기존 `종목명,차수,진입단가,수량`도 지원합니다.")
         manual_text = st.text_area(
             "수동 입력",
-            placeholder="[삼성E&A]\n1,64800,3\n2,58400,3\n\n[대덕전자]\n1,23000,10\n2,20700,10",
+            placeholder="삼성E&A\n1,64800,3\n2,58400,3\n\n대덕전자\n1,23000,10\n2,20700,10",
             height=180
         )
         if st.button("수동 입력 추가/갱신"):
@@ -4748,7 +4766,7 @@ elif menu == "4. 보유종목 판단기":
                     st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
                 st.rerun()
             else:
-                st.error("추가된 차수 0개. 형식은 `[종목명]` 다음 줄에 `차수,진입단가,수량` 입니다.")
+                st.error("추가된 차수 0개. 형식은 `종목명` 다음 줄에 `차수,진입단가,수량` 입니다.")
                 if not_found:
                     st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
 

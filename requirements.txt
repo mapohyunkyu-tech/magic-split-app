@@ -1,10 +1,6 @@
 streamlit
-gspread
-google-auth
 pandas
 numpy
-finance-datareader
-lxml
-beautifulsoup4
-requests
-setuptools
+FinanceDataReader
+gspread
+google-auth
