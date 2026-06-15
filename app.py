@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-홀딩스캐너 백테스트 v2
+홀딩스캐너 백테스트 v3
 - v1: 차트/거래대금 + 선택 재무CSV
-- v2 추가: 장세필터, 상대강도, 목표/손절/기간청산, 같은 종목 재진입 쿨다운
+- v3 추가: 기준봉+눌림목 중심, 손절 완화/구조손절, 벤치마크 계산 수정
 
 주의: 후보 압축/전략 검증용입니다. 매수 추천/수익 보장 도구가 아닙니다.
 """
@@ -24,10 +24,10 @@ except Exception as e:  # pragma: no cover
 else:
     FDR_IMPORT_ERROR = None
 
-APP_VERSION = "HOLDING_BACKTEST_V2_MARKET_FILTER_20260615"
+APP_VERSION = "HOLDING_BACKTEST_V3_BASE_PULLBACK_20260615"
 
-st.set_page_config(page_title="홀딩스캐너 백테스트 v2", layout="wide")
-st.title("📊 홀딩스캐너 백테스트 v2")
+st.set_page_config(page_title="홀딩스캐너 백테스트 v3", layout="wide")
+st.title("📊 홀딩스캐너 백테스트 v3")
 st.caption(APP_VERSION)
 
 # -----------------------------------------------------------------------------
@@ -312,7 +312,30 @@ def calc_features(df: pd.DataFrame, scan_date: pd.Timestamp, bm_df: pd.DataFrame
     }
 
 
-def simulate_exit(df: pd.DataFrame, entry_date: pd.Timestamp, hold_days: int, exit_mode: str, target_pct: float, stop_pct: float) -> Tuple[float, float, Optional[pd.Timestamp], str, int]:
+def benchmark_return_between(df: pd.DataFrame, entry_date: pd.Timestamp, exit_date: Optional[pd.Timestamp]) -> float:
+    """벤치마크는 종목의 실제 진입일~실제 청산일과 같은 기간으로 수익률 계산."""
+    if df is None or df.empty or exit_date is None:
+        return np.nan
+    eidx = nearest_on_or_before(df, entry_date)
+    xidx = nearest_on_or_before(df, exit_date)
+    if eidx is None or xidx is None or xidx <= eidx:
+        return np.nan
+    entry = float(df.loc[eidx, "Close"])
+    exitp = float(df.loc[xidx, "Close"])
+    if entry <= 0:
+        return np.nan
+    return exitp / entry - 1
+
+
+def simulate_exit(
+    df: pd.DataFrame,
+    entry_date: pd.Timestamp,
+    hold_days: int,
+    exit_mode: str,
+    target_pct: float,
+    stop_pct: float,
+    stop_mode: str = "가격+60일선 이탈",
+) -> Tuple[float, float, Optional[pd.Timestamp], str, int]:
     eidx = nearest_on_or_before(df, entry_date)
     if eidx is None:
         return np.nan, np.nan, None, "진입없음", 0
@@ -325,15 +348,36 @@ def simulate_exit(df: pd.DataFrame, entry_date: pd.Timestamp, hold_days: int, ex
     if len(path) == 0 or entry <= 0:
         return np.nan, np.nan, None, "데이터없음", 0
 
+    full = df.loc[:xidx_limit].copy()
+    full["MA60"] = full["Close"].rolling(60).mean()
+    full["MA120"] = full["Close"].rolling(120).mean()
+
     exit_idx = xidx_limit
     reason = "기간청산"
     if exit_mode == "목표/손절/기간청산":
         target_price = entry * (1 + target_pct)
-        stop_price = entry * (1 - stop_pct)
-        # daily close 기준 단순 시뮬레이션. 장중 고저가 사용은 다음 버전에서 분리 가능.
         for d, row in path.iloc[1:].iterrows():
             c = float(row["Close"])
-            if c <= stop_price:
+            ret_now = c / entry - 1
+            ma60 = float(full.loc[d, "MA60"]) if d in full.index and pd.notna(full.loc[d, "MA60"]) else np.nan
+            ma120 = float(full.loc[d, "MA120"]) if d in full.index and pd.notna(full.loc[d, "MA120"]) else np.nan
+            price_stop = ret_now <= -stop_pct
+            ma60_break = pd.notna(ma60) and c < ma60
+            ma120_break = pd.notna(ma120) and c < ma120 * 0.98
+
+            stop_hit = False
+            if stop_mode == "손절없음":
+                stop_hit = False
+            elif stop_mode == "가격손절":
+                stop_hit = price_stop
+            elif stop_mode == "가격+60일선 이탈":
+                stop_hit = price_stop and ma60_break
+            elif stop_mode == "120일선 구조붕괴":
+                stop_hit = price_stop and ma120_break
+            else:
+                stop_hit = price_stop and ma60_break
+
+            if stop_hit:
                 exit_idx = d
                 reason = "손절청산"
                 break
@@ -348,7 +392,6 @@ def simulate_exit(df: pd.DataFrame, entry_date: pd.Timestamp, hold_days: int, ex
     mdd = close_path.min() / entry - 1 if len(close_path) else np.nan
     days = int((exit_idx - eidx).days)
     return ret, mdd, exit_idx, reason, days
-
 
 def parse_finance_score(upload) -> pd.DataFrame:
     if upload is None:
@@ -414,6 +457,8 @@ def run_backtest(
     target_pct: float,
     stop_pct: float,
     cooldown_months: int,
+    entry_pattern_profile: str,
+    stop_mode: str,
 ):
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
@@ -479,17 +524,23 @@ def run_backtest(
                 continue
             if use_broken_guard and not feat["not_broken"]:
                 continue
+            base_ok = bool(feat["base"] and feat["base_mid_ok"])
+            pullback_ok = bool(feat["pullback"])
+            if entry_pattern_profile == "기준봉+눌림목 중심" and not (base_ok and pullback_ok):
+                continue
+            if entry_pattern_profile == "기준봉 또는 눌림목" and not (base_ok or pullback_ok):
+                continue
             tech_score = feat["technical_score"]
             finance_score = fs_map.get(code, np.nan)
             total = combine_score(tech_score, finance_score, combine_mode)
             if pd.isna(total) or total < threshold:
                 continue
-            fut_ret, mdd, exit_date, exit_reason, hold_actual_days = simulate_exit(df, feat["scan_actual_date"], hold_days, exit_mode, target_pct, stop_pct)
+            fut_ret, mdd, exit_date, exit_reason, hold_actual_days = simulate_exit(df, feat["scan_actual_date"], hold_days, exit_mode, target_pct, stop_pct, stop_mode)
             if pd.isna(fut_ret):
                 continue
             bm_ret = np.nan
             if len(bm):
-                bm_ret, _, _, _, _ = simulate_exit(bm, feat["scan_actual_date"], hold_days, "기간보유", target_pct, stop_pct)
+                bm_ret = benchmark_return_between(bm, feat["scan_actual_date"], exit_date)
             candidates.append({
                 "스캔월": sd.strftime("%Y-%m"),
                 "스캔일": feat["scan_actual_date"].strftime("%Y-%m-%d"),
@@ -510,6 +561,7 @@ def run_backtest(
                 "상대강도60일%": pct(feat["rel60"]),
                 "52주낙폭%": pct(feat["drawdown52"]),
                 "120일저점반등%": pct(feat["rebound120low"]),
+                "진입패턴": "기준봉+눌림목" if (feat["base"] and feat["base_mid_ok"] and feat["pullback"]) else ("기준봉" if (feat["base"] and feat["base_mid_ok"]) else ("눌림목" if feat["pullback"] else ("돌파" if feat["breakout"] else "기타"))),
                 "기준봉": "Y" if feat["base"] and feat["base_mid_ok"] else "",
                 "눌림목": "Y" if feat["pullback"] else "",
                 "돌파": "Y" if feat["breakout"] else "",
@@ -563,15 +615,16 @@ if fdr is None:
     st.error(f"FinanceDataReader import 실패: {FDR_IMPORT_ERROR}")
     st.stop()
 
-with st.expander("v2에서 추가된 것", expanded=True):
+with st.expander("v3에서 바뀐 것", expanded=True):
     st.write("""
-    **v2 핵심:** v1에서 약했던 2022/2024 하락장 대응을 위해 장세필터와 손실제한을 추가했습니다.
-    - KODEX200 기준 장세필터
-    - 종목 60일 수익률이 벤치마크보다 강한지 보는 상대강도 필터
-    - 목표가/손절/기간청산 시뮬레이션
-    - 같은 종목 반복진입 쿨다운
+    **v3 핵심:** v3에서 나온 단서였던 `기준봉 + 눌림목` 조합을 기본값으로 올리고, 손절을 가격만 보지 않도록 구조손절로 바꿨습니다.
+    - 기준봉+눌림목 중심 필터 추가
+    - 손절률 기본값 -22%로 완화
+    - 가격손절뿐 아니라 60일선/120일선 붕괴형 손절 선택
+    - 벤치마크 수익률은 종목의 실제 진입일~청산일과 같은 기간으로 계산
+    - 단순 돌파형은 기본값에서 제외 가능
     """)
-    st.code("재무/차트 후보 → 장세 통과 → 상대강도 통과 → 목표/손절/기간청산 검증", language="text")
+    st.code("재무/차트 후보 → 장세 통과 → 상대강도 통과 → 기준봉+눌림목 → 구조손절/목표청산 검증", language="text")
 
 try:
     listing = get_krx_listing()
@@ -612,7 +665,7 @@ with right:
     threshold = st.slider("진입 최소 점수", min_value=40, max_value=95, value=72, step=1)
     benchmark_code = st.text_input("벤치마크 코드", value="069500", help="기본: KODEX 200 ETF")
 
-st.subheader("3) v2 필터/청산 설정")
+st.subheader("3) v3 필터/청산 설정")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     use_market_filter = st.checkbox("장세필터 사용", value=True, help="벤치마크가 120일선 아래이거나 60일 수익률이 약하면 신규진입 스킵")
@@ -621,11 +674,13 @@ with c2:
     use_overheat_guard = st.checkbox("과열 종목 제외", value=True, help="120일 저점 대비 과도하게 오른 종목 제외")
     use_broken_guard = st.checkbox("붕괴 종목 제외", value=True, help="52주 고점 대비 너무 크게 깨진 종목 제외")
 with c3:
-    exit_mode = st.selectbox("청산 방식", ["기간보유", "목표/손절/기간청산"], index=1)
+    entry_pattern_profile = st.selectbox("진입패턴", ["기준봉+눌림목 중심", "기준봉 또는 눌림목", "기존 v2 전체"], index=0)
     cooldown_months = st.number_input("같은 종목 재진입 쿨다운(개월)", min_value=0, max_value=24, value=6, step=1)
 with c4:
-    target_pct = st.number_input("목표수익률 %", min_value=5, max_value=100, value=30, step=5) / 100
-    stop_pct = st.number_input("손절률 %", min_value=3, max_value=60, value=15, step=1) / 100
+    exit_mode = st.selectbox("청산 방식", ["기간보유", "목표/손절/기간청산"], index=1)
+    target_pct = st.number_input("목표수익률 %", min_value=5, max_value=100, value=35, step=5) / 100
+    stop_pct = st.number_input("손절률 %", min_value=3, max_value=60, value=22, step=1) / 100
+    stop_mode = st.selectbox("손절 방식", ["가격+60일선 이탈", "120일선 구조붕괴", "가격손절", "손절없음"], index=0)
 
 st.subheader("4) 재무 점수 결합")
 combine_mode = st.selectbox(
@@ -648,13 +703,13 @@ if len(symbols):
 else:
     st.warning("대상 종목이 없습니다. 종목명 또는 종목코드를 입력하세요.")
 
-run = st.button("🚀 v2 백테스트 실행", type="primary", disabled=len(symbols) == 0)
+run = st.button("🚀 v3 백테스트 실행", type="primary", disabled=len(symbols) == 0)
 
 if run:
     if start_date >= end_date:
         st.error("시작일이 종료일보다 빨라야 합니다.")
         st.stop()
-    with st.spinner("v2 백테스트 실행 중입니다. 종목 수가 많으면 몇 분 걸릴 수 있습니다."):
+    with st.spinner("v3 백테스트 실행 중입니다. 종목 수가 많으면 몇 분 걸릴 수 있습니다."):
         finance_scores = parse_finance_score(finance_upload)
         result, errdf = run_backtest(
             symbols=symbols,
@@ -675,6 +730,8 @@ if run:
             target_pct=float(target_pct),
             stop_pct=float(stop_pct),
             cooldown_months=int(cooldown_months),
+            entry_pattern_profile=entry_pattern_profile,
+            stop_mode=stop_mode,
         )
 
     st.subheader("결과 요약")
@@ -703,12 +760,12 @@ if run:
         show_cols = [
             "스캔월", "스캔일", "청산일", "청산사유", "보유일수", "종목코드", "종목명", "총점", "기술점수", "재무점수",
             "시장상태", "60일수익률%", "상대강도60일%", "52주낙폭%", "120일저점반등%",
-            "기준봉", "눌림목", "돌파", "저점상향", ret_col, "벤치마크수익률%", "초과수익률%", "최대하락률%",
+            "진입패턴", "기준봉", "눌림목", "돌파", "저점상향", ret_col, "벤치마크수익률%", "초과수익률%", "최대하락률%",
         ]
         show_cols = [c for c in show_cols if c in result.columns]
         st.dataframe(result[show_cols], use_container_width=True, height=560)
         csv = result.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("결과 CSV 다운로드", csv, file_name="holding_backtest_v2_result.csv", mime="text/csv")
+        st.download_button("결과 CSV 다운로드", csv, file_name="holding_backtest_v3_result.csv", mime="text/csv")
 
     if len(errdf):
         with st.expander("데이터 실패/제외 종목"):
