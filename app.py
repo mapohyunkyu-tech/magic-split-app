@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v20_GROUP_LOT_INPUT_20260615"
+APP_VERSION = "v21_LIMITED_RECOVERY_A_BUY_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3342,15 +3342,24 @@ def calc_cash_lines(book_asset, base_amount):
 
 
 def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
-    """오늘 매수에 쓸 수 있는 최대 예산. 방어선 아래로 내려가는 매수는 차단."""
+    """오늘 매수에 쓸 수 있는 최대 예산.
+
+    v21 핵심:
+    - 회수모드/강한 회수모드는 전체 매수 0원
+    - 제한회복모드는 신규매수는 금지하지만, 보유종목 A등급 추가매수만 제한 허용
+    - 제한매수모드는 신규/추가를 모두 소량 허용
+    - 절대방어선 아래로 내려가는 매수는 항상 차단
+    """
     cash = int(cash)
     base_amount = int(base_amount)
     hard = int(cash_lines.get("절대방어선", 0))
     available = max(cash - hard, 0)
     if mode in ["강한 회수모드", "회수모드"]:
         return 0
+    if mode == "제한회복모드":
+        return int(min(available * 0.10, base_amount * 4))
     if mode == "제한매수모드":
-        return int(min(available * 0.20, base_amount * 4))
+        return int(min(available * 0.20, base_amount * 6))
     return int(min(available * 0.30, base_amount * 10))
 
 
@@ -3370,8 +3379,14 @@ def get_account_stage(book_asset):
 
 
 def downgrade_mode(current_mode, new_mode):
-    rank = {"정상운용": 1, "제한매수모드": 2, "회수모드": 3, "강한 회수모드": 4}
-    return new_mode if rank[new_mode] > rank[current_mode] else current_mode
+    rank = {
+        "정상운용": 1,
+        "제한매수모드": 2,      # 신규 소량 + 추가 A/B 일부 허용
+        "제한회복모드": 3,      # 신규 금지 + 보유 A등급 추가매수만 제한 허용
+        "회수모드": 4,          # 신규/추가 금지, 매도/현금회복 우선
+        "강한 회수모드": 5,
+    }
+    return new_mode if rank.get(new_mode, 99) > rank.get(current_mode, 99) else current_mode
 
 
 def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, target_holdings_input=None, used_20_slots=0):
@@ -3387,23 +3402,30 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     mode = "정상운용"
     reasons = []
 
-    # v18: 700/1000/1500 고정금액이 아니라 장부자산 비율 + 기본매수금액 기준으로 자동 계산
+    # v21: 정상선 미만이라고 전체 매수 0원이 아니다.
+    # 경고선~정상선은 "제한회복모드"로 두고 신규는 금지하되 보유 A등급만 제한 추가매수 허용.
     if cash < cash_lines["절대방어선"]:
         mode = downgrade_mode(mode, "강한 회수모드")
         reasons.append(f"예수금 절대방어선 미만({fmt_won(cash_lines['절대방어선'])})")
-    elif cash < cash_lines["경고선"]:
-        mode = downgrade_mode(mode, "회수모드")
-        reasons.append(f"예수금 경고선 미만({fmt_won(cash_lines['경고선'])})")
     elif cash < cash_lines["정상선"]:
+        mode = downgrade_mode(mode, "제한회복모드")
+        if cash < cash_lines["경고선"]:
+            reasons.append(f"예수금 경고선 미만({fmt_won(cash_lines['경고선'])})")
+        else:
+            reasons.append(f"예수금 정상선 미만({fmt_won(cash_lines['정상선'])})")
+    elif cash < cash_lines["여유선"]:
         mode = downgrade_mode(mode, "제한매수모드")
-        reasons.append(f"예수금 정상선 미만({fmt_won(cash_lines['정상선'])})")
+        reasons.append(f"예수금 여유선 미만({fmt_won(cash_lines['여유선'])})")
 
     loss_pct = (unrealized / book_asset * 100) if book_asset > 0 else 0
     if loss_pct <= -12:
         mode = downgrade_mode(mode, "강한 회수모드")
         reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
-    elif loss_pct <= -8:
+    elif loss_pct <= -10:
         mode = downgrade_mode(mode, "회수모드")
+        reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
+    elif loss_pct <= -8:
+        mode = downgrade_mode(mode, "제한회복모드")
         reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
     elif loss_pct <= -5:
         mode = downgrade_mode(mode, "제한매수모드")
@@ -3422,10 +3444,14 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     if mode in ["강한 회수모드", "회수모드"]:
         new_buy_count = 0
         add_buy_count = 0
+    elif mode == "제한회복모드":
+        budget_count = int(daily_budget // base_amount)
+        new_buy_count = 0
+        add_buy_count = min(budget_count, 4)
     elif mode == "제한매수모드":
         budget_count = int(daily_budget // base_amount)
         new_buy_count = min(room_to_target, budget_count, 2)
-        add_buy_count = min(budget_count, 3)
+        add_buy_count = min(budget_count, 5)
     else:
         budget_count = int(daily_budget // base_amount)
         new_buy_count = min(room_to_target, budget_count, 10)
@@ -3675,8 +3701,10 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     out = out.sort_values(["허용순위", "점수", "손실우선", "거래대금점수"], ascending=[False, False, True, False]).reset_index(drop=True)
     out["순위"] = np.arange(1, len(out) + 1)
 
-    if mode == "제한매수모드":
+    if mode == "제한회복모드":
         allow_mask = out["보유판정"].eq("추가매수 A")
+    elif mode == "제한매수모드":
+        allow_mask = out["보유판정"].isin(["추가매수 A", "추가매수 B"])
     elif mode == "정상운용":
         allow_mask = out["보유판정"].isin(["추가매수 A", "추가매수 B"])
     else:
@@ -4410,8 +4438,10 @@ elif menu == "2. 운영판단기":
 
         if result["운영모드"] in ["강한 회수모드", "회수모드"]:
             st.error("신규매수 금지. 익절/본전/요양원 차수 매도 후 재매수하지 말고 예수금 회복.")
+        elif result["운영모드"] == "제한회복모드":
+            st.warning(f"신규매수 금지. 보유종목 판단기에서 추가매수 A등급만 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도 내 제한 허용.")
         elif result["운영모드"] == "제한매수모드":
-            st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. TOP50 상위권만 제한 진입.")
+            st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. 추가매수는 A/B등급만 제한 허용.")
         else:
             st.success(f"정상운용 가능. 신규매수 최대 {result['신규매수가능개수']}개.")
 
