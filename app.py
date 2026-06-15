@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v22_PLAIN_GROUP_HEADER_20260615"
+APP_VERSION = "v25_TEST_MODE_NO_SAVE_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -61,8 +61,8 @@ HOLDINGS_COLUMNS = [
 
 HOLDING_JUDGE_COLUMNS = [
     "순위", "오늘추가매수", "보유판정", "판정사유", "코드", "종목", "차수",
-    "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수손익률",
-    "종목총수량", "종목평균단가_자동", "종목전체손익률_자동", "요양원여부",
+    "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
+    "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
     "등급", "점수", "그룹", "과열상태", "당일등락률", "갭상승률", "눌림률",
     "20일수익률", "60일수익률", "거래대금60억", "거래대금점수", "회전점수",
     "기술점수", "모멘텀점수", "데이터기준일", "데이터주의",
@@ -2807,6 +2807,77 @@ def save_operation_settings(cash, cost, unrealized, total_holdings, nursing_coun
     return row
 
 
+def make_operation_row(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots):
+    return {
+        "저장시간": now_str(),
+        "예수금": int(cash),
+        "매입금액": int(cost),
+        "평가손익": int(unrealized),
+        "총보유종목수": int(total_holdings),
+        "요양원종목수": int(nursing_count),
+        "목표종목수": int(target_holdings),
+        "20만원슬롯사용개수": int(used_20_slots),
+    }
+
+
+def is_operation_test_mode():
+    return bool(st.session_state.get("operation_test_mode", False) and st.session_state.get("operation_test_settings"))
+
+
+def set_operation_test_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots):
+    row = make_operation_row(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots)
+    st.session_state["operation_test_mode"] = True
+    st.session_state["operation_test_settings"] = row
+    return row
+
+
+def clear_operation_test_settings():
+    st.session_state["operation_test_mode"] = False
+    st.session_state.pop("operation_test_settings", None)
+
+
+def get_effective_operation_settings(auto_nursing_count=0):
+    """
+    v25: 테스트모드가 켜져 있으면 Google Sheets의 운영설정을 덮어쓰지 않고
+    현재 브라우저 세션에만 저장된 테스트값을 TOP50/보유차수 판단기에 연동한다.
+    """
+    if is_operation_test_mode():
+        row = st.session_state.get("operation_test_settings", {}).copy()
+        out = {
+            "예수금": _safe_int_value(row.get("예수금", 0), 0),
+            "매입금액": _safe_int_value(row.get("매입금액", 0), 0),
+            "평가손익": _safe_int_value(row.get("평가손익", 0), 0),
+            "총보유종목수": _safe_int_value(row.get("총보유종목수", 0), 0),
+            "요양원종목수": _safe_int_value(row.get("요양원종목수", auto_nursing_count), auto_nursing_count),
+            "목표종목수": _safe_int_value(row.get("목표종목수", 0), 0),
+            "20만원슬롯사용개수": _safe_int_value(row.get("20만원슬롯사용개수", 0), 0),
+        }
+        if out["요양원종목수"] <= 0 and int(auto_nursing_count) > 0:
+            out["요양원종목수"] = int(auto_nursing_count)
+        return out
+    return load_operation_settings(auto_nursing_count)
+
+
+def maybe_save_or_test_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots, test_mode=False):
+    if test_mode:
+        return set_operation_test_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots), False
+    clear_operation_test_settings()
+    return save_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots), True
+
+
+def show_operation_test_banner(area_key=""):
+    if is_operation_test_mode():
+        s = get_effective_operation_settings()
+        st.info(
+            "🧪 테스트모드 적용 중: Google Sheets의 '운영설정'은 덮어쓰지 않습니다. "
+            "TOP50/보유차수 판단기는 현재 브라우저 세션의 테스트값을 사용합니다. "
+            f"예수금 {won_input_value(s['예수금'])} / 매입 {won_input_value(s['매입금액'])} / 평가손익 {won_input_value(s['평가손익'])}"
+        )
+        if st.button("테스트모드 해제", key=f"clear_operation_test_{area_key}"):
+            clear_operation_test_settings()
+            st.rerun()
+
+
 # =====================================================
 # 보유차수 저장/업로드 유틸
 # =====================================================
@@ -3182,7 +3253,7 @@ def judge_final_entry(row):
     except Exception:
         gap_pct = 0.0
 
-    if mode not in ["정상운용", "제한매수모드"]:
+    if mode not in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
         reasons.append("운영모드 매수중단")
         critical = True
 
@@ -3376,6 +3447,8 @@ def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
         return 0
     if mode == "제한회복모드":
         return int(min(available * 0.10, base_amount * 4))
+    if mode == "손실주의 정상운용":
+        return int(min(available * 0.25, base_amount * 8))
     if mode == "제한매수모드":
         return int(min(available * 0.20, base_amount * 6))
     return int(min(available * 0.30, base_amount * 10))
@@ -3399,10 +3472,11 @@ def get_account_stage(book_asset):
 def downgrade_mode(current_mode, new_mode):
     rank = {
         "정상운용": 1,
-        "제한매수모드": 2,      # 신규 소량 + 추가 A/B 일부 허용
-        "제한회복모드": 3,      # 신규 금지 + 보유 A등급 추가매수만 제한 허용
-        "회수모드": 4,          # 신규/추가 금지, 매도/현금회복 우선
-        "강한 회수모드": 5,
+        "손실주의 정상운용": 2,  # 예수금은 충분하지만 남은 평가손실이 큰 상태
+        "제한매수모드": 3,      # 신규 소량 + 추가 A/B 일부 허용
+        "제한회복모드": 4,      # 신규 금지 + 보유 A등급 추가매수만 제한 허용
+        "회수모드": 5,          # 신규/추가 금지, 매도/현금회복 우선
+        "강한 회수모드": 6,
     }
     return new_mode if rank.get(new_mode, 99) > rank.get(current_mode, 99) else current_mode
 
@@ -3416,9 +3490,13 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     target_holdings = stage_target if target_holdings_input is None or target_holdings_input <= 0 else int(target_holdings_input)
     active_count = max(int(total_holdings) - int(nursing_count), 0)
     cash_lines = calc_cash_lines(book_asset, base_amount)
+    actual_asset = int(cash + cost + unrealized)
+    cash_ratio = (cash / book_asset * 100) if book_asset > 0 else 0
+    cost_ratio = (cost / book_asset * 100) if book_asset > 0 else 0
 
     mode = "정상운용"
     reasons = []
+    loss_interpretation = "정상"
 
     # v21: 정상선 미만이라고 전체 매수 0원이 아니다.
     # 경고선~정상선은 "제한회복모드"로 두고 신규는 금지하되 보유 A등급만 제한 추가매수 허용.
@@ -3436,17 +3514,47 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         reasons.append(f"예수금 여유선 미만({fmt_won(cash_lines['여유선'])})")
 
     loss_pct = (unrealized / book_asset * 100) if book_asset > 0 else 0
+    # v24: 익절/회수로 매입금액이 줄고 예수금이 늘면, 남은 종목만 평가손실로 남아
+    # 평가손익률이 더 나빠 보일 수 있다. 그래서 평가손익률만으로 회수모드를 확정하지 않고
+    # 예수금비중/예수금방어선 충족 여부를 함께 본다.
+    cash_defended = cash >= cash_lines["정상선"] and cash_ratio >= 25
+    cash_very_defended = cash >= cash_lines["여유선"] or cash_ratio >= 45
     if loss_pct <= -12:
-        mode = downgrade_mode(mode, "강한 회수모드")
-        reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
+        if cash_defended:
+            if cash_very_defended:
+                mode = downgrade_mode(mode, "손실주의 정상운용")
+            else:
+                mode = downgrade_mode(mode, "제한매수모드")
+            loss_interpretation = "평가손실은 크지만 예수금 방어선이 충분함. 익절/회수 후 남은 평가손실 왜곡 가능."
+            reasons.append(f"평가손익률 {loss_pct:.1f}%이나 예수금비중 {cash_ratio:.1f}%로 현금방어 보정")
+        else:
+            mode = downgrade_mode(mode, "강한 회수모드")
+            loss_interpretation = "평가손실 크고 현금방어 부족"
+            reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
     elif loss_pct <= -10:
-        mode = downgrade_mode(mode, "회수모드")
-        reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
+        if cash_defended:
+            if cash_very_defended:
+                mode = downgrade_mode(mode, "손실주의 정상운용")
+            else:
+                mode = downgrade_mode(mode, "제한매수모드")
+            loss_interpretation = "평가손실은 크지만 예수금이 충분하여 회수모드까지는 아님"
+            reasons.append(f"평가손익률 {loss_pct:.1f}%이나 예수금비중 {cash_ratio:.1f}%로 현금방어 보정")
+        else:
+            mode = downgrade_mode(mode, "회수모드")
+            loss_interpretation = "평가손실 크고 현금방어 부족"
+            reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
     elif loss_pct <= -8:
-        mode = downgrade_mode(mode, "제한회복모드")
-        reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
+        if cash_defended:
+            mode = downgrade_mode(mode, "제한매수모드")
+            loss_interpretation = "평가손실 주의. 신규/추가 모두 제한적으로만 허용"
+            reasons.append(f"평가손익률 {loss_pct:.1f}%이나 예수금비중 {cash_ratio:.1f}%로 제한매수")
+        else:
+            mode = downgrade_mode(mode, "제한회복모드")
+            loss_interpretation = "평가손실 주의 + 현금 정상선 미만"
+            reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
     elif loss_pct <= -5:
         mode = downgrade_mode(mode, "제한매수모드")
+        loss_interpretation = "평가손실 주의"
         reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
 
     if total_holdings > target_holdings:
@@ -3470,6 +3578,10 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         budget_count = int(daily_budget // base_amount)
         new_buy_count = min(room_to_target, budget_count, 2)
         add_buy_count = min(budget_count, 5)
+    elif mode == "손실주의 정상운용":
+        budget_count = int(daily_budget // base_amount)
+        new_buy_count = min(room_to_target, budget_count, 4)
+        add_buy_count = min(budget_count, 6)
     else:
         budget_count = int(daily_budget // base_amount)
         new_buy_count = min(room_to_target, budget_count, 10)
@@ -3495,6 +3607,10 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         "평가손익": unrealized,
         "평가손익률": round(loss_pct, 2),
         "장부자산": book_asset,
+        "실제평가자산": actual_asset,
+        "예수금비중": round(cash_ratio, 2),
+        "매입금액비중": round(cost_ratio, 2),
+        "평가손익해석": loss_interpretation,
         "총보유종목수": total_holdings,
         "요양원종목수": nursing_count,
         "액티브종목수": active_count,
@@ -3570,8 +3686,8 @@ def judge_holding_row(row, info, op, is_excluded=False):
 
     # 정상운용에서만 가능한 B
     if score >= 70 and -25 <= pnl_pct <= -5 and step <= 4:
-        if mode == "정상운용":
-            return "추가매수 B", "허용후보", f"정상운용용 / 점수 {score:.1f} / 차수손익 {pnl_pct:.1f}%"
+        if mode in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
+            return "추가매수 B", "허용후보", f"정상/제한운용용 / 점수 {score:.1f} / 차수손익 {pnl_pct:.1f}%"
         return "유지", "금지", "제한운용에서는 A등급만 추가매수"
 
     if score < 60 and pnl_pct <= -12:
@@ -3646,6 +3762,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
             info = info_cache.get(code, {}).copy()
             current = _safe_float_value(info.get("현재가", 0), 0)
             eval_amount = current * qty if current > 0 and qty > 0 else 0
+            pnl_amount = (eval_amount - cost) if current > 0 and qty > 0 and cost > 0 else 0
             pnl_pct = ((current / entry - 1) * 100) if entry > 0 and current > 0 else 0
             info["차수손익률"] = pnl_pct
             info["현재손익률"] = pnl_pct
@@ -3665,6 +3782,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "수량": qty,
                 "매입금액": int(cost),
                 "차수평가금액": int(eval_amount),
+                "차수평가손익": int(pnl_amount),
                 "차수손익률": round(pnl_pct, 2),
                 "종목총수량": 0,
                 "종목평균단가_자동": 0,
@@ -3704,14 +3822,16 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     grp = out.groupby("코드").agg(
         종목총수량=("수량", "sum"),
         종목총매입금액=("매입금액", "sum"),
-        종목총평가금액=("차수평가금액", "sum")
+        종목총평가금액=("차수평가금액", "sum"),
+        종목전체평가손익_자동=("차수평가손익", "sum")
     ).reset_index()
     grp["종목평균단가_자동"] = np.where(grp["종목총수량"] > 0, grp["종목총매입금액"] / grp["종목총수량"], 0)
     grp["종목전체손익률_자동"] = np.where(grp["종목총매입금액"] > 0, (grp["종목총평가금액"] / grp["종목총매입금액"] - 1) * 100, 0)
-    out = out.drop(columns=["종목총수량", "종목평균단가_자동", "종목전체손익률_자동"], errors="ignore").merge(
-        grp[["코드", "종목총수량", "종목평균단가_자동", "종목전체손익률_자동"]], on="코드", how="left"
+    out = out.drop(columns=["종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동"], errors="ignore").merge(
+        grp[["코드", "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동"]], on="코드", how="left"
     )
     out["종목평균단가_자동"] = out["종목평균단가_자동"].round(0).astype(int)
+    out["종목전체평가손익_자동"] = out["종목전체평가손익_자동"].round(0).astype(int)
     out["종목전체손익률_자동"] = out["종목전체손익률_자동"].round(2)
 
     out["허용순위"] = out["보유판정"].map({"추가매수 A": 5, "추가매수 B": 4, "유지": 2, "익절검토": 1, "회수후보": 0, "요양원후보": 0}).fillna(1)
@@ -4406,8 +4526,10 @@ elif menu == "2. 운영판단기":
     st.header("2. 운영판단기")
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
-    op_defaults = load_operation_settings(auto_nursing_count)
-    st.caption("운영판단 실행 시 입력값을 Google Sheets의 '운영설정' 탭에 저장하고, TOP50이 같은 값을 불러옵니다.")
+    op_defaults = get_effective_operation_settings(auto_nursing_count)
+    st.caption("운영판단 실행 시 저장모드면 Google Sheets의 '운영설정' 탭에 저장하고, 테스트모드면 현재 세션에서만 TOP50/보유차수 판단기에 연동합니다.")
+    show_operation_test_banner("operation")
+    test_mode = st.checkbox("🧪 테스트모드: 저장하지 않고 이번 세션에서만 적용", value=is_operation_test_mode(), key="op_test_mode")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -4427,13 +4549,17 @@ elif menu == "2. 운영판단기":
     with col7:
         used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=int(op_defaults["20만원슬롯사용개수"]), step=1, key="op_slot")
 
-    if st.button("운영판단 실행 + 저장", type="primary"):
+    op_button_label = "🧪 테스트 운영판단 실행(저장 안 함)" if test_mode else "운영판단 실행 + 저장"
+    if st.button(op_button_label, type="primary"):
         cash = parse_won(cash_text)
         cost = parse_won(cost_text)
         unrealized = parse_won(unreal_text)
-        save_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
+        _, saved_to_sheet = maybe_save_or_test_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots), test_mode=test_mode)
         result = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
-        st.success("운영설정 저장 완료. TOP50 메뉴에서도 같은 금액/종목수를 기본값으로 불러옵니다.")
+        if saved_to_sheet:
+            st.success("운영설정 저장 완료. TOP50/보유차수 판단기에서도 같은 금액/종목수를 기본값으로 불러옵니다.")
+        else:
+            st.success("테스트모드 실행 완료. Google Sheets에는 저장하지 않았고, 이번 세션에서만 TOP50/보유차수 판단기에 연동됩니다.")
 
         st.subheader("결과")
         c1, c2, c3, c4 = st.columns(4)
@@ -4443,6 +4569,8 @@ elif menu == "2. 운영판단기":
         c4.metric("회수필요", f"{result['회수필요종목수']}개")
 
         st.write("현재 단계:", result["단계"])
+        st.write("실제평가자산:", fmt_won(result["실제평가자산"]), "/ 예수금비중:", f"{result['예수금비중']}%", "/ 매입금액비중:", f"{result['매입금액비중']}%")
+        st.write("평가손익 해석:", result["평가손익해석"])
         st.write("기본매수금액:", fmt_won(result["기본매수금액"]), "/ 허용상한:", fmt_won(result["허용상한"]))
         st.write("목표종목수:", result["목표종목수"], "/ 최대종목수:", result["최대종목수"])
         st.write("액티브종목수:", result["액티브종목수"], "/ 요양원종목수:", result["요양원종목수"])
@@ -4460,6 +4588,8 @@ elif menu == "2. 운영판단기":
             st.warning(f"신규매수 금지. 보유종목 판단기에서 추가매수 A등급만 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도 내 제한 허용.")
         elif result["운영모드"] == "제한매수모드":
             st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. 추가매수는 A/B등급만 제한 허용.")
+        elif result["운영모드"] == "손실주의 정상운용":
+            st.warning(f"예수금은 충분하지만 남은 평가손실이 큽니다. 신규매수 최대 {result['신규매수가능개수']}개, 보유 A/B등급만 추가매수.")
         else:
             st.success(f"정상운용 가능. 신규매수 최대 {result['신규매수가능개수']}개.")
 
@@ -4474,7 +4604,8 @@ elif menu == "3. TOP50":
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
-    op_defaults = load_operation_settings(auto_nursing_count)
+    op_defaults = get_effective_operation_settings(auto_nursing_count)
+    show_operation_test_banner("top50")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -4496,13 +4627,17 @@ elif menu == "3. TOP50":
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("TOP50은 Google Sheets의 '운영설정' 저장값을 기본값으로 불러옵니다. 여기서 바꿔 생성해도 다시 저장됩니다.")
+    if is_operation_test_mode():
+        st.info("TOP50은 테스트모드 운영값을 사용합니다. 생성해도 Google Sheets 운영설정은 저장하지 않습니다.")
+    else:
+        st.info("TOP50은 Google Sheets의 '운영설정' 저장값을 기본값으로 불러옵니다. 여기서 바꿔 생성하면 다시 저장됩니다.")
 
-    if st.button("TOP50 생성 + 운영설정 저장", type="primary"):
+    top_button_label = "🧪 TOP50 생성(테스트값 적용/저장 안 함)" if is_operation_test_mode() else "TOP50 생성 + 운영설정 저장"
+    if st.button(top_button_label, type="primary"):
         cash = parse_won(cash_text)
         cost = parse_won(cost_text)
         unrealized = parse_won(unreal_text)
-        save_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
+        maybe_save_or_test_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots), test_mode=is_operation_test_mode())
         op = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
 
         target_amount = op["기본매수금액"]
@@ -4695,8 +4830,11 @@ elif menu == "3. TOP50":
                 result_df[c] = ""
 
         top50 = result_df[TOP50_COLUMNS].head(50).copy()
-        save_top50_df(top50)
-        st.success("TOP50 생성 완료. Google Sheets의 TOP50 탭에도 저장했습니다.")
+        if is_operation_test_mode():
+            st.success("TOP50 테스트 생성 완료. Google Sheets의 TOP50/운영설정 탭에는 저장하지 않았습니다.")
+        else:
+            save_top50_df(top50)
+            st.success("TOP50 생성 완료. Google Sheets의 TOP50 탭에도 저장했습니다.")
         if new_buy_limit <= 0 and not use_relaxed:
             st.warning("현재 신규매수 0개. 아래 후보는 참고용입니다.")
         if use_relaxed:
@@ -4710,7 +4848,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v22는 차수별 판단은 유지하되, 종목명을 괄호 없이 한 번만 쓰고 아래에 차수만 여러 줄 입력할 수 있습니다. [종목명] 방식도 계속 지원합니다.")
+    st.caption("v25는 익절/회수 후 평가손실 착시 보정에 테스트모드를 추가했습니다. 테스트모드는 운영설정을 Google Sheets에 저장하지 않고 이번 세션에서만 TOP50/보유차수 판단기에 연동합니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
@@ -4782,24 +4920,29 @@ elif menu == "4. 보유종목 판단기":
         st.download_button("보유차수 CSV 다운로드", data=holdings_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_holding_lots.csv", mime="text/csv")
 
     st.subheader("보유차수 추가매수/회수 판단")
-    op_defaults = load_operation_settings()
+    op_defaults = get_effective_operation_settings()
+    show_operation_test_banner("holdings")
     with st.form("hold_op_form"):
         c1, c2, c3 = st.columns(3)
-        cash = c1.number_input("예수금", min_value=0, value=int(op_defaults["예수금"]), step=100000, key="hold_cash")
-        cost = c2.number_input("매입금액", min_value=0, value=int(op_defaults["매입금액"]), step=100000, key="hold_cost")
-        unrealized = c3.number_input("평가손익", value=int(op_defaults["평가손익"]), step=100000, key="hold_unreal")
+        cash_text = c1.text_input("예수금", value=won_input_value(op_defaults["예수금"]), key="hold_cash")
+        cost_text = c2.text_input("매입금액", value=won_input_value(op_defaults["매입금액"]), key="hold_cost")
+        unreal_text = c3.text_input("평가손익", value=won_input_value(op_defaults["평가손익"]), key="hold_unreal")
         c4, c5, c6, c7 = st.columns(4)
         total_holdings = c4.number_input("총 보유종목수", min_value=0, value=int(op_defaults["총보유종목수"]), step=1, key="hold_total")
         nursing_count = c5.number_input("요양원 종목수", min_value=0, value=int(op_defaults["요양원종목수"]), step=1, key="hold_nursing")
         target_holdings = c6.number_input("목표종목수 0이면 자동", min_value=0, value=int(op_defaults["목표종목수"]), step=1, key="hold_target")
         used_20_slots = c7.number_input("20만원 슬롯 사용개수", min_value=0, value=int(op_defaults["20만원슬롯사용개수"]), step=1, key="hold_slot")
-        submitted = st.form_submit_button("보유차수 판단 실행 + 운영설정 저장", type="primary")
+        hold_button_label = "🧪 보유차수 판단 실행(테스트값 적용/저장 안 함)" if is_operation_test_mode() else "보유차수 판단 실행 + 운영설정 저장"
+        submitted = st.form_submit_button(hold_button_label, type="primary")
 
     if submitted:
         if len(holdings_df) == 0:
             st.error("저장된 보유차수가 없습니다.")
         else:
-            save_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
+            cash = parse_won(cash_text)
+            cost = parse_won(cost_text)
+            unrealized = parse_won(unreal_text)
+            maybe_save_or_test_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots), test_mode=is_operation_test_mode())
             op = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
 
             c1, c2, c3, c4 = st.columns(4)
