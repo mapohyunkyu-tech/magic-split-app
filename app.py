@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v16_SCORE_SECTOR_DATA_UPGRADE_20260614"
+APP_VERSION = "v17_OPERATION_SYNC_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -47,6 +47,11 @@ TOP50_COLUMNS = [
     "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "회전빈도20", "회전빈도60", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
+]
+
+OPERATION_COLUMNS = [
+    "저장시간", "예수금", "매입금액", "평가손익",
+    "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수"
 ]
 
 NAME_ALIAS = {
@@ -2723,6 +2728,69 @@ def save_top50_df(df):
     except Exception:
         pass
 
+
+def _safe_int_value(v, default=0):
+    try:
+        if v is None or str(v).strip() == "":
+            return int(default)
+        return int(float(str(v).replace(",", "")))
+    except Exception:
+        return int(default)
+
+
+def won_input_value(n):
+    try:
+        return f"{int(n):,}"
+    except Exception:
+        return str(n)
+
+
+def load_operation_settings(auto_nursing_count=0):
+    defaults = {
+        "예수금": 8_490_000,
+        "매입금액": 76_070_000,
+        "평가손익": -9_150_000,
+        "총보유종목수": 126,
+        "요양원종목수": int(auto_nursing_count),
+        "목표종목수": 0,
+        "20만원슬롯사용개수": 0,
+    }
+    try:
+        ws = get_ws("운영설정", OPERATION_COLUMNS)
+        df = read_worksheet_df(ws, OPERATION_COLUMNS)
+        if len(df) == 0:
+            return defaults
+        row = df.iloc[-1].to_dict()
+        out = defaults.copy()
+        for k in ["예수금", "매입금액", "평가손익", "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수"]:
+            out[k] = _safe_int_value(row.get(k, defaults[k]), defaults[k])
+        if out["요양원종목수"] <= 0 and int(auto_nursing_count) > 0:
+            out["요양원종목수"] = int(auto_nursing_count)
+        return out
+    except Exception:
+        return defaults
+
+
+def save_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots):
+    row = {
+        "저장시간": now_str(),
+        "예수금": int(cash),
+        "매입금액": int(cost),
+        "평가손익": int(unrealized),
+        "총보유종목수": int(total_holdings),
+        "요양원종목수": int(nursing_count),
+        "목표종목수": int(target_holdings),
+        "20만원슬롯사용개수": int(used_20_slots),
+    }
+    df = pd.DataFrame([row], columns=OPERATION_COLUMNS)
+    ws = get_ws("운영설정", OPERATION_COLUMNS)
+    write_worksheet(ws, df, OPERATION_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return row
+
 # =====================================================
 # 공통 유틸
 # =====================================================
@@ -3755,30 +3823,34 @@ elif menu == "2. 운영판단기":
     st.header("2. 운영판단기")
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
+    op_defaults = load_operation_settings(auto_nursing_count)
+    st.caption("운영판단 실행 시 입력값을 Google Sheets의 '운영설정' 탭에 저장하고, TOP50이 같은 값을 불러옵니다.")
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        cash_text = st.text_input("예수금", value="849만")
+        cash_text = st.text_input("예수금", value=won_input_value(op_defaults["예수금"]), key="op_cash")
     with col2:
-        cost_text = st.text_input("매입금액", value="7607만")
+        cost_text = st.text_input("매입금액", value=won_input_value(op_defaults["매입금액"]), key="op_cost")
     with col3:
-        unreal_text = st.text_input("평가손익", value="-915만")
+        unreal_text = st.text_input("평가손익", value=won_input_value(op_defaults["평가손익"]), key="op_unreal")
 
     col4, col5, col6, col7 = st.columns(4)
     with col4:
-        total_holdings = st.number_input("총 보유종목수", min_value=0, value=126, step=1)
+        total_holdings = st.number_input("총 보유종목수", min_value=0, value=int(op_defaults["총보유종목수"]), step=1, key="op_total")
     with col5:
-        nursing_count = st.number_input("요양원 종목수", min_value=0, value=auto_nursing_count, step=1)
+        nursing_count = st.number_input("요양원 종목수", min_value=0, value=int(op_defaults["요양원종목수"]), step=1, key="op_nursing")
     with col6:
-        target_holdings = st.number_input("목표종목수 0이면 자동", min_value=0, value=0, step=1)
+        target_holdings = st.number_input("목표종목수 0이면 자동", min_value=0, value=int(op_defaults["목표종목수"]), step=1, key="op_target")
     with col7:
-        used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=0, step=1)
+        used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=int(op_defaults["20만원슬롯사용개수"]), step=1, key="op_slot")
 
-    if st.button("운영판단 실행", type="primary"):
+    if st.button("운영판단 실행 + 저장", type="primary"):
         cash = parse_won(cash_text)
         cost = parse_won(cost_text)
         unrealized = parse_won(unreal_text)
+        save_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
         result = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
+        st.success("운영설정 저장 완료. TOP50 메뉴에서도 같은 금액/종목수를 기본값으로 불러옵니다.")
 
         st.subheader("결과")
         c1, c2, c3, c4 = st.columns(4)
@@ -3811,37 +3883,39 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형 v16입니다. 회전점수/업종라벨/데이터기준 보정 포함.")
+    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형입니다. 회전점수/업종라벨/데이터기준 보정 포함.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
+    op_defaults = load_operation_settings(auto_nursing_count)
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        cash_text = st.text_input("예수금", value="849만", key="top_cash")
+        cash_text = st.text_input("예수금", value=won_input_value(op_defaults["예수금"]), key="top_cash")
     with col2:
-        cost_text = st.text_input("매입금액", value="7607만", key="top_cost")
+        cost_text = st.text_input("매입금액", value=won_input_value(op_defaults["매입금액"]), key="top_cost")
     with col3:
-        unreal_text = st.text_input("평가손익", value="-915만", key="top_unreal")
+        unreal_text = st.text_input("평가손익", value=won_input_value(op_defaults["평가손익"]), key="top_unreal")
 
     col4, col5, col6, col7, col8 = st.columns(5)
     with col4:
-        total_holdings = st.number_input("총 보유종목수", min_value=0, value=126, step=1, key="top_total")
+        total_holdings = st.number_input("총 보유종목수", min_value=0, value=int(op_defaults["총보유종목수"]), step=1, key="top_total")
     with col5:
-        nursing_count = st.number_input("요양원 종목수", min_value=0, value=auto_nursing_count, step=1, key="top_nursing")
+        nursing_count = st.number_input("요양원 종목수", min_value=0, value=int(op_defaults["요양원종목수"]), step=1, key="top_nursing")
     with col6:
-        target_holdings = st.number_input("목표종목수 0이면 자동", min_value=0, value=0, step=1, key="top_target")
+        target_holdings = st.number_input("목표종목수 0이면 자동", min_value=0, value=int(op_defaults["목표종목수"]), step=1, key="top_target")
     with col7:
-        used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=0, step=1, key="top_slot")
+        used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=int(op_defaults["20만원슬롯사용개수"]), step=1, key="top_slot")
     with col8:
         max_codes = st.number_input("계산 종목수", min_value=100, max_value=1200, value=700, step=100)
 
-    st.info("v16은 전체시장 실전형에 회전점수 분산, 업종 라벨 보정, 데이터 기준일 표시를 추가했습니다. 기본 700개, 느리면 400~500, 넓게 보려면 1000~1200으로 올리세요.")
+    st.info("TOP50은 Google Sheets의 '운영설정' 저장값을 기본값으로 불러옵니다. 여기서 바꿔 생성해도 다시 저장됩니다.")
 
-    if st.button("TOP50 생성", type="primary"):
+    if st.button("TOP50 생성 + 운영설정 저장", type="primary"):
         cash = parse_won(cash_text)
         cost = parse_won(cost_text)
         unrealized = parse_won(unreal_text)
+        save_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
         op = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
 
         target_amount = op["기본매수금액"]
