@@ -2,8 +2,6 @@ streamlit
 pandas
 numpy
 finance-datareader
-gspread
-google-auth
 setuptools
 wheel
 requests
