@@ -8,7 +8,7 @@
 
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v25_TEST_MODE_NO_SAVE_20260615"
+APP_VERSION = "v26_SNAPSHOT_SELECT_SYNC_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -52,6 +52,12 @@ TOP50_COLUMNS = [
 OPERATION_COLUMNS = [
     "저장시간", "예수금", "매입금액", "평가손익",
     "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수"
+]
+
+SNAPSHOT_COLUMNS = [
+    "기준일", "구분", "저장시간", "예수금", "매입금액", "평가손익",
+    "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수",
+    "추가입출금", "메모"
 ]
 
 
@@ -2807,6 +2813,147 @@ def save_operation_settings(cash, cost, unrealized, total_holdings, nursing_coun
     return row
 
 
+def load_operation_snapshots():
+    try:
+        ws = get_ws("운영스냅샷", SNAPSHOT_COLUMNS)
+        df = read_worksheet_df(ws, SNAPSHOT_COLUMNS)
+    except Exception:
+        return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+    if len(df) == 0:
+        return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+    df = df.copy()
+    for c in ["예수금", "매입금액", "평가손익", "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수", "추가입출금"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0).astype(int)
+    df["기준일"] = df["기준일"].astype(str)
+    df["구분"] = df["구분"].astype(str)
+    return df[SNAPSHOT_COLUMNS]
+
+
+def save_operation_snapshot(snapshot_date, role, cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots, deposit_withdraw=0, memo=""):
+    """같은 기준일+구분은 새 행으로 누적하지 않고 마지막 값으로 덮어쓴다."""
+    snapshot_date = pd.to_datetime(snapshot_date).strftime("%Y-%m-%d")
+    role = str(role).strip() or "오늘"
+    df = load_operation_snapshots()
+    if len(df) > 0:
+        mask = (df["기준일"].astype(str) == snapshot_date) & (df["구분"].astype(str) == role)
+        df = df.loc[~mask].copy()
+    row = {
+        "기준일": snapshot_date,
+        "구분": role,
+        "저장시간": now_str(),
+        "예수금": int(cash),
+        "매입금액": int(cost),
+        "평가손익": int(unrealized),
+        "총보유종목수": int(total_holdings),
+        "요양원종목수": int(nursing_count),
+        "목표종목수": int(target_holdings),
+        "20만원슬롯사용개수": int(used_20_slots),
+        "추가입출금": int(deposit_withdraw),
+        "메모": str(memo),
+    }
+    out = pd.concat([df, pd.DataFrame([row], columns=SNAPSHOT_COLUMNS)], ignore_index=True)
+    ws = get_ws("운영스냅샷", SNAPSHOT_COLUMNS)
+    write_worksheet(ws, out, SNAPSHOT_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return row
+
+
+def operation_row_to_settings(row, auto_nursing_count=0):
+    defaults = load_operation_settings(auto_nursing_count)
+    out = defaults.copy()
+    for k in ["예수금", "매입금액", "평가손익", "총보유종목수", "요양원종목수", "목표종목수", "20만원슬롯사용개수"]:
+        out[k] = _safe_int_value(row.get(k, defaults.get(k, 0)), defaults.get(k, 0))
+    if out["요양원종목수"] <= 0 and int(auto_nursing_count) > 0:
+        out["요양원종목수"] = int(auto_nursing_count)
+    return out
+
+
+def load_today_snapshot_or_settings(auto_nursing_count=0):
+    """TOP50/보유차수 판단기가 쓸 현재 운영값. 오늘 스냅샷이 있으면 우선 사용한다."""
+    df = load_operation_snapshots()
+    today = today_str()
+    if len(df) > 0:
+        exact = df[(df["기준일"].astype(str) == today) & (df["구분"].astype(str) == "오늘")]
+        if len(exact) > 0:
+            return operation_row_to_settings(exact.iloc[-1].to_dict(), auto_nursing_count)
+        todays = df[df["구분"].astype(str) == "오늘"].copy()
+        if len(todays) > 0:
+            todays["_dt"] = pd.to_datetime(todays["기준일"], errors="coerce")
+            todays = todays.sort_values(["_dt", "저장시간"])
+            return operation_row_to_settings(todays.iloc[-1].to_dict(), auto_nursing_count)
+    return load_operation_settings(auto_nursing_count)
+
+
+def find_previous_snapshot(base_date=None):
+    """오늘값과 비교할 전일/직전 스냅샷을 찾는다. 없으면 None."""
+    df = load_operation_snapshots()
+    if len(df) == 0:
+        return None
+    if base_date is None:
+        base = pd.to_datetime(today_str())
+    else:
+        base = pd.to_datetime(base_date)
+    df = df.copy()
+    df["_dt"] = pd.to_datetime(df["기준일"], errors="coerce")
+    yday = base - timedelta(days=1)
+    # 1순위: 전일 날짜로 저장된 어제값/오늘값
+    exact = df[(df["_dt"] == yday) & (df["구분"].isin(["어제", "오늘"]))]
+    if len(exact) > 0:
+        return exact.sort_values(["구분", "저장시간"]).iloc[-1].to_dict()
+    # 2순위: 기준일보다 과거인 최신 스냅샷
+    prev = df[df["_dt"] < base]
+    if len(prev) > 0:
+        return prev.sort_values(["_dt", "저장시간"]).iloc[-1].to_dict()
+    return None
+
+
+def describe_operation_delta(prev_row, curr_row):
+    if not prev_row:
+        return {"요약": "비교할 어제/직전 스냅샷 없음", "상태": "비교불가", "상세": []}
+    pc = _safe_int_value(prev_row.get("예수금", 0), 0)
+    pco = _safe_int_value(prev_row.get("매입금액", 0), 0)
+    pu = _safe_int_value(prev_row.get("평가손익", 0), 0)
+    ph = _safe_int_value(prev_row.get("총보유종목수", 0), 0)
+    cc = _safe_int_value(curr_row.get("예수금", 0), 0)
+    cco = _safe_int_value(curr_row.get("매입금액", 0), 0)
+    cu = _safe_int_value(curr_row.get("평가손익", 0), 0)
+    ch = _safe_int_value(curr_row.get("총보유종목수", 0), 0)
+    dep = _safe_int_value(curr_row.get("추가입출금", 0), 0)
+    dcash, dcost, dunreal, dhold = cc - pc, cco - pco, cu - pu, ch - ph
+    pure_cash = dcash - dep
+    detail = [
+        f"예수금 변화 {fmt_won(dcash)}",
+        f"매입금액 변화 {fmt_won(dcost)}",
+        f"평가손익 변화 {fmt_won(dunreal)}",
+        f"보유종목수 변화 {dhold:+d}개",
+    ]
+    if dep != 0:
+        detail.append(f"추가입출금 반영 {fmt_won(dep)} / 입출금 제외 예수금 변화 {fmt_won(pure_cash)}")
+    status = "중립"
+    summary = "변화만으로는 특이 패턴 없음"
+    if dcash > 0 and dcost < 0:
+        status = "회수진행"
+        summary = "예수금 증가 + 매입금액 감소: 익절/회수 진행 가능성이 큼"
+        if dunreal < 0:
+            summary += " / 평가손실 악화는 남은 손실종목 착시 가능"
+    elif dcash > 0 and abs(dcost) <= max(1000, int(abs(pco) * 0.005)) and dep > 0:
+        status = "입금반영"
+        summary = "예수금 증가는 주로 추가입금/출금 입력값 때문"
+    elif dcash < 0 and dcost > 0:
+        status = "매수확대"
+        summary = "예수금 감소 + 매입금액 증가: 매수/추가매수로 위험노출 증가"
+        if dunreal < 0:
+            summary += " / 평가손익도 악화되어 주의"
+    elif dcash > 0 and dcost <= 0:
+        status = "현금개선"
+        summary = "현금이 개선되고 매입금액은 늘지 않음"
+    return {"요약": summary, "상태": status, "상세": detail}
+
+
 def make_operation_row(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots):
     return {
         "저장시간": now_str(),
@@ -2855,14 +3002,21 @@ def get_effective_operation_settings(auto_nursing_count=0):
         if out["요양원종목수"] <= 0 and int(auto_nursing_count) > 0:
             out["요양원종목수"] = int(auto_nursing_count)
         return out
-    return load_operation_settings(auto_nursing_count)
+    return load_today_snapshot_or_settings(auto_nursing_count)
 
 
-def maybe_save_or_test_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots, test_mode=False):
+def maybe_save_or_test_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots, test_mode=False, snapshot_role="오늘", snapshot_date=None, deposit_withdraw=0, memo=""):
     if test_mode:
         return set_operation_test_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots), False
     clear_operation_test_settings()
-    return save_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots), True
+    if snapshot_date is None:
+        snapshot_date = today_str()
+    snap = save_operation_snapshot(snapshot_date, snapshot_role, cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots, deposit_withdraw, memo)
+    # 오늘값만 TOP50/보유차수와 즉시 연동하기 위해 운영설정도 갱신한다. 어제값은 비교용으로만 저장.
+    if str(snapshot_role) == "오늘":
+        save_operation_settings(cash, cost, unrealized, total_holdings, nursing_count, target_holdings, used_20_slots)
+        return snap, True
+    return snap, False
 
 
 def show_operation_test_banner(area_key=""):
@@ -4527,9 +4681,24 @@ elif menu == "2. 운영판단기":
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
     op_defaults = get_effective_operation_settings(auto_nursing_count)
-    st.caption("운영판단 실행 시 저장모드면 Google Sheets의 '운영설정' 탭에 저장하고, 테스트모드면 현재 세션에서만 TOP50/보유차수 판단기에 연동합니다.")
+    st.caption("v26은 어제값/오늘값을 선택 저장합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다. 테스트모드는 저장하지 않습니다.")
     show_operation_test_banner("operation")
-    test_mode = st.checkbox("🧪 테스트모드: 저장하지 않고 이번 세션에서만 적용", value=is_operation_test_mode(), key="op_test_mode")
+
+    col_mode1, col_mode2, col_mode3 = st.columns([1.3, 1.2, 1.5])
+    with col_mode1:
+        test_mode = st.checkbox("🧪 테스트모드: 저장하지 않고 이번 세션에서만 적용", value=is_operation_test_mode(), key="op_test_mode")
+    with col_mode2:
+        base_date = st.date_input("기준일", value=datetime.today().date(), key="op_base_date")
+    with col_mode3:
+        save_target = st.radio("저장대상", ["오늘값 저장·연동", "어제값 저장·비교용"], horizontal=True, disabled=test_mode, key="op_save_target")
+
+    if test_mode:
+        st.info("테스트모드에서는 어제/오늘 스냅샷과 운영설정을 저장하지 않습니다. TOP50/보유차수는 현재 세션 테스트값만 사용합니다.")
+    else:
+        if save_target.startswith("오늘"):
+            st.info("오늘값 저장: 같은 날짜의 오늘값을 덮어쓰고 TOP50/보유차수 판단기에 연동합니다.")
+        else:
+            st.info("어제값 저장: 비교용으로만 저장합니다. TOP50/보유차수 판단기의 현재 운영값은 바꾸지 않습니다.")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -4549,17 +4718,46 @@ elif menu == "2. 운영판단기":
     with col7:
         used_20_slots = st.number_input("20만원 슬롯 사용개수", min_value=0, value=int(op_defaults["20만원슬롯사용개수"]), step=1, key="op_slot")
 
-    op_button_label = "🧪 테스트 운영판단 실행(저장 안 함)" if test_mode else "운영판단 실행 + 저장"
+    col8, col9 = st.columns([1, 2])
+    with col8:
+        deposit_text = st.text_input("추가입출금", value="0", help="입금은 +, 출금은 -로 입력. 예: 10000000 또는 -5000000", key="op_deposit")
+    with col9:
+        op_memo = st.text_input("메모", value="", placeholder="예: 3종목 익절 후 저장 / 1000만원 입금 / 어제값 정정", key="op_memo")
+
+    op_button_label = "🧪 테스트 운영판단 실행(저장 안 함)" if test_mode else ("오늘값 저장 + 운영판단" if save_target.startswith("오늘") else "어제값 저장 + 비교용")
     if st.button(op_button_label, type="primary"):
         cash = parse_won(cash_text)
         cost = parse_won(cost_text)
         unrealized = parse_won(unreal_text)
-        _, saved_to_sheet = maybe_save_or_test_operation_settings(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots), test_mode=test_mode)
-        result = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
-        if saved_to_sheet:
-            st.success("운영설정 저장 완료. TOP50/보유차수 판단기에서도 같은 금액/종목수를 기본값으로 불러옵니다.")
+        deposit_withdraw = parse_won(deposit_text)
+        if test_mode:
+            snapshot_role = "테스트"
+            snapshot_date = pd.to_datetime(base_date).strftime("%Y-%m-%d")
+        elif save_target.startswith("오늘"):
+            snapshot_role = "오늘"
+            snapshot_date = pd.to_datetime(base_date).strftime("%Y-%m-%d")
         else:
+            snapshot_role = "어제"
+            snapshot_date = (pd.to_datetime(base_date) - timedelta(days=1)).strftime("%Y-%m-%d")
+        saved_row, linked_today = maybe_save_or_test_operation_settings(
+            cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots),
+            test_mode=test_mode, snapshot_role=snapshot_role, snapshot_date=snapshot_date,
+            deposit_withdraw=deposit_withdraw, memo=op_memo
+        )
+        result = decide_operation(cash, cost, unrealized, int(total_holdings), int(nursing_count), int(target_holdings), int(used_20_slots))
+        if test_mode:
             st.success("테스트모드 실행 완료. Google Sheets에는 저장하지 않았고, 이번 세션에서만 TOP50/보유차수 판단기에 연동됩니다.")
+        elif linked_today:
+            st.success(f"오늘값 저장 완료({snapshot_date}). TOP50/보유차수 판단기와 연동됩니다. 같은 날짜 오늘값은 덮어쓰기 방식입니다.")
+        else:
+            st.success(f"어제값 저장 완료({snapshot_date}). 비교용으로만 저장했고 TOP50/보유차수 현재 운영값은 바꾸지 않았습니다. 같은 날짜 어제값은 덮어쓰기 방식입니다.")
+
+        if not test_mode and snapshot_role == "오늘":
+            prev = find_previous_snapshot(snapshot_date)
+            delta = describe_operation_delta(prev, saved_row)
+            st.subheader("어제/직전 대비 변화")
+            st.info(delta["요약"])
+            st.write(delta["상세"])
 
         st.subheader("결과")
         c1, c2, c3, c4 = st.columns(4)
@@ -4848,7 +5046,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v25는 익절/회수 후 평가손실 착시 보정에 테스트모드를 추가했습니다. 테스트모드는 운영설정을 Google Sheets에 저장하지 않고 이번 세션에서만 TOP50/보유차수 판단기에 연동합니다.")
+    st.caption("v26은 어제값/오늘값 선택 저장과 테스트모드를 지원합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
