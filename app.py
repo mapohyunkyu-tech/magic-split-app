@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v19_LOT_HOLDINGS_JUDGE_20260615"
+APP_VERSION = "v20_GROUP_LOT_INPUT_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -2948,6 +2948,101 @@ def normalize_holdings_upload(raw_df, krx):
     out = pd.DataFrame(rows, columns=HOLDINGS_COLUMNS)
     return out, not_found
 
+
+def parse_manual_group_lot_text(manual_text, krx):
+    """
+    v20 묶음입력 파서.
+
+    지원 형식 1) 묶음입력
+    [삼성E&A]
+    1,64800,3
+    2,58400,3
+
+    지원 형식 2) 기존 한 줄 입력
+    삼성E&A,1,64800,3
+    삼성E&A,2,58400,3
+
+    종목명 뒤에 6자리 코드가 있어도 인식한다.
+    """
+    rows = []
+    not_found = []
+    current_stock = None
+
+    raw_lines = str(manual_text or "").splitlines()
+    for raw in raw_lines:
+        line = str(raw).strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+
+        # [종목명] 또는 【종목명】 헤더
+        if (line.startswith("[") and "]" in line) or (line.startswith("【") and "】" in line):
+            close = "]" if line.startswith("[") else "】"
+            name_text = line[1:line.find(close)].strip()
+            found = find_stock_by_name(name_text, krx)
+            if found is None:
+                current_stock = None
+                if name_text:
+                    not_found.append(name_text)
+            else:
+                current_stock = found
+            continue
+
+        # 구분자는 쉼표 우선. 탭/공백만 있는 경우도 최소 지원.
+        if "," in line:
+            parts = [x.strip() for x in line.split(",")]
+        elif "	" in line:
+            parts = [x.strip() for x in line.split("	")]
+        else:
+            parts = [x.strip() for x in re.split(r"\s+", line) if x.strip()]
+
+        if len(parts) < 3:
+            continue
+
+        # 묶음 헤더 아래: 차수,단가,수량[,요양원여부][,메모]
+        # 기존 방식: 종목명,차수,단가,수량[,요양원여부][,메모]
+        use_stock = current_stock
+        offset = 0
+        if current_stock is None or not re.fullmatch(r"\d+", str(parts[0]).replace("차", "")):
+            found = find_stock_by_name(parts[0], krx)
+            if found is None:
+                not_found.append(parts[0])
+                continue
+            use_stock = found
+            offset = 1
+
+        if use_stock is None:
+            continue
+        if len(parts) < offset + 3:
+            continue
+
+        step_raw = str(parts[offset]).replace("차", "").strip()
+        step = _safe_int_value(step_raw, 1)
+        entry = _safe_int_value(parts[offset + 1], 0)
+        qty = _safe_float_value(parts[offset + 2], 0)
+        if entry <= 0 or qty <= 0:
+            continue
+
+        nursing = "N"
+        memo = "묶음수동입력" if offset == 0 else "수동입력"
+        if len(parts) > offset + 3:
+            n_raw = str(parts[offset + 3]).strip().upper()
+            if n_raw in ["Y", "YES", "TRUE", "1", "요양원"]:
+                nursing = "Y"
+            elif n_raw not in ["", "N", "NO", "FALSE", "0"]:
+                memo = str(parts[offset + 3]).strip()
+        if len(parts) > offset + 4:
+            memo = str(parts[offset + 4]).strip()
+
+        rows.append({
+            "코드": use_stock["코드"], "종목": use_stock["종목"], "차수": int(step),
+            "진입단가": int(entry), "수량": qty, "매입금액": int(entry * qty),
+            "요양원여부": nursing, "메모": memo, "업데이트일": today_str()
+        })
+
+    out = pd.DataFrame(rows, columns=HOLDINGS_COLUMNS)
+    return out, not_found
+
+
 # =====================================================
 # 공통 유틸
 # =====================================================
@@ -4567,7 +4662,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v19는 평균단가를 직접 넣지 않습니다. 1차/2차/3차를 각각 입력하면 프로그램이 종목 전체 평균단가와 손익률을 자동 계산합니다.")
+    st.caption("v20은 차수별 판단은 유지하되, 수동입력에서 종목명은 [종목명]으로 한 번만 쓰고 아래에 차수만 여러 줄 입력할 수 있습니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
@@ -4585,7 +4680,7 @@ elif menu == "4. 보유종목 판단기":
 
     with st.expander("보유차수 CSV 업로드/저장", expanded=(len(holdings_df) == 0)):
         st.write("CSV에 종목코드/종목명/차수/진입단가/수량/매입금액 중 가능한 컬럼이 있으면 자동 인식합니다.")
-        st.info("예: 삼성E&A 1차 3주 64,800원 + 2차 3주 58,400원이면 두 줄로 입력합니다. 평균단가는 입력하지 않습니다.")
+        st.info("예: [삼성E&A] 아래에 1,64800,3 / 2,58400,3 처럼 입력합니다. 평균단가는 입력하지 않습니다.")
         uploaded = st.file_uploader("증권사 보유차수 CSV 업로드", type=["csv"])
         if uploaded is not None:
             try:
@@ -4604,42 +4699,28 @@ elif menu == "4. 보유종목 판단기":
                 st.rerun()
 
         st.divider()
-        st.write("수동 추가: `종목명,차수,진입단가,수량` 형식으로 한 줄씩 입력")
-        manual_text = st.text_area("수동 입력", placeholder="삼성E&A,1,64800,3\n삼성E&A,2,58400,3", height=120)
+        st.write("수동 추가: 묶음입력 `[종목명]` 아래에 `차수,진입단가,수량`을 넣습니다. 기존 `종목명,차수,진입단가,수량`도 지원합니다.")
+        manual_text = st.text_area(
+            "수동 입력",
+            placeholder="[삼성E&A]\n1,64800,3\n2,58400,3\n\n[대덕전자]\n1,23000,10\n2,20700,10",
+            height=180
+        )
         if st.button("수동 입력 추가/갱신"):
-            lines = normalize_name_text(manual_text)
-            rows = []
-            not_found = []
-            for line in lines:
-                parts = [x.strip() for x in str(line).split(",")]
-                if len(parts) < 1 or parts[0] == "":
-                    continue
-                found = find_stock_by_name(parts[0], krx)
-                if found is None:
-                    not_found.append(parts[0])
-                    continue
-                step = _safe_int_value(parts[1], 1) if len(parts) > 1 else 1
-                entry = _safe_int_value(parts[2], 0) if len(parts) > 2 else 0
-                qty = _safe_float_value(parts[3], 0) if len(parts) > 3 else 0
-                if entry <= 0 or qty <= 0:
-                    continue
-                rows.append({
-                    "코드": found["코드"], "종목": found["종목"], "차수": int(step),
-                    "진입단가": int(entry), "수량": qty, "매입금액": int(entry * qty),
-                    "요양원여부": "N", "메모": "수동입력", "업데이트일": today_str()
-                })
-            if rows:
+            parsed, not_found = parse_manual_group_lot_text(manual_text, krx)
+            if len(parsed) > 0:
+                st.write("인식 결과")
+                st.dataframe(parsed, use_container_width=True)
                 current = load_holdings_df()
-                combined = pd.concat([current, pd.DataFrame(rows)], ignore_index=True)
+                combined = pd.concat([current, parsed], ignore_index=True)
                 save_holdings_df(combined)
-                st.success(f"수동 보유차수 저장 완료: {len(rows)}개")
+                st.success(f"수동 보유차수 저장 완료: {len(parsed)}개")
                 if not_found:
-                    st.warning("못 찾은 종목: " + ", ".join(not_found))
+                    st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
                 st.rerun()
             else:
-                st.error("추가된 차수 0개. 형식은 `종목명,차수,진입단가,수량` 입니다.")
+                st.error("추가된 차수 0개. 형식은 `[종목명]` 다음 줄에 `차수,진입단가,수량` 입니다.")
                 if not_found:
-                    st.warning("못 찾은 종목: " + ", ".join(not_found))
+                    st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
 
     st.subheader("저장된 보유차수")
     if len(holdings_df) == 0:
@@ -4704,9 +4785,10 @@ else:
 
 ### 이번 버전 핵심
 
-- v17의 운영판단기/TOP50 입력값 연동을 유지합니다.
-- 예수금 방어선이 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
-- 보유차수 판단기를 추가했습니다. 1차/2차/3차를 각각 평가합니다.
+- v19의 보유차수 판단기를 유지합니다. 1차/2차/3차를 각각 평가합니다.
+- 수동입력에서 종목명을 여러 번 쓰지 않아도 됩니다. `[종목명]` 아래에 차수만 여러 줄 입력합니다.
+- 기존 `종목명,차수,진입단가,수량` 한 줄 입력도 계속 지원합니다.
+- 예수금 방어선은 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
 - 보유종목은 TOP50 유니버스 밖이어도 강제 계산 대상에 포함됩니다.
 - 제한매수모드에서는 보유종목 중 `추가매수 A`만 매수가능으로 표시합니다.
 
@@ -4714,9 +4796,21 @@ else:
 
 1. 요양원 메뉴에서 요양원 등록/졸업 관리
 2. 운영판단기에서 오늘 모드 확인
-3. 보유차수 판단기에 증권사 CSV 또는 수동 입력으로 1차/2차별 보유 저장
+3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
 4. 보유차수 판단기에서 추가매수/유지/회수 판단
 5. TOP50에서 신규 후보 출력
+
+### 묶음수동입력 예시
+
+```
+[삼성E&A]
+1,64800,3
+2,58400,3
+
+[대덕전자]
+1,23000,10
+2,20700,10
+```
 
 ### 주의
 
