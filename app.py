@@ -22,7 +22,7 @@ import FinanceDataReader as fdr
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v26_SNAPSHOT_SELECT_SYNC_20260615"
+APP_VERSION = "v26_HOLDING_DELETE_20260615"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5110,11 +5110,62 @@ elif menu == "4. 보유종목 판단기":
     if len(holdings_df) == 0:
         st.info("아직 저장된 보유차수가 없습니다. CSV 업로드 또는 수동 입력부터 하세요.")
     else:
-        edited = st.data_editor(holdings_df, use_container_width=True, num_rows="dynamic")
-        if st.button("수정사항 저장"):
-            save_holdings_df(edited)
+        st.caption("삭제할 차수는 왼쪽 '삭제' 체크 후 저장하거나, 아래에서 종목 전체를 삭제할 수 있습니다.")
+
+        delete_df = holdings_df.copy().reset_index(drop=True)
+        delete_df.insert(0, "삭제", False)
+        edited = st.data_editor(
+            delete_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="holdings_lot_editor_with_delete",
+            column_config={
+                "삭제": st.column_config.CheckboxColumn("삭제", help="체크 후 '체크한 차수 삭제'를 누르면 해당 행이 삭제됩니다."),
+                "코드": st.column_config.TextColumn("코드", disabled=True),
+                "종목": st.column_config.TextColumn("종목"),
+                "업데이트일": st.column_config.TextColumn("업데이트일", disabled=True),
+            }
+        )
+
+        b1, b2, b3 = st.columns([1, 1, 2])
+        if b1.button("수정사항 저장", key="save_holdings_editor_changes"):
+            to_save = edited.drop(columns=["삭제"], errors="ignore")
+            save_holdings_df(to_save)
             st.success("보유차수 수정 저장 완료")
             st.rerun()
+
+        if b2.button("체크한 차수 삭제", key="delete_checked_holding_lots"):
+            checked = edited["삭제"].astype(bool) if "삭제" in edited.columns else pd.Series(False, index=edited.index)
+            delete_count = int(checked.sum())
+            if delete_count <= 0:
+                st.warning("삭제 체크된 차수가 없습니다.")
+            else:
+                remain = edited.loc[~checked].drop(columns=["삭제"], errors="ignore")
+                save_holdings_df(remain)
+                st.success(f"체크한 보유차수 {delete_count}개 삭제 완료")
+                st.rerun()
+
+        # 종목 전체 삭제: 여러 차수를 한 번에 지울 때 사용.
+        stock_options = []
+        if len(holdings_df) > 0:
+            grouped_tmp = holdings_df[["코드", "종목"]].drop_duplicates().copy()
+            grouped_tmp["표시"] = grouped_tmp["종목"].astype(str) + " (" + grouped_tmp["코드"].astype(str) + ")"
+            stock_options = grouped_tmp["표시"].tolist()
+        with st.expander("종목 전체 삭제", expanded=False):
+            st.warning("선택한 종목의 1차/2차/3차 등 저장된 모든 차수가 삭제됩니다. 매도/요양원 졸업 후 보유목록에서 뺄 때 사용하세요.")
+            selected_stock = st.selectbox("삭제할 종목", options=[""] + stock_options, key="delete_whole_stock_select")
+            if st.button("선택 종목 전체 삭제", key="delete_whole_stock_button"):
+                if not selected_stock:
+                    st.warning("삭제할 종목을 선택하세요.")
+                else:
+                    code = selected_stock.split("(")[-1].replace(")", "").strip()
+                    before = len(holdings_df)
+                    remain = holdings_df[holdings_df["코드"].astype(str).str.zfill(6) != str(code).zfill(6)].copy()
+                    deleted = before - len(remain)
+                    save_holdings_df(remain)
+                    st.success(f"{selected_stock} 보유차수 {deleted}개 삭제 완료")
+                    st.rerun()
+
         st.download_button("보유차수 CSV 다운로드", data=holdings_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_holding_lots.csv", mime="text/csv")
 
     st.subheader("보유차수 추가매수/회수 판단")
