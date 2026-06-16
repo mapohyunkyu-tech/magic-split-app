@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_OBVIOUS_FIX_20260616"
+APP_VERSION = "v27_SECTOR_AUTO_LEARNING_MAP_20260616"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -80,6 +80,18 @@ HOLDING_JUDGE_COLUMNS = [
     "20일수익률", "60일수익률", "거래대금60억", "거래대금점수", "회전점수",
     "기술점수", "모멘텀점수", "데이터기준일", "데이터주의",
     "운영모드", "일일추가매수상한", "추가매수가능개수"
+]
+
+SECTOR_MAPPING_COLUMNS = [
+    "종목코드", "종목명", "그룹", "섹터신뢰", "메모"
+]
+
+SECTOR_UNCLASSIFIED_COLUMNS = [
+    "최초발생일", "최근발생일", "발생원천", "발생횟수",
+    "종목코드", "종목명", "현재그룹", "현재신뢰", "현재판정",
+    "추천섹터", "추천신뢰", "추천사유",
+    "테마실체", "테마리스크", "점수", "20일수익률", "60일수익률",
+    "처리상태", "메모"
 ]
 
 NAME_ALIAS = {
@@ -2722,6 +2734,98 @@ def today_str():
     return datetime.today().strftime("%Y-%m-%d")
 
 
+def _sector_code_norm_v27(v):
+    s = str(v or "").strip().replace(".0", "")
+    s = re.sub(r"[^0-9]", "", s)
+    if not s:
+        return ""
+    return s.zfill(6)
+
+
+def _sector_name_key_v27(v):
+    return str(v or "").strip().upper().replace(" ", "")
+
+
+def load_sector_mapping_df_v27():
+    """Google Sheets 섹터매핑 탭을 읽는다. 없으면 자동 생성된다."""
+    ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
+    df = read_worksheet_df(ws, SECTOR_MAPPING_COLUMNS)
+    for c in SECTOR_MAPPING_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    if len(df) > 0:
+        df["종목코드"] = df["종목코드"].apply(_sector_code_norm_v27)
+    return df[SECTOR_MAPPING_COLUMNS].copy()
+
+
+def save_sector_mapping_df_v27(df):
+    ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
+    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_MAPPING_COLUMNS)
+    for c in SECTOR_MAPPING_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    if len(out) > 0:
+        out["종목코드"] = out["종목코드"].apply(_sector_code_norm_v27)
+        out = out[(out["종목코드"].astype(str).str.len() > 0) | (out["종목명"].astype(str).str.len() > 0)].copy()
+        out = out.drop_duplicates(subset=["종목코드", "종목명"], keep="last").reset_index(drop=True)
+    write_worksheet(ws, out[SECTOR_MAPPING_COLUMNS], SECTOR_MAPPING_COLUMNS)
+    try:
+        load_sector_mapping_v27.clear()
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sector_mapping_v27():
+    """섹터매핑 탭을 코드/종목명 딕셔너리로 캐시한다. TOP50/보유차수 공통 최우선 원천."""
+    result = {"by_code": {}, "by_name": {}}
+    try:
+        df = load_sector_mapping_df_v27()
+    except Exception:
+        return result
+    if df is None or len(df) == 0:
+        return result
+    for _, r in df.iterrows():
+        code = _sector_code_norm_v27(r.get("종목코드", ""))
+        name = str(r.get("종목명", "")).strip()
+        group = str(r.get("그룹", "")).strip()
+        trust = str(r.get("섹터신뢰", "")).strip() or "확정"
+        memo = str(r.get("메모", "")).strip() or "섹터매핑"
+        if not group or group == "기타":
+            continue
+        rec = (group, trust, memo)
+        if code:
+            result["by_code"][code] = rec
+        if name:
+            result["by_name"][_sector_name_key_v27(name)] = rec
+    return result
+
+
+def load_sector_unclassified_df_v27():
+    """Google Sheets 섹터미분류 탭을 읽는다. 없으면 자동 생성된다."""
+    ws = get_ws("섹터미분류", SECTOR_UNCLASSIFIED_COLUMNS)
+    df = read_worksheet_df(ws, SECTOR_UNCLASSIFIED_COLUMNS)
+    for c in SECTOR_UNCLASSIFIED_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    if len(df) > 0:
+        df["종목코드"] = df["종목코드"].apply(_sector_code_norm_v27)
+    return df[SECTOR_UNCLASSIFIED_COLUMNS].copy()
+
+
+def save_sector_unclassified_df_v27(df):
+    ws = get_ws("섹터미분류", SECTOR_UNCLASSIFIED_COLUMNS)
+    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_UNCLASSIFIED_COLUMNS)
+    for c in SECTOR_UNCLASSIFIED_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    if len(out) > 0:
+        out["종목코드"] = out["종목코드"].apply(_sector_code_norm_v27)
+        out = out[(out["종목코드"].astype(str).str.len() > 0) | (out["종목명"].astype(str).str.len() > 0)].copy()
+        out = out.drop_duplicates(subset=["종목코드"], keep="last").reset_index(drop=True)
+    write_worksheet(ws, out[SECTOR_UNCLASSIFIED_COLUMNS], SECTOR_UNCLASSIFIED_COLUMNS)
+
+
 def load_nursing_df():
     ws = get_ws("요양원목록", NURSING_COLUMNS)
     df = read_worksheet_df(ws, NURSING_COLUMNS)
@@ -4663,10 +4767,25 @@ def infer_sector_from_text_v27(name, source_text=""):
 
 
 def classify_sector_v27(code, name):
-    """TOP50/보유차수 공통 섹터 분류. 코드맵 > 외부업종텍스트 > 종목명 키워드 순."""
-    code = str(code).replace(".0", "").strip().zfill(6)
+    """TOP50/보유차수 공통 섹터 분류. 섹터매핑 > 코드맵 > 외부업종텍스트 > 종목명 키워드 순."""
+    code = _sector_code_norm_v27(code)
     name = str(name).strip()
-    name_key = name.upper().replace(" ", "")
+    name_key = _sector_name_key_v27(name)
+
+    # Google Sheets 섹터매핑 탭이 최우선이다.
+    # 사용자가 직접 분류하지 않아도, 섹터미분류 자동학습에서 반영된 보정값도 여기로 들어온다.
+    try:
+        mapping = load_sector_mapping_v27()
+        if code in mapping.get("by_code", {}):
+            group, trust, memo = mapping["by_code"][code]
+            judgement = "정상" if trust == "확정" else "자동보정확인"
+            return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": f"섹터매핑:{memo}"}
+        if name_key in mapping.get("by_name", {}):
+            group, trust, memo = mapping["by_name"][name_key]
+            judgement = "정상" if trust == "확정" else "자동보정확인"
+            return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": f"섹터매핑:{memo}"}
+    except Exception:
+        pass
 
     if code in SECTOR_CODE_MAP_V27:
         group, trust, memo = SECTOR_CODE_MAP_V27[code]
@@ -4797,6 +4916,187 @@ def sync_today_buy_with_final_v27(row):
     if today == "매수가능":
         return "대기"
     return today
+
+
+def suggest_sector_candidate_v27(row):
+    """기타/낮음 종목을 섹터미분류 탭에 쌓을 때 추천섹터 후보를 붙인다."""
+    code = _sector_code_norm_v27(row.get("코드", row.get("종목코드", "")))
+    name = str(row.get("종목", row.get("종목명", ""))).strip()
+
+    if code in SECTOR_CODE_MAP_V27:
+        group, trust, memo = SECTOR_CODE_MAP_V27[code]
+        return group, "확정후보", f"코드확정맵:{memo}"
+
+    name_key = _sector_name_key_v27(name)
+    for k, v in SECTOR_NAME_MAP_V27.items():
+        if _sector_name_key_v27(k) in name_key:
+            group, trust, memo = v
+            return group, "확정후보" if trust == "확정" else "보정후보", f"종목명확정맵:{memo}"
+
+    try:
+        source_text = load_external_sector_text_map_v27().get(code, "")
+    except Exception:
+        source_text = ""
+
+    if source_text:
+        group = infer_sector_from_text_v27(name, source_text)
+        if group and group != "기타":
+            return group, "보정후보", "KIND/FDR업종:" + str(source_text)[:80]
+
+    group = infer_sector_from_text_v27(name, "")
+    if group and group != "기타":
+        return group, "보정후보", "종목명키워드"
+
+    old_group = infer_group_by_name(name)
+    if old_group and old_group != "기타":
+        return old_group, "보정후보", "구버전키워드"
+
+    return "추천불가", "낮음", "자동추천실패"
+
+
+def upsert_sector_unclassified_candidates_v27(df, source="TOP50"):
+    """섹터신뢰 낮음/기타 종목을 섹터미분류 탭에 누적한다."""
+    if df is None or len(df) == 0:
+        return 0
+    work = df.copy()
+    for c in ["코드", "종목", "그룹", "섹터분류", "섹터신뢰", "섹터판정"]:
+        if c not in work.columns:
+            work[c] = ""
+    mask = (
+        work["섹터신뢰"].astype(str).eq("낮음")
+        | work["그룹"].astype(str).eq("기타")
+        | work["섹터분류"].astype(str).eq("기타")
+        | work["섹터판정"].astype(str).str.contains("수동확인", na=False)
+    )
+    target = work[mask].copy()
+    if len(target) == 0:
+        return 0
+
+    try:
+        exist = load_sector_unclassified_df_v27()
+    except Exception:
+        exist = pd.DataFrame(columns=SECTOR_UNCLASSIFIED_COLUMNS)
+    for c in SECTOR_UNCLASSIFIED_COLUMNS:
+        if c not in exist.columns:
+            exist[c] = ""
+    if len(exist) > 0:
+        exist["종목코드"] = exist["종목코드"].apply(_sector_code_norm_v27)
+
+    today = today_str()
+    by_code = {}
+    if len(exist) > 0:
+        for idx, r in exist.iterrows():
+            code = _sector_code_norm_v27(r.get("종목코드", ""))
+            if code:
+                by_code[code] = idx
+
+    changed = 0
+    for _, r in target.head(300).iterrows():
+        code = _sector_code_norm_v27(r.get("코드", ""))
+        if not code:
+            continue
+        name = str(r.get("종목", "")).strip()
+        rec_sector, rec_trust, rec_reason = suggest_sector_candidate_v27(r)
+        base = {
+            "최초발생일": today,
+            "최근발생일": today,
+            "발생원천": source,
+            "발생횟수": 1,
+            "종목코드": code,
+            "종목명": name,
+            "현재그룹": str(r.get("섹터분류", r.get("그룹", ""))) or str(r.get("그룹", "")),
+            "현재신뢰": str(r.get("섹터신뢰", "")),
+            "현재판정": str(r.get("섹터판정", "")),
+            "추천섹터": rec_sector,
+            "추천신뢰": rec_trust,
+            "추천사유": rec_reason,
+            "테마실체": str(r.get("테마실체", "")),
+            "테마리스크": str(r.get("테마리스크", "")),
+            "점수": r.get("점수", ""),
+            "20일수익률": r.get("20일수익률", ""),
+            "60일수익률": r.get("60일수익률", ""),
+            "처리상태": "대기",
+            "메모": "자동수집",
+        }
+        if code in by_code:
+            idx = by_code[code]
+            old_count = _safe_int_value(exist.at[idx, "발생횟수"], 0)
+            old_sources = str(exist.at[idx, "발생원천"] or "")
+            source_set = [x for x in old_sources.split("+") if x]
+            if source not in source_set:
+                source_set.append(source)
+            for k, v in base.items():
+                if k == "최초발생일":
+                    continue
+                if k == "발생횟수":
+                    exist.at[idx, k] = old_count + 1
+                elif k == "발생원천":
+                    exist.at[idx, k] = "+".join(source_set)
+                elif k == "처리상태" and str(exist.at[idx, k]) == "반영완료":
+                    continue
+                else:
+                    exist.at[idx, k] = v
+        else:
+            exist = pd.concat([exist, pd.DataFrame([base])], ignore_index=True)
+            by_code[code] = len(exist) - 1
+        changed += 1
+
+    if changed > 0:
+        save_sector_unclassified_df_v27(exist[SECTOR_UNCLASSIFIED_COLUMNS])
+    return changed
+
+
+def promote_sector_unclassified_to_mapping_v27(auto_only=True):
+    """섹터미분류의 추천섹터를 섹터매핑 탭에 반영한다. 추천불가/고위험은 제외."""
+    uncls = load_sector_unclassified_df_v27()
+    if uncls is None or len(uncls) == 0:
+        return 0
+    work = uncls.copy()
+    for c in SECTOR_UNCLASSIFIED_COLUMNS:
+        if c not in work.columns:
+            work[c] = ""
+    mask = (
+        ~work["처리상태"].astype(str).eq("반영완료")
+        & ~work["추천섹터"].astype(str).isin(["", "기타", "추천불가"])
+        & work["추천신뢰"].astype(str).isin(["확정후보", "보정후보", "보정"])
+        & ~work["테마리스크"].astype(str).eq("고위험")
+    )
+    candidates = work[mask].copy()
+    if len(candidates) == 0:
+        return 0
+
+    mapping = load_sector_mapping_df_v27()
+    rows = []
+    for _, r in candidates.iterrows():
+        code = _sector_code_norm_v27(r.get("종목코드", ""))
+        if not code:
+            continue
+        trust = "확정" if str(r.get("추천신뢰", "")) == "확정후보" else "보정"
+        rows.append({
+            "종목코드": code,
+            "종목명": str(r.get("종목명", "")).strip(),
+            "그룹": str(r.get("추천섹터", "")).strip(),
+            "섹터신뢰": trust,
+            "메모": "섹터미분류 자동학습: " + str(r.get("추천사유", ""))[:80],
+        })
+        target_mask = work["종목코드"].apply(_sector_code_norm_v27).eq(code)
+        work.loc[target_mask, "처리상태"] = "반영완료"
+        work.loc[target_mask, "메모"] = "섹터매핑 반영완료"
+
+    if not rows:
+        return 0
+    add_df = pd.DataFrame(rows)
+    merged = pd.concat([mapping, add_df], ignore_index=True)
+    merged["종목코드"] = merged["종목코드"].apply(_sector_code_norm_v27)
+    merged = merged.drop_duplicates(subset=["종목코드"], keep="last").reset_index(drop=True)
+    save_sector_mapping_df_v27(merged[SECTOR_MAPPING_COLUMNS])
+    save_sector_unclassified_df_v27(work[SECTOR_UNCLASSIFIED_COLUMNS])
+    try:
+        load_sector_mapping_v27.clear()
+    except Exception:
+        pass
+    return len(add_df)
+
 
 def score_candidate_core(df, name, regime="장세불명", high_price_limit=160000, strict=True, code=None):
     if df is None or len(df) < 80:
@@ -5594,6 +5894,14 @@ elif menu == "3. TOP50":
         result_df["판정사유"] = [x[1] for x in final_judgements]
         result_df["오늘매수"] = result_df.apply(sync_today_buy_with_final_v27, axis=1)
 
+        if not is_operation_test_mode():
+            try:
+                learned_count = upsert_sector_unclassified_candidates_v27(result_df, source="TOP50")
+                if learned_count > 0:
+                    st.info(f"섹터미분류 탭에 기타/낮음 후보 {learned_count}개를 자동 수집했습니다.")
+            except Exception as e:
+                st.warning(f"섹터미분류 자동수집은 건너뛰었습니다: {e}")
+
         for c in TOP50_COLUMNS:
             if c not in result_df.columns:
                 result_df[c] = ""
@@ -5777,6 +6085,13 @@ elif menu == "4. 보유종목 판단기":
                 st.error(diag["error"])
             else:
                 st.success("보유차수 판단 완료")
+                if not is_operation_test_mode():
+                    try:
+                        learned_count = upsert_sector_unclassified_candidates_v27(result, source="보유차수")
+                        if learned_count > 0:
+                            st.info(f"섹터미분류 탭에 보유차수 기타/낮음 후보 {learned_count}개를 자동 수집했습니다.")
+                    except Exception as e:
+                        st.warning(f"섹터미분류 자동수집은 건너뛰었습니다: {e}")
                 st.caption("평균단가는 사용자가 입력하지 않습니다. 종목평균단가_자동/종목전체손익률_자동은 참고용으로 프로그램이 계산합니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
                 st.dataframe(result, use_container_width=True, height=600)
@@ -5797,6 +6112,32 @@ elif menu == "5. 섹터진단":
     except Exception:
         external_map = {}
         st.warning("외부 업종 원천은 현재 불러오지 못했습니다. 코드확정맵/종목명 키워드로만 진단합니다.")
+
+    st.subheader("섹터 자동학습 현황")
+    try:
+        mapping_df = load_sector_mapping_df_v27()
+        uncls_df = load_sector_unclassified_df_v27()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("섹터매핑 반영", f"{len(mapping_df):,}개")
+        c2.metric("섹터미분류 누적", f"{len(uncls_df):,}개")
+        pending_count = int((uncls_df.get("처리상태", pd.Series(dtype=str)).astype(str) != "반영완료").sum()) if len(uncls_df) else 0
+        c3.metric("미처리", f"{pending_count:,}개")
+
+        with st.expander("섹터미분류 탭 보기", expanded=False):
+            st.caption("TOP50/보유차수에서 기타·낮음·수동확인필요로 나온 종목을 자동 누적합니다.")
+            st.dataframe(uncls_df.tail(200), use_container_width=True, height=300)
+            if st.button("추천섹터를 섹터매핑에 자동 반영", type="secondary"):
+                promoted = promote_sector_unclassified_to_mapping_v27()
+                if promoted > 0:
+                    st.success(f"섹터매핑 탭에 {promoted}개 반영 완료. 다음 TOP50/보유차수부터 우선 적용됩니다.")
+                    st.rerun()
+                else:
+                    st.info("자동 반영 가능한 추천섹터가 없습니다. 추천불가 또는 테마 고위험 후보는 그대로 대기합니다.")
+        with st.expander("섹터매핑 탭 보기", expanded=False):
+            st.caption("섹터매핑 탭은 TOP50/보유차수 공통 최우선 원천입니다.")
+            st.dataframe(mapping_df.tail(200), use_container_width=True, height=300)
+    except Exception as e:
+        st.warning(f"섹터 자동학습 탭 확인은 건너뛰었습니다: {e}")
 
     krx = load_krx_master_fdr()
     q = st.text_input("종목코드 또는 종목명", value="아이로보틱스", placeholder="예: 066430 또는 아이로보틱스")
