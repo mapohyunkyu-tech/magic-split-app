@@ -8,6 +8,7 @@
 
 import re
 import time
+import io
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -16,13 +17,14 @@ import streamlit as st
 
 from google.oauth2.service_account import Credentials
 import gspread
+import requests
 import FinanceDataReader as fdr
 
 # =====================================================
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v26_HOLDING_DELETE_20260615"
+APP_VERSION = "v27_SECTOR_AUTO_CONFIDENCE_UPGRADE_20260616"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -43,7 +45,7 @@ TOP50_COLUMNS = [
     "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
     "매수상태", "과열상태", "추격주의여부", "당일등락률", "갭상승률", "요양원여부",
-    "그룹", "섹터신뢰", "데이터기준일", "데이터주의",
+    "섹터분류", "섹터신뢰", "섹터판정", "데이터기준일", "데이터주의",
     "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "회전빈도20", "회전빈도60", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
@@ -69,10 +71,27 @@ HOLDING_JUDGE_COLUMNS = [
     "순위", "오늘추가매수", "보유판정", "판정사유", "코드", "종목", "차수",
     "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
-    "등급", "점수", "그룹", "과열상태", "당일등락률", "갭상승률", "눌림률",
+    "등급", "점수", "섹터분류", "섹터신뢰", "섹터판정", "과열상태", "당일등락률", "갭상승률", "눌림률",
     "20일수익률", "60일수익률", "거래대금60억", "거래대금점수", "회전점수",
     "기술점수", "모멘텀점수", "데이터기준일", "데이터주의",
     "운영모드", "일일추가매수상한", "추가매수가능개수"
+]
+
+SECTOR_MAPPING_COLUMNS = ["종목코드", "종목명", "그룹", "섹터신뢰", "메모"]
+
+DEFAULT_SECTOR_MAPPING_ROWS = [
+    {"종목코드": "028050", "종목명": "삼성E&A", "그룹": "플랜트/EPC", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "170920", "종목명": "엘티씨", "그룹": "반도체/디스플레이 소재", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "420770", "종목명": "기가비스", "그룹": "PCB/검사장비", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "252990", "종목명": "샘씨엔에스", "그룹": "반도체소재/부품", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "160980", "종목명": "싸이맥스", "그룹": "반도체장비", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "475150", "종목명": "SK이터닉스", "그룹": "신재생/전력/에너지", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "375500", "종목명": "DL이앤씨", "그룹": "건설/EPC", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "011200", "종목명": "HMM", "그룹": "해운", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "010950", "종목명": "S-Oil", "그룹": "정유", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "042660", "종목명": "한화오션", "그룹": "조선/방산", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "088350", "종목명": "한화생명", "그룹": "보험", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
+    {"종목코드": "008770", "종목명": "호텔신라", "그룹": "면세/호텔", "섹터신뢰": "확정", "메모": "수동보정 기본값"},
 ]
 
 NAME_ALIAS = {
@@ -2750,6 +2769,76 @@ def save_top50_df(df):
         pass
 
 
+def _normalize_sector_code(v):
+    raw = str(v or "").strip().replace(".0", "")
+    raw = re.sub(r"[^0-9]", "", raw)
+    return raw.zfill(6) if raw else ""
+
+
+def _normalize_sector_name(v):
+    return str(v or "").strip().upper().replace(" ", "")
+
+
+def _normalize_sector_trust(v, group=""):
+    text = str(v or "").strip()
+    if text in ["확정", "보정", "낮음"]:
+        return text
+    return "낮음" if str(group or "").strip() in ["", "기타"] else "확정"
+
+
+def _clean_sector_mapping_df(df):
+    if df is None or len(df) == 0:
+        df = pd.DataFrame(columns=SECTOR_MAPPING_COLUMNS)
+    out = df.copy()
+    for c in SECTOR_MAPPING_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[SECTOR_MAPPING_COLUMNS].copy()
+    out["종목코드"] = out["종목코드"].apply(_normalize_sector_code)
+    out["종목명"] = out["종목명"].astype(str).str.strip()
+    out["그룹"] = out["그룹"].astype(str).str.strip()
+    out["섹터신뢰"] = out.apply(lambda r: _normalize_sector_trust(r.get("섹터신뢰", ""), r.get("그룹", "")), axis=1)
+    out["메모"] = out["메모"].astype(str).str.strip()
+    # 코드 또는 종목명 중 하나라도 있어야 유효. 마지막 입력을 우선한다.
+    out = out[(out["종목코드"] != "") | (out["종목명"] != "")].copy()
+    if len(out) > 0:
+        out = out.drop_duplicates(subset=["종목코드", "종목명"], keep="last").reset_index(drop=True)
+    return out
+
+
+@st.cache_data(ttl=60 * 5, show_spinner=False)
+def load_sector_mapping_df_cached():
+    """Google Sheets '섹터매핑' 탭의 수동 보정값. 없으면 기본 샘플을 만들고, 실패하면 내장맵만 쓴다."""
+    try:
+        ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records)
+        if df is None or len(df) == 0:
+            df = pd.DataFrame(DEFAULT_SECTOR_MAPPING_ROWS, columns=SECTOR_MAPPING_COLUMNS)
+            write_worksheet(ws, df, SECTOR_MAPPING_COLUMNS)
+        return _clean_sector_mapping_df(df)
+    except Exception:
+        return pd.DataFrame(columns=SECTOR_MAPPING_COLUMNS)
+
+
+def load_sector_mapping_df():
+    return load_sector_mapping_df_cached()
+
+
+def save_sector_mapping_df(df):
+    ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
+    out = _clean_sector_mapping_df(df)
+    write_worksheet(ws, out, SECTOR_MAPPING_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    try:
+        load_sector_mapping_df_cached.clear()
+    except Exception:
+        pass
+
+
 def _safe_int_value(v, default=0):
     try:
         if v is None or str(v).strip() == "":
@@ -3397,6 +3486,7 @@ def judge_final_entry(row):
     today_buy = str(row.get("오늘매수", ""))
     buy_state = str(row.get("매수상태", ""))
     heat_state = str(row.get("과열상태", ""))
+    sector_trust = str(row.get("섹터신뢰", ""))
 
     try:
         day_pct = float(row.get("당일등락률", 0) or 0)
@@ -3418,6 +3508,9 @@ def judge_final_entry(row):
         reasons.append(f"상태 {buy_state}")
         if buy_state in ["추격주의", "관찰주의"]:
             critical = True
+
+    if sector_trust == "낮음":
+        reasons.append("섹터신뢰 낮음")
 
     if ("추격" in heat_state) or ("과열" in heat_state):
         reasons.append(heat_state)
@@ -3834,14 +3927,17 @@ def judge_holding_row(row, info, op, is_excluded=False):
     if "과열" in heat or "추격" in heat:
         return "유지", "금지", f"{heat}"
 
+    sector_trust = str(info.get("섹터신뢰", ""))
+    sector_note = " / 섹터 수동확인필요" if sector_trust == "낮음" else ""
+
     # 제한운용에서도 가능한 A: 점수 좋고 해당 차수가 정상 눌림인 경우
     if score >= 80 and -18 <= pnl_pct <= -5 and step <= 3:
-        return "추가매수 A", "허용후보", f"점수 {score:.1f} / 차수손익 {pnl_pct:.1f}% / {step}차"
+        return "추가매수 A", "허용후보", f"점수 {score:.1f} / 차수손익 {pnl_pct:.1f}% / {step}차{sector_note}"
 
     # 정상운용에서만 가능한 B
     if score >= 70 and -25 <= pnl_pct <= -5 and step <= 4:
         if mode in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
-            return "추가매수 B", "허용후보", f"정상/제한운용용 / 점수 {score:.1f} / 차수손익 {pnl_pct:.1f}%"
+            return "추가매수 B", "허용후보", f"정상/제한운용용 / 점수 {score:.1f} / 차수손익 {pnl_pct:.1f}%{sector_note}"
         return "유지", "금지", "제한운용에서는 A등급만 추가매수"
 
     if score < 60 and pnl_pct <= -12:
@@ -3914,6 +4010,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 info_cache[code] = info.copy()
 
             info = info_cache.get(code, {}).copy()
+            info = apply_sector_profile_to_info(info, code, name, adjust_score=False)
             current = _safe_float_value(info.get("현재가", 0), 0)
             eval_amount = current * qty if current > 0 and qty > 0 else 0
             pnl_amount = (eval_amount - cost) if current > 0 and qty > 0 and cost > 0 else 0
@@ -3944,7 +4041,9 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "요양원여부": "Y" if str(h.get("요양원여부", "N")).upper() == "Y" or is_excluded else "N",
                 "등급": info.get("등급", ""),
                 "점수": round(_safe_float_value(info.get("점수", 0), 0), 2),
-                "그룹": infer_group_by_name(name),
+                "섹터분류": info.get("섹터분류", info.get("그룹", infer_group_by_name(name))),
+                "섹터신뢰": info.get("섹터신뢰", "낮음"),
+                "섹터판정": info.get("섹터판정", "수동확인필요"),
                 "과열상태": info.get("과열상태", ""),
                 "당일등락률": info.get("당일등락률", 0),
                 "갭상승률": info.get("갭상승률", 0),
@@ -3989,8 +4088,9 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     out["종목전체손익률_자동"] = out["종목전체손익률_자동"].round(2)
 
     out["허용순위"] = out["보유판정"].map({"추가매수 A": 5, "추가매수 B": 4, "유지": 2, "익절검토": 1, "회수후보": 0, "요양원후보": 0}).fillna(1)
+    out["섹터신뢰값"] = out["섹터신뢰"].map(SECTOR_TRUST_VALUE_V27).fillna(0)
     out["손실우선"] = out["차수손익률"].apply(lambda x: abs(x + 10) if x < 0 else 999)
-    out = out.sort_values(["허용순위", "점수", "손실우선", "거래대금점수"], ascending=[False, False, True, False]).reset_index(drop=True)
+    out = out.sort_values(["허용순위", "점수", "섹터신뢰값", "손실우선", "거래대금점수"], ascending=[False, False, False, True, False]).reset_index(drop=True)
     out["순위"] = np.arange(1, len(out) + 1)
 
     if mode == "제한회복모드":
@@ -4226,6 +4326,423 @@ def infer_group_by_name(name):
         return "전자/장비"
     return "기타"
 
+
+# =====================================================
+# v27 섹터 신뢰도 엔진
+# - TOP50/보유차수 판단기가 같은 infer_sector_profile()을 사용한다.
+# - Google Sheets '섹터매핑' 수동보정 → 코드 확정맵 → 키워드 보정 → 기존 이름 보정 순서.
+# - 섹터신뢰 낮음은 신규매수 최종판정이 최대 대기이며, 점수 상한을 둔다.
+# =====================================================
+
+SECTOR_GROUP_BY_CODE_V27 = {
+    # 반도체/PCB/디스플레이
+    "005930": "반도체/전자", "000660": "반도체", "005290": "반도체소재", "074600": "반도체소재",
+    "089030": "반도체장비", "122640": "반도체장비", "160980": "반도체장비", "053610": "반도체장비",
+    "098460": "반도체/검사장비", "064290": "반도체/검사장비", "420770": "PCB/검사장비",
+    "067310": "반도체후공정", "166090": "반도체소재", "252990": "반도체소재/부품", "102710": "반도체소재",
+    "440110": "반도체/팹리스", "195870": "반도체기판", "036540": "반도체후공정", "200710": "반도체/팹리스",
+    "007810": "PCB", "008060": "PCB", "090460": "PCB/FPCB", "007660": "PCB", "356860": "PCB", "036710": "PCB",
+    "034220": "디스플레이", "042700": "디스플레이장비", "170920": "반도체/디스플레이 소재",
+    "011790": "소재/필름", "336370": "전지소재", "020150": "전지소재", "078600": "전지소재", "178920": "소재/필름",
+    "183300": "반도체부품", "031980": "반도체장비", "037460": "반도체/전자", "083500": "반도체장비",
+    "219130": "PCB/검사장비", "281820": "반도체장비", "033160": "반도체소재/부품", "033640": "반도체부품",
+    "083450": "반도체장비", "330860": "반도체후공정", "061970": "반도체후공정", "036010": "반도체/전자부품",
+    "425040": "반도체소재", "104830": "반도체소재", "030530": "반도체/소재", "112290": "반도체소재",
+    "254490": "반도체/유통", "425420": "반도체부품", "322310": "반도체검사장비", "065710": "반도체/전자부품",
+    "078350": "반도체/전자부품", "069540": "광통신/반도체", "052900": "반도체/전자부품",
+
+    # 전력/에너지/건설/인프라
+    "178320": "전력/장비", "475150": "신재생/전력/에너지", "229640": "전력/전선", "001440": "전력/전선",
+    "006340": "전력/전선", "051600": "전력/유틸리티", "052690": "전력/엔지니어링",
+    "010950": "정유", "005090": "에너지", "078930": "지주/에너지", "000720": "건설", "375500": "건설/EPC",
+    "028050": "플랜트/EPC", "047040": "건설", "009410": "건설자재", "336260": "수소/연료전지",
+    "322000": "태양광/신재생", "248070": "전력/전자", "120110": "화학/소재", "024840": "전력/금속",
+
+    # 자동차/기계/조선/운송
+    "161390": "자동차/타이어", "002350": "자동차/타이어", "204320": "자동차/부품", "011210": "자동차/부품",
+    "007340": "자동차/부품", "018880": "자동차/부품", "005850": "자동차/부품", "060980": "자동차/지주",
+    "241560": "기계/건설장비", "019210": "기계/공구", "042660": "조선/방산", "010140": "조선",
+    "011200": "해운", "003490": "항공/운송", "180640": "항공/지주", "092200": "자동차/부품",
+    "000430": "자동차/부품", "004100": "자동차/부품", "212560": "자동차/부품", "083650": "발전/플랜트",
+
+    # 금융/보험/증권
+    "055550": "금융", "086790": "금융", "316140": "금융", "024110": "금융", "138930": "금융", "139130": "금융",
+    "323410": "금융/인터넷은행", "016360": "증권", "005940": "증권", "088350": "보험", "001450": "보험",
+    "003690": "보험", "085620": "보험",
+
+    # 통신/인터넷/게임/콘텐츠/보안
+    "017670": "통신", "032640": "통신", "030200": "통신", "035420": "인터넷/플랫폼", "035720": "인터넷/플랫폼",
+    "181710": "게임/인터넷", "192080": "게임/콘텐츠", "462870": "게임/콘텐츠", "203650": "보안/소프트웨어",
+    "356680": "보안/네트워크", "173130": "네트워크/소프트웨어", "388790": "통신장비", "242040": "소프트웨어",
+    "093320": "인터넷/IDC", "110990": "반도체/검사장비", "357880": "AI/소프트웨어",
+
+    # 소비재/내수/패션/화장품/호텔
+    "030000": "광고/미디어", "214320": "광고/미디어", "271560": "음식료/내수", "001800": "지주/음식료",
+    "021240": "렌탈/내수", "007070": "유통/내수", "008770": "면세/호텔", "383220": "패션/소비",
+    "111770": "패션/소비", "161890": "화장품/ODM", "439090": "화장품", "031430": "패션/유통",
+
+    # 방산/우주/로봇/기타 명확 섹터
+    "489790": "방산/영상", "452260": "유통/갤러리아", "462350": "우주/항공", "066430": "로봇/자동화",
+    "319400": "물류자동화", "437730": "자동차/로봇부품", "041830": "헬스케어기기",
+    "290690": "조명/전자", "052710": "전자부품", "001820": "전자부품", "043260": "전자부품",
+    "025980": "전자부품", "012750": "보안서비스", "340570": "의료소모품", "057050": "생활소비재",
+    "457370": "화학/소재", "446540": "반도체/부품", "417840": "반도체장비", "212710": "반도체장비",
+    "144960": "반도체/플라즈마", "456010": "보안/반도체", "417860": "AI/소프트웨어", "271830": "카메라/검사장비",
+    "086670": "기계/밸브", "307180": "전자부품", "123010": "전자/부품", "089890": "반도체장비",
+    "045100": "반도체/클린룸", "049070": "전자/부품", "265520": "디스플레이장비", "272110": "반도체부품",
+    "114810": "반도체소재", "149950": "디스플레이소재", "142210": "반도체/유통", "168360": "반도체장비",
+    "037440": "건설/설계", "451220": "반도체검사", "321260": "반도체장비", "445090": "반도체/ASIC",
+    "094170": "반도체/센서", "033790": "바이오/헬스케어", "007390": "바이오", "041960": "바이오",
+}
+
+SECTOR_KEYWORD_RULES_V27 = [
+    ("PCB/검사장비", ["기가비스", "타이거일렉", "검사장비", "프로브", "써키트", "PCB", "FPCB", "대덕", "심텍", "이수페타시스", "비에이치", "티엘비", "해성디에스", "코리아써키트"]),
+    ("반도체소재/부품", ["샘씨엔에스", "하나머티리얼즈", "원익QNC", "원익QnC", "원익머트리얼즈", "동진쎄미켐", "솔브레인", "후성", "소재", "머티리얼", "네패스", "코미코", "메가터치", "해성디에스", "기판"]),
+    ("반도체장비", ["싸이맥스", "테크윙", "피에스케이", "케이씨텍", "유니셈", "프로텍", "예스티", "인텍플러스", "고영", "GST", "뉴파워프라즈마", "펨트론", "엑시콘", "오로스테크놀로지", "에프엔에스테크", "저스템", "반도체장비"]),
+    ("반도체/디스플레이 소재", ["엘티씨", "디스플레이", "OLED", "PI첨단", "피첨단", "선익", "HB테크", "이엔에프테크놀로지"]),
+    ("반도체/팹리스", ["파두", "에이디테크", "에이직랜드", "미래반도체", "제주반도체", "팹리스"]),
+    ("신재생/전력/에너지", ["SK이터닉스", "이터닉스", "한전", "전력", "전선", "LS", "대한전선", "대원전선", "효성중공업", "KPS", "한전기술", "두산퓨얼셀", "연료전지", "태양광", "에너지", "신재생"]),
+    ("정유", ["S-OIL", "S-Oil", "에쓰오일", "정유", "오일"]),
+    ("건설/EPC", ["DL이앤씨", "현대건설", "건설", "이앤씨", "E&C", "EPC"]),
+    ("플랜트/EPC", ["삼성E&A", "E&A", "엔지니어링", "플랜트"]),
+    ("자동차/부품", ["타이어", "만도", "모비스", "현대차", "기아", "화신", "자동차", "오토", "위아", "DN오토", "한온", "에스엘", "디아이씨", "대원강업", "태양금속"]),
+    ("조선/방산", ["한화오션", "오션", "조선", "중공업", "방산", "한화비전"]),
+    ("해운", ["HMM", "해운"]),
+    ("운송/항공", ["항공", "대한항공", "진에어", "통운", "운송", "한진칼", "한국공항"]),
+    ("보험", ["한화생명", "현대해상", "미래에셋생명", "코리안리", "보험", "생명"]),
+    ("금융/증권", ["지주", "은행", "금융", "증권", "신한", "하나금융", "우리금융", "기업은행", "BNK", "IM금융", "카카오뱅크", "삼성증권", "NH투자증권"]),
+    ("통신/인터넷", ["유플러스", "텔레콤", "KT", "SK텔레콤", "통신", "라이콤", "카카오", "NAVER", "NHN", "케이아이엔엑스"]),
+    ("콘텐츠/게임/광고", ["게임", "게임즈", "엔터", "미디어", "제일기획", "이노션", "콘텐츠", "시프트업", "더블유게임즈"]),
+    ("면세/호텔", ["호텔신라", "면세", "호텔"]),
+    ("소비재/내수", ["오리온", "음식", "식품", "농심", "하이트", "빙그레", "코웨이", "리테일", "F&F", "영원무역", "한국콜마", "마녀공장", "화장품", "패션"]),
+    ("소재/화학", ["화학", "켐", "필름", "SKC", "후성", "천보", "삼아알미늄", "대주전자재료", "롯데에너지머티리얼즈", "솔루스첨단소재", "이수화학", "한켐"]),
+    ("방산/우주/로봇", ["방산", "한화비전", "이노스페이스", "로보", "로봇", "자동화", "무벡스", "삼현"]),
+    ("전자/부품", ["전자", "전기", "콘덴서", "아모텍", "인탑스", "솔루엠", "성문전자", "소룩스", "삼화콘덴서", "한솔테크닉스"]),
+]
+
+SECTOR_TRUST_VALUE_V27 = {"확정": 3, "보정": 2, "낮음": 0}
+SECTOR_SCORE_ADJUST_V27 = {"확정": 0.0, "보정": -1.5, "낮음": -8.0}
+SECTOR_LOW_TRUST_SCORE_CAP_V27 = 74.9
+
+
+def _sector_profile_result(group, trust, source="", memo=""):
+    group = str(group or "기타").strip() or "기타"
+    trust = _normalize_sector_trust(trust, group)
+    if trust == "낮음" or group == "기타":
+        trust = "낮음"
+        judgement = "수동확인필요"
+    elif source == "수동보정":
+        judgement = "수동보정"
+    elif source == "코드확정맵":
+        judgement = "코드확정"
+    elif source == "키워드보정":
+        judgement = "키워드보정"
+    else:
+        judgement = "자동보정"
+    score_adjust = SECTOR_SCORE_ADJUST_V27.get(trust, -8.0)
+    trust_value = SECTOR_TRUST_VALUE_V27.get(trust, 0)
+    return {
+        "그룹": group,
+        "섹터분류": group,
+        "섹터신뢰": trust,
+        "섹터판정": judgement,
+        "섹터점수": score_adjust,
+        "섹터신뢰값": trust_value,
+        "섹터출처": source,
+        "섹터메모": memo,
+    }
+
+
+def _manual_sector_profile(code_norm, name_text):
+    try:
+        manual = load_sector_mapping_df()
+    except Exception:
+        manual = pd.DataFrame(columns=SECTOR_MAPPING_COLUMNS)
+    if manual is None or len(manual) == 0:
+        return None
+    name_norm = _normalize_sector_name(name_text)
+    hit = pd.DataFrame()
+    if code_norm:
+        hit = manual[manual["종목코드"].astype(str).apply(_normalize_sector_code) == code_norm]
+    if len(hit) == 0 and name_norm:
+        hit = manual[manual["종목명"].apply(_normalize_sector_name) == name_norm]
+    if len(hit) == 0:
+        return None
+    row = hit.iloc[-1]
+    group = str(row.get("그룹", "")).strip()
+    if group == "":
+        return None
+    trust = _normalize_sector_trust(row.get("섹터신뢰", "확정"), group)
+    memo = str(row.get("메모", "")).strip()
+    return _sector_profile_result(group, trust, source="수동보정", memo=memo)
+
+
+# -----------------------------------------------------
+# v27 자동 섹터 소스 엔진
+# - 사용자가 매번 직접 고치지 않아도 KRX/KIND/FDR 업종·주요제품 + 키워드로 자동 보정한다.
+# - Google Sheets 수동보정은 있으면 최우선이지만, 없어도 자동 분류가 돌아간다.
+# -----------------------------------------------------
+
+OFFICIAL_SECTOR_TEXT_RULES_V27 = [
+    ("PCB/검사장비", ["PCB", "FPCB", "인쇄회로", "인쇄회로기판", "연성회로", "회로기판", "반도체기판", "패키지기판", "검사장비", "AOI", "비전검사", "프로브", "테스터"]),
+    ("반도체장비", ["반도체장비", "반도체 제조용 기계", "반도체 제조용장비", "반도체 검사장비", "웨이퍼", "식각", "증착", "세정", "CMP", "핸들러", "테스트핸들러", "공정장비", "후공정장비", "전공정장비", "클린룸"]),
+    ("반도체소재/부품", ["반도체소재", "반도체 재료", "반도체부품", "반도체 부품", "쿼츠", "실리콘", "세라믹", "포토레지스트", "PR", "슬러리", "전구체", "특수가스", "패키징", "소켓", "리드프레임", "테스트소켓", "프로브카드"]),
+    ("반도체/팹리스", ["팹리스", "반도체 설계", "시스템반도체", "ASIC", "비메모리", "컨트롤러", "SSD", "메모리반도체", "반도체 칩"]),
+    ("반도체/디스플레이 소재", ["디스플레이소재", "디스플레이 소재", "디스플레이용", "LCD", "OLED", "유기발광", "PI필름", "폴리이미드", "편광", "액정", "디스플레이 제조용"]),
+    ("디스플레이장비", ["디스플레이장비", "디스플레이 제조용 기계", "OLED 장비", "LCD 장비", "검사기", "증착기"]),
+    ("전력/전선", ["전선", "케이블", "전력케이블", "초고압", "전력기기", "변압기", "배전", "송전", "전력변환", "전력전자"]),
+    ("신재생/전력/에너지", ["신재생", "재생에너지", "태양광", "풍력", "연료전지", "수소", "ESS", "에너지저장", "발전", "전력", "전기공사", "발전소"]),
+    ("정유", ["정유", "석유정제", "석유 정제", "윤활유", "석유제품", "유류", "아스팔트"]),
+    ("화학/소재", ["화학", "화학제품", "정밀화학", "소재", "필름", "수지", "합성수지", "첨단소재", "알루미늄", "동박", "전지박", "양극재", "음극재", "전해액"]),
+    ("전지소재", ["2차전지", "이차전지", "배터리", "양극재", "음극재", "전해액", "분리막", "동박", "전지박", "배터리소재"]),
+    ("플랜트/EPC", ["플랜트", "EPC", "엔지니어링", "산업설비", "화공플랜트", "발전플랜트", "인프라 설계", "건설엔지니어링"]),
+    ("건설/EPC", ["건설", "토목", "건축", "주택", "시공", "건설업", "종합건설", "E&C"]),
+    ("조선/방산", ["조선", "선박", "특수선", "방산", "방위산업", "함정", "잠수함", "군수", "무기", "레이더", "감시장비"]),
+    ("해운", ["해운", "해상운송", "외항화물", "컨테이너", "선사", "물류해운"]),
+    ("운송/항공", ["항공", "항공운송", "공항", "물류", "택배", "육상운송", "창고", "여객운송", "화물운송"]),
+    ("자동차/부품", ["자동차", "자동차부품", "차량", "모빌리티", "타이어", "브레이크", "샤시", "전장", "공조", "구동", "엔진부품"]),
+    ("기계/장비", ["기계", "산업기계", "건설기계", "공작기계", "밸브", "펌프", "로봇", "자동화", "물류자동화"]),
+    ("금융/인터넷은행", ["인터넷전문은행", "인터넷은행", "은행업"]),
+    ("금융", ["은행", "금융", "지주", "여신", "카드", "캐피탈"]),
+    ("증권", ["증권", "투자매매", "투자중개", "자산운용"]),
+    ("보험", ["보험", "생명보험", "손해보험", "재보험"]),
+    ("통신", ["통신", "이동전화", "무선통신", "유선통신", "통신서비스"]),
+    ("인터넷/플랫폼", ["인터넷", "플랫폼", "포털", "전자상거래", "온라인서비스", "핀테크"]),
+    ("보안/소프트웨어", ["소프트웨어", "보안", "정보보호", "네트워크", "클라우드", "IDC", "SI", "AI", "인공지능"]),
+    ("게임/콘텐츠", ["게임", "모바일게임", "온라인게임", "콘텐츠", "엔터테인먼트", "영상", "음원", "광고", "미디어"]),
+    ("면세/호텔", ["면세", "호텔", "관광", "숙박", "리조트"]),
+    ("유통/내수", ["유통", "백화점", "편의점", "마트", "소매", "도매", "홈쇼핑", "렌탈"]),
+    ("음식료/내수", ["음식료", "식품", "제과", "음료", "육가공", "건강기능식품", "라면", "제빵"]),
+    ("패션/소비", ["패션", "의류", "섬유", "신발", "가방", "화장품", "ODM", "브랜드"]),
+    ("바이오/헬스케어", ["바이오", "의약", "제약", "의료", "진단", "의료기기", "헬스케어", "신약", "세포", "치료제"]),
+    ("전자/부품", ["전자부품", "전자 부품", "전기전자", "콘덴서", "센서", "카메라모듈", "LED", "전원공급", "모듈", "커넥터"]),
+]
+
+AUTO_SECTOR_REF_COLUMNS_V27 = ["Code", "Name", "Market", "업종", "주요제품", "Sector", "Industry", "Source"]
+
+
+def _first_existing_col(df, candidates):
+    if df is None:
+        return None
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
+    for c in candidates:
+        if c in df.columns:
+            return c
+        key = str(c).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def _normalize_auto_sector_df(df, source=""):
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+    src = df.copy()
+    code_col = _first_existing_col(src, ["Code", "Symbol", "종목코드", "단축코드", "stock_code", "StockCode", "종목번호"])
+    name_col = _first_existing_col(src, ["Name", "종목명", "회사명", "stock_name", "StockName", "한글종목명", "약식명"])
+    market_col = _first_existing_col(src, ["Market", "시장구분", "시장", "corp_cls", "MarketId"])
+    sector_col = _first_existing_col(src, ["Sector", "업종", "업종명", "표준산업분류", "induty", "IndustryName"])
+    industry_col = _first_existing_col(src, ["Industry", "산업", "업종상세", "업종코드", "induty_code", "SectorName"])
+    product_col = _first_existing_col(src, ["주요제품", "주요 제품", "Products", "Product", "main_product", "주요사업", "사업내용"])
+
+    out = pd.DataFrame()
+    out["Code"] = src[code_col].apply(_normalize_sector_code) if code_col else ""
+    out["Name"] = src[name_col].astype(str).str.strip() if name_col else ""
+    out["Market"] = src[market_col].astype(str).str.strip() if market_col else ""
+    out["업종"] = src[sector_col].astype(str).str.strip() if sector_col else ""
+    out["주요제품"] = src[product_col].astype(str).str.strip() if product_col else ""
+    out["Sector"] = src[sector_col].astype(str).str.strip() if sector_col else ""
+    out["Industry"] = src[industry_col].astype(str).str.strip() if industry_col else ""
+    out["Source"] = source
+    out = out[(out["Code"] != "") | (out["Name"] != "")].copy()
+    return out[AUTO_SECTOR_REF_COLUMNS_V27]
+
+
+def _load_kind_corp_sector_df():
+    """KIND 상장법인목록의 업종/주요제품. 네트워크 실패 시 빈 DF 반환."""
+    try:
+        url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+        params = {"method": "download", "searchType": "13"}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, params=params, headers=headers, timeout=12)
+        resp.raise_for_status()
+        raw = io.BytesIO(resp.content)
+        tables = []
+        try:
+            tables = pd.read_html(raw)
+        except Exception:
+            tables = []
+        if not tables:
+            try:
+                raw.seek(0)
+                return _normalize_auto_sector_df(pd.read_excel(raw), source="KIND상장법인")
+            except Exception:
+                return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+        # 회사명/종목코드/업종/주요제품이 가장 많이 들어있는 표를 고른다.
+        best = max(tables, key=lambda x: len(x.columns) + len(x))
+        return _normalize_auto_sector_df(best, source="KIND상장법인")
+    except Exception:
+        return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+
+
+def _load_fdr_desc_sector_df():
+    """FinanceDataReader 설명형 리스팅의 Sector/Industry. 버전·원천 이슈가 있으면 빈 DF 반환."""
+    frames = []
+    for listing_key in ["KRX-DESC", "KRX"]:
+        try:
+            df = fdr.StockListing(listing_key)
+            norm = _normalize_auto_sector_df(df, source=f"FDR:{listing_key}")
+            if len(norm) > 0:
+                frames.append(norm)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_auto_sector_reference_df_cached():
+    frames = []
+    try:
+        kind_df = _load_kind_corp_sector_df()
+        if len(kind_df) > 0:
+            frames.append(kind_df)
+    except Exception:
+        pass
+    try:
+        fdr_df = _load_fdr_desc_sector_df()
+        if len(fdr_df) > 0:
+            frames.append(fdr_df)
+    except Exception:
+        pass
+    if not frames:
+        return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+    out = pd.concat(frames, ignore_index=True)
+    out["Code"] = out["Code"].apply(_normalize_sector_code)
+    out["Name"] = out["Name"].astype(str).str.strip()
+    # 같은 코드가 여러 출처에 있으면 KIND를 우선하고, 나머지는 뒤에 둔다.
+    source_rank = out["Source"].astype(str).map(lambda x: 0 if "KIND" in x else 1)
+    out = out.assign(_source_rank=source_rank)
+    out = out.sort_values(["Code", "_source_rank"]).drop_duplicates(subset=["Code"], keep="first")
+    out = out.drop(columns=["_source_rank"], errors="ignore").reset_index(drop=True)
+    return out[AUTO_SECTOR_REF_COLUMNS_V27]
+
+
+def load_auto_sector_reference_df():
+    try:
+        return load_auto_sector_reference_df_cached()
+    except Exception:
+        return pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+
+
+def _sector_group_from_text(text):
+    raw = str(text or "").strip()
+    if raw == "":
+        return "기타"
+    norm = _normalize_sector_name(raw)
+    for candidate_group, keywords in OFFICIAL_SECTOR_TEXT_RULES_V27:
+        if any(_normalize_sector_name(k) in norm for k in keywords):
+            return candidate_group
+    for candidate_group, keywords in SECTOR_KEYWORD_RULES_V27:
+        if any(_normalize_sector_name(k) in norm for k in keywords):
+            return candidate_group
+    return "기타"
+
+
+def _auto_reference_sector_profile(code_norm, name_text):
+    try:
+        ref = load_auto_sector_reference_df()
+    except Exception:
+        ref = pd.DataFrame(columns=AUTO_SECTOR_REF_COLUMNS_V27)
+    if ref is None or len(ref) == 0:
+        return None
+
+    name_norm = _normalize_sector_name(name_text)
+    hit = pd.DataFrame()
+    if code_norm:
+        hit = ref[ref["Code"].astype(str).apply(_normalize_sector_code) == code_norm]
+    if len(hit) == 0 and name_norm:
+        hit = ref[ref["Name"].apply(_normalize_sector_name) == name_norm]
+    if len(hit) == 0:
+        return None
+
+    row = hit.iloc[0]
+    parts = [
+        row.get("Name", ""),
+        row.get("업종", ""),
+        row.get("주요제품", ""),
+        row.get("Sector", ""),
+        row.get("Industry", ""),
+        name_text,
+    ]
+    merged_text = " ".join([str(x) for x in parts if str(x or "").strip() != ""])
+    group = _sector_group_from_text(merged_text)
+    if group == "기타":
+        return None
+
+    source = str(row.get("Source", "자동업종")) or "자동업종"
+    memo_items = []
+    for k in ["업종", "주요제품", "Industry"]:
+        v = str(row.get(k, "")).strip()
+        if v and v.lower() != "nan":
+            memo_items.append(f"{k}={v}")
+    memo = " / ".join(memo_items[:3])
+    return _sector_profile_result(group, "보정", source=source, memo=memo)
+
+
+def infer_sector_profile(code=None, name=""):
+    """수동보정(있으면) → 코드확정맵 → KRX/KIND/FDR 자동업종 → 키워드 → 이름보정 순서."""
+    code_norm = _normalize_sector_code(code)
+    name_text = str(name or "").strip()
+    n = _normalize_sector_name(name_text)
+
+    # 1) 사용자가 직접 못 해도 앱은 돌아간다. 다만 이미 만든 수동보정값이 있으면 최우선으로 존중.
+    manual = _manual_sector_profile(code_norm, name_text)
+    if manual is not None:
+        return manual
+
+    # 2) 내장 코드맵은 확정 처리. 오분류가 잦은 종목은 여기서 먼저 잡는다.
+    if code_norm and code_norm in SECTOR_GROUP_BY_CODE_V27:
+        return _sector_profile_result(SECTOR_GROUP_BY_CODE_V27[code_norm], "확정", source="코드확정맵")
+
+    # 3) 공식/준공식 원천: KIND 상장법인목록, FDR KRX-DESC/KRX의 업종·주요제품.
+    auto_ref = _auto_reference_sector_profile(code_norm, name_text)
+    if auto_ref is not None:
+        return auto_ref
+
+    # 4) 종목명/키워드 사전. 공식 원천이 실패해도 여기서 최대한 보정.
+    for candidate_group, keywords in SECTOR_KEYWORD_RULES_V27:
+        if any(_normalize_sector_name(k) in n for k in keywords):
+            return _sector_profile_result(candidate_group, "보정", source="키워드보정")
+
+    fallback = infer_group_by_name(name_text)
+    if fallback != "기타":
+        return _sector_profile_result(fallback, "보정", source="이름보정")
+
+    return _sector_profile_result("기타", "낮음", source="미분류")
+
+
+def apply_sector_profile_to_info(info, code=None, name="", adjust_score=False):
+    """후보/보유차수 info에 섹터 필드를 안전하게 찍는다. adjust_score=True일 때만 점수에 반영."""
+    if info is None:
+        info = {}
+    out = dict(info)
+    profile = infer_sector_profile(code, name)
+    out["그룹"] = profile["그룹"]
+    out["섹터분류"] = profile["섹터분류"]
+    out["섹터신뢰"] = profile["섹터신뢰"]
+    out["섹터판정"] = profile["섹터판정"]
+    out["섹터점수"] = profile["섹터점수"]
+    out["섹터신뢰값"] = profile["섹터신뢰값"]
+    if adjust_score:
+        base = _safe_float_value(out.get("점수", 0), 0)
+        adjusted = base + float(profile["섹터점수"])
+        if profile["섹터신뢰"] == "낮음":
+            adjusted = min(adjusted, SECTOR_LOW_TRUST_SCORE_CAP_V27)
+        out["점수"] = round(adjusted, 2)
+    return out
+
 def score_candidate_core(df, name, regime="장세불명", high_price_limit=160000, strict=True, code=None):
     if df is None or len(df) < 80:
         return None
@@ -4350,6 +4867,15 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
 
     total_score = total_score + pullback_bonus + heat_penalty
 
+    # v27: 섹터 신뢰도를 점수에 직접 반영한다.
+    # 확정=0점, 보정=-1.5점, 낮음=-8점 + 점수상한 74.9.
+    # 낮음은 TOP50 상위권 도배를 막고, 신규매수는 최종판정 최대 대기다.
+    sector_profile = infer_sector_profile(code, name)
+    sector_adjust = float(sector_profile.get("섹터점수", 0))
+    total_score = total_score + sector_adjust
+    if sector_profile.get("섹터신뢰") == "낮음":
+        total_score = min(total_score, SECTOR_LOW_TRUST_SCORE_CAP_V27)
+
     # 엄격후보에서는 극단 과열은 제외한다. 완화후보에서는 참고용으로만 남길 수 있다.
     if strict and heat_status == "과열제외":
         return None
@@ -4392,6 +4918,12 @@ def score_candidate_core(df, name, regime="장세불명", high_price_limit=16000
         "20일수익률": round(ret20, 2),
         "60일수익률": round(ret60, 2),
         "120일수익률": round(ret120, 2),
+        "그룹": sector_profile.get("그룹", "기타"),
+        "섹터분류": sector_profile.get("섹터분류", sector_profile.get("그룹", "기타")),
+        "섹터신뢰": sector_profile.get("섹터신뢰", "낮음"),
+        "섹터판정": sector_profile.get("섹터판정", "수동확인필요"),
+        "섹터점수": round(sector_adjust, 2),
+        "섹터신뢰값": sector_profile.get("섹터신뢰값", 0),
         "데이터기준일": data_date,
         "데이터주의": data_warning
     }
@@ -4562,7 +5094,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터진단", "6. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -4681,7 +5213,7 @@ elif menu == "2. 운영판단기":
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
     op_defaults = get_effective_operation_settings(auto_nursing_count)
-    st.caption("v26은 어제값/오늘값을 선택 저장합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다. 테스트모드는 저장하지 않습니다.")
+    st.caption("운영값은 TOP50/보유차수 판단기에 연동됩니다. 테스트모드는 Google Sheets에 저장하지 않고 현재 세션에만 적용됩니다.")
     show_operation_test_banner("operation")
 
     col_mode1, col_mode2, col_mode3 = st.columns([1.3, 1.2, 1.5])
@@ -4908,8 +5440,7 @@ elif menu == "3. TOP50":
                     shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                     if buy_status == "OK":
                         info["코드"] = code
-                        info["그룹"] = infer_group_by_name(name)
-                        info["섹터신뢰"] = "보정" if info["그룹"] != "기타" else "낮음"
+                        info = apply_sector_profile_to_info(info, code, name, adjust_score=False)
                         heat_status = str(info.get("과열상태", "정상"))
                         if heat_status in ["추격주의", "과열주의", "신고가추격주의"]:
                             info["매수상태"] = "추격주의"
@@ -4945,8 +5476,7 @@ elif menu == "3. TOP50":
                         shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                         if buy_status == "OK":
                             relaxed["코드"] = code
-                            relaxed["그룹"] = infer_group_by_name(name)
-                            relaxed["섹터신뢰"] = "보정" if relaxed["그룹"] != "기타" else "낮음"
+                            relaxed = apply_sector_profile_to_info(relaxed, code, name, adjust_score=False)
                             heat_status = str(relaxed.get("과열상태", "정상"))
                             if heat_status in ["과열제외", "추격주의", "과열주의", "신고가추격주의"]:
                                 relaxed["매수상태"] = "추격주의"
@@ -4991,10 +5521,12 @@ elif menu == "3. TOP50":
             st.stop()
 
         # 실전 정렬: 눌림후보/OK를 우선하고 추격주의/관찰주의는 뒤로 보낸다.
+        # v27: 섹터신뢰도도 정렬에 반영한다. 낮음은 점수상한/대기처리되고, 동점권에서도 뒤로 밀린다.
         result_df["매수우선값"] = result_df["매수상태"].map({"눌림후보": 4, "OK": 3, "관찰주의": 1, "추격주의": 0}).fillna(2)
+        result_df["섹터신뢰값"] = result_df["섹터신뢰"].map(SECTOR_TRUST_VALUE_V27).fillna(0)
         result_df = result_df.sort_values(
-            ["매수우선값", "점수", "거래대금점수", "회전점수", "회전빈도20", "기술점수", "모멘텀점수"],
-            ascending=[False, False, False, False, False, False, False]
+            ["매수우선값", "점수", "섹터신뢰값", "거래대금점수", "회전점수", "회전빈도20", "기술점수", "모멘텀점수"],
+            ascending=[False, False, False, False, False, False, False, False]
         ).reset_index(drop=True)
         result_df["순위"] = np.arange(1, len(result_df) + 1)
 
@@ -5003,7 +5535,11 @@ elif menu == "3. TOP50":
         elif new_buy_limit <= 0:
             result_df["오늘매수"] = "참고만"
         else:
-            buyable_mask = (result_df["순위"] <= new_buy_limit) & (result_df["매수상태"].isin(["OK", "눌림후보"]))
+            buyable_mask = (
+                (result_df["순위"] <= new_buy_limit)
+                & (result_df["매수상태"].isin(["OK", "눌림후보"]))
+                & (result_df["섹터신뢰"].isin(["확정", "보정"]))
+            )
             result_df["오늘매수"] = np.where(
                 result_df["매수상태"] == "추격주의",
                 "추격주의",
@@ -5046,7 +5582,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v26은 어제값/오늘값 선택 저장과 테스트모드를 지원합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다.")
+    st.caption("보유차수 판단기는 TOP50과 같은 섹터맵을 사용합니다. 단, 섹터신뢰 낮음만으로 요양원 처리하지 않습니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
@@ -5213,11 +5749,92 @@ elif menu == "4. 보유종목 판단기":
                 st.json(diag)
 
 # =====================================================
-# 5. 도움말
+# 5. 섹터보정
+# =====================================================
+
+elif menu == "5. 섹터진단":
+    st.header("5. 섹터진단")
+    st.caption("수동 입력 없이도 KIND/FDR 업종·주요제품과 내장 키워드로 섹터를 자동 보정합니다. Google Sheets 섹터매핑은 선택 보정값으로만 사용됩니다.")
+    st.info("자동 우선순위: 기존 섹터매핑값(있으면) → 코드확정맵 → KIND/FDR 업종·주요제품 → 종목명/키워드 → 기타/낮음")
+
+    auto_ref_df = load_auto_sector_reference_df()
+    col_auto1, col_auto2, col_auto3 = st.columns(3)
+    col_auto1.metric("자동 업종 원천 종목", len(auto_ref_df))
+    col_auto2.metric("KIND 원천", int(auto_ref_df["Source"].astype(str).str.contains("KIND", na=False).sum()) if len(auto_ref_df) else 0)
+    col_auto3.metric("FDR 원천", int(auto_ref_df["Source"].astype(str).str.contains("FDR", na=False).sum()) if len(auto_ref_df) else 0)
+
+    test_sector_text = st.text_input("섹터 자동진단 테스트", placeholder="예: 420770 또는 기가비스 또는 삼성E&A")
+    if test_sector_text:
+        krx_for_sector = load_krx_master_fdr()
+        found_sector = find_stock_by_name(test_sector_text, krx_for_sector)
+        if found_sector is not None:
+            prof = infer_sector_profile(found_sector["코드"], found_sector["종목"])
+            st.write({"코드": found_sector["코드"], "종목": found_sector["종목"], "섹터분류": prof.get("섹터분류"), "섹터신뢰": prof.get("섹터신뢰"), "섹터판정": prof.get("섹터판정"), "섹터출처": prof.get("섹터출처"), "섹터메모": prof.get("섹터메모")})
+        else:
+            prof = infer_sector_profile(None, test_sector_text)
+            st.write({"입력": test_sector_text, "섹터분류": prof.get("섹터분류"), "섹터신뢰": prof.get("섹터신뢰"), "섹터판정": prof.get("섹터판정"), "섹터출처": prof.get("섹터출처")})
+
+    if st.button("자동 섹터 원천 캐시 새로고침"):
+        try:
+            load_auto_sector_reference_df_cached.clear()
+        except Exception:
+            pass
+        st.success("자동 섹터 원천 캐시를 지웠습니다. 다음 실행 때 다시 수집합니다.")
+        st.rerun()
+
+    with st.expander("자동 원천 미리보기"):
+        st.dataframe(auto_ref_df.head(200), use_container_width=True)
+
+    st.divider()
+    st.subheader("선택 수동보정값")
+    st.caption("직접 관리가 어려우면 이 표는 비워둬도 됩니다. 단, 여기에 값이 있으면 자동분류보다 우선합니다.")
+
+    sector_df = load_sector_mapping_df()
+    if len(sector_df) == 0:
+        sector_df = pd.DataFrame(DEFAULT_SECTOR_MAPPING_ROWS, columns=SECTOR_MAPPING_COLUMNS)
+
+    edited_sector = st.data_editor(
+        sector_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="sector_mapping_editor",
+        column_config={
+            "종목코드": st.column_config.TextColumn("종목코드", help="6자리 코드. 코드가 있으면 종목명보다 우선합니다."),
+            "종목명": st.column_config.TextColumn("종목명"),
+            "그룹": st.column_config.TextColumn("그룹", help="예: PCB/검사장비, 반도체소재/부품, 플랜트/EPC"),
+            "섹터신뢰": st.column_config.SelectboxColumn("섹터신뢰", options=["확정", "보정", "낮음"]),
+            "메모": st.column_config.TextColumn("메모"),
+        }
+    )
+
+    c1, c2 = st.columns(2)
+    if c1.button("섹터매핑 저장", type="primary"):
+        save_sector_mapping_df(edited_sector)
+        st.success("섹터매핑 저장 완료. 다음 TOP50/보유차수 계산부터 공통 적용됩니다.")
+        st.rerun()
+
+    if c2.button("기본 보정 예시 다시 추가"):
+        combined = pd.concat([edited_sector, pd.DataFrame(DEFAULT_SECTOR_MAPPING_ROWS)], ignore_index=True)
+        save_sector_mapping_df(combined)
+        st.success("기본 보정 예시를 추가했습니다. 중복은 마지막 값 기준으로 정리됩니다.")
+        st.rerun()
+
+    st.markdown("""
+    #### 적용 규칙
+    - `섹터매핑` 값이 있으면 최우선 적용하되, 직접 관리가 어려우면 비워둬도 됩니다.
+    - 없으면 내장 코드확정맵을 적용합니다.
+    - 그래도 없으면 KIND/FDR 업종·주요제품 자동 원천으로 보정합니다.
+    - 그래도 없으면 종목명/키워드 보정을 적용합니다.
+    - 끝까지 안 잡히면 섹터분류 `기타`, 섹터신뢰 `낮음`, 섹터판정 `수동확인필요`가 됩니다.
+    """)
+    st.download_button("섹터매핑 CSV 다운로드", data=sector_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_sector_mapping.csv", mime="text/csv")
+
+# =====================================================
+# 6. 도움말
 # =====================================================
 
 else:
-    st.header("5. 도움말")
+    st.header("6. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -5225,20 +5842,20 @@ else:
 
 ### 이번 버전 핵심
 
-- v19의 보유차수 판단기를 유지합니다. 1차/2차/3차를 각각 평가합니다.
-- 수동입력에서 종목명을 여러 번 쓰지 않아도 됩니다. `[종목명]` 아래에 차수만 여러 줄 입력합니다.
-- 기존 `종목명,차수,진입단가,수량` 한 줄 입력도 계속 지원합니다.
-- 예수금 방어선은 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
-- 보유종목은 TOP50 유니버스 밖이어도 강제 계산 대상에 포함됩니다.
-- 제한매수모드에서는 보유종목 중 `추가매수 A`만 매수가능으로 표시합니다.
+- 섹터매핑 사전을 확장하고, KIND/FDR 업종·주요제품 자동 보정을 추가했습니다. 기가비스/샘씨엔에스/엘티씨/싸이맥스/SK이터닉스/DL이앤씨/삼성E&A/HMM/S-Oil/한화오션/한화생명/호텔신라 등을 기본 보정합니다.
+- KIND/FDR 업종·주요제품 자동 원천을 추가했습니다. Google Sheets `섹터매핑`은 선택 보정값으로만 남겼습니다.
+- TOP50은 섹터신뢰 낮음이면 점수 상한을 걸고 신규매수 최종판정을 최대 `대기`로 제한합니다.
+- 보유차수 판단기는 섹터신뢰 낮음만으로 요양원 처리하지 않고 손익률/차수/거래대금/점수 기준으로 판단합니다.
+- 화면 표기는 `섹터분류`, `섹터신뢰`, `섹터판정`으로 분리했습니다.
 
 ### 사용 순서
 
-1. 요양원 메뉴에서 요양원 등록/졸업 관리
-2. 운영판단기에서 오늘 모드 확인
-3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
-4. 보유차수 판단기에서 추가매수/유지/회수 판단
-5. TOP50에서 신규 후보 출력
+1. 섹터진단 메뉴에서 자동 원천 수집 여부와 테스트 종목 확인
+2. 요양원 메뉴에서 요양원 등록/졸업 관리
+3. 운영판단기에서 오늘 모드 확인
+4. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
+5. 보유차수 판단기에서 추가매수/유지/회수 판단
+6. TOP50에서 신규 후보 출력
 
 ### 묶음수동입력 예시
 
