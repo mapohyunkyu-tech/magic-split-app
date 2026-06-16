@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_AUTO_LEARNING_MAP_20260616"
+APP_VERSION = "v27_JUDGE_REASON_TEXT_FIX_20260616"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3526,8 +3526,12 @@ def judge_final_entry(row):
         reasons.append("운영모드 매수중단")
         critical = True
 
+    # 오늘매수는 예산/순위 때문에 대기일 수 있다.
+    # 금지 사유가 따로 있는 경우 판정사유에 "오늘매수 대기"를 섞으면 헷갈리므로
+    # 먼저 플래그만 보관하고, 마지막에 최종판정별로 문구를 조립한다.
+    today_gate_reason = ""
     if today_buy != "매수가능":
-        reasons.append(f"오늘매수 {today_buy}")
+        today_gate_reason = f"오늘매수 {today_buy}"
 
     if buy_state not in ["OK", "눌림후보"]:
         reasons.append(f"상태 {buy_state}")
@@ -3559,11 +3563,15 @@ def judge_final_entry(row):
         reasons.append(f"당일급락 {day_pct}%")
         critical = True
 
+    if critical:
+        # 금지 판정에서는 예산/순위성 대기 문구를 빼고 실제 금지 사유만 보여준다.
+        return "금지", " / ".join(reasons) if reasons else "신규매수금지"
+
+    if today_gate_reason:
+        reasons.insert(0, today_gate_reason)
+
     if not reasons:
         return "진입가능", "조건통과"
-
-    if critical:
-        return "금지", " / ".join(reasons)
 
     return "대기", " / ".join(reasons)
 
