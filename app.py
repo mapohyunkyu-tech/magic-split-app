@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_HOLDING_LATEST_LOT_VIEW_20260617"
+APP_VERSION = "v27_ADD_BUY_AT_CAP_FIX_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3886,12 +3886,17 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         loss_interpretation = "평가손실 주의"
         reasons.append(f"평가손익률 {loss_pct:.1f}% 이하")
 
-    if total_holdings > target_holdings:
+    # v27_ADD_BUY_AT_CAP_FIX:
+    # 종목 수가 목표/최대에 "도달"했다는 이유만으로 강한 회수모드로 보내면,
+    # 이미 보유한 종목의 다음 차수 매수 기준(-10%, -11.11% 등)에 도달해도 추가매수가 전부 막힌다.
+    # 따라서 목표/최대 도달은 신규매수만 중단하고, 보유종목 추가매수는 제한 허용한다.
+    # 실제 초과한 경우에만 회수모드로 전환한다.
+    if total_holdings > max_holdings:
         mode = downgrade_mode(mode, "회수모드")
-        reasons.append("현재 보유종목수가 목표종목수 초과")
-    if total_holdings >= max_holdings:
-        mode = downgrade_mode(mode, "강한 회수모드")
-        reasons.append("현재 보유종목수가 최대종목수 이상")
+        reasons.append("현재 보유종목수가 최대종목수 초과: 신규/추가매수 중단 후 회수 우선")
+    elif total_holdings >= target_holdings:
+        mode = downgrade_mode(mode, "제한회복모드")
+        reasons.append("현재 보유종목수가 목표종목수 도달: 신규매수 중단, 보유종목 기준도달 추가매수만 제한 허용")
 
     daily_budget = calc_daily_buy_budget(cash, base_amount, cash_lines, mode)
     room_to_target = max(int(target_holdings) - int(total_holdings), 0)
