@@ -6,6 +6,7 @@
 # 메뉴: 1. 요양원 2. 운영판단기 3. TOP50 4. 도움말
 # =====================================================
 
+import io
 import re
 import time
 from datetime import datetime, timedelta
@@ -17,12 +18,13 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 import gspread
 import FinanceDataReader as fdr
+import requests
 
 # =====================================================
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_MANUAL_LOT_PARSER_FIX_20260617"
+APP_VERSION = "v27_FDR_LISTING_FALLBACK_FIX_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3485,46 +3487,177 @@ def judge_final_entry(row):
 # FinanceDataReader 데이터 엔진
 # =====================================================
 
-@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def load_krx_master_fdr():
-    try:
-        krx = fdr.StockListing("KRX")
-    except Exception:
-        return pd.DataFrame(columns=["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"])
+def _empty_krx_master():
+    return pd.DataFrame(columns=["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"])
 
-    if krx is None or len(krx) == 0:
-        return pd.DataFrame(columns=["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"])
 
-    krx = krx.copy()
+def _to_number_series(s):
+    return pd.to_numeric(
+        s.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("-", "0", regex=False)
+        .str.replace(" ", "", regex=False),
+        errors="coerce"
+    ).fillna(0)
 
-    if "Code" not in krx.columns and "Symbol" in krx.columns:
-        krx = krx.rename(columns={"Symbol": "Code"})
-    if "Code" not in krx.columns:
-        first_col = krx.columns[0]
-        krx = krx.rename(columns={first_col: "Code"})
 
-    if "Name" not in krx.columns:
-        krx["Name"] = krx["Code"].astype(str)
-    if "Market" not in krx.columns:
-        krx["Market"] = "KRX"
-    if "Close" not in krx.columns:
-        krx["Close"] = np.nan
-    if "Amount" not in krx.columns:
-        krx["Amount"] = 0
-    if "Marcap" not in krx.columns:
-        krx["Marcap"] = 0
-    if "Volume" not in krx.columns:
-        krx["Volume"] = 0
+def _normalize_listing_frame(raw_df, default_market="KRX"):
+    if raw_df is None or len(raw_df) == 0:
+        return _empty_krx_master()
 
-    krx["Code"] = krx["Code"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
-    krx["Name"] = krx["Name"].astype(str)
-    krx["Market"] = krx["Market"].astype(str)
+    df = raw_df.copy()
+
+    # FinanceDataReader / KRX 직접 CSV / KRX 영문 컬럼을 모두 흡수한다.
+    aliases = {
+        "Code": ["Code", "Symbol", "종목코드", "단축코드", "ISU_SRT_CD", "Ticker"],
+        "Name": ["Name", "종목명", "한글 종목약명", "ISU_ABBRV", "Korean Name"],
+        "Market": ["Market", "시장구분", "MKT_NM", "시장", "시장명"],
+        "Close": ["Close", "종가", "TDD_CLSPRC", "현재가", "Price"],
+        "Amount": ["Amount", "거래대금", "ACC_TRDVAL", "Trading Value", "Value"],
+        "Marcap": ["Marcap", "시가총액", "MKTCAP", "Market Cap", "MarketCap"],
+        "Volume": ["Volume", "거래량", "ACC_TRDVOL", "Trading Volume"],
+    }
+
+    out = pd.DataFrame()
+    for target, names in aliases.items():
+        src = next((c for c in names if c in df.columns), None)
+        if src is not None:
+            out[target] = df[src]
+
+    if "Code" not in out.columns:
+        return _empty_krx_master()
+
+    if "Name" not in out.columns:
+        out["Name"] = out["Code"].astype(str)
+    if "Market" not in out.columns:
+        out["Market"] = default_market
+    if "Close" not in out.columns:
+        out["Close"] = 0
+    if "Amount" not in out.columns:
+        out["Amount"] = 0
+    if "Marcap" not in out.columns:
+        out["Marcap"] = 0
+    if "Volume" not in out.columns:
+        out["Volume"] = 0
+
+    out["Code"] = (
+        out["Code"].astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.replace("A", "", regex=False)
+        .str.strip()
+        .str.zfill(6)
+    )
+    out["Name"] = out["Name"].astype(str).str.strip()
+    out["Market"] = out["Market"].astype(str).str.strip()
 
     for c in ["Close", "Amount", "Marcap", "Volume"]:
-        krx[c] = pd.to_numeric(krx[c], errors="coerce").fillna(0)
+        out[c] = _to_number_series(out[c])
 
-    krx = krx.drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
-    return krx[["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"]]
+    out = out[(out["Code"].str.len() == 6) & (out["Name"] != "")]
+    out = out[out["Code"] != "000000"]
+    out = out.drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+    return out[["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"]]
+
+
+def _load_fdr_listing_safe(market):
+    try:
+        df = fdr.StockListing(market)
+        if df is None or len(df) == 0:
+            return _empty_krx_master()
+        return _normalize_listing_frame(df, default_market=market)
+    except Exception:
+        return _empty_krx_master()
+
+
+def _load_krx_current_listing_direct_api(max_back_days=10):
+    """FDR KRX 목록이 0행으로 실패할 때 쓰는 KRX 직접 CSV 백업.
+    KRX 전종목 시세 CSV는 거래일 기준으로만 내려오므로 최근 날짜부터 역순으로 시도한다.
+    """
+    otp_url = "https://data.krx.co.kr/comm/fileDn/GenerateOTP/generate.cmd"
+    down_url = "https://data.krx.co.kr/comm/fileDn/download_csv/download.cmd"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201020101",
+    }
+
+    for back in range(int(max_back_days)):
+        trd_dd = (datetime.today() - timedelta(days=back)).strftime("%Y%m%d")
+        params = {
+            "locale": "ko_KR",
+            "mktId": "ALL",
+            "trdDd": trd_dd,
+            "share": "1",
+            "money": "1",
+            "csvxls_isNo": "false",
+            "name": "fileDown",
+            "url": "dbms/MDC/STAT/standard/MDCSTAT01501",
+        }
+        try:
+            sess = requests.Session()
+            otp = sess.post(otp_url, data=params, headers=headers, timeout=10)
+            code = otp.text.strip()
+            if not code or "html" in code.lower():
+                continue
+            res = sess.post(down_url, data={"code": code}, headers=headers, timeout=20)
+            if res.status_code != 200 or len(res.content) < 100:
+                continue
+            text_csv = res.content.decode("euc-kr", errors="ignore")
+            if "종목코드" not in text_csv and "단축코드" not in text_csv:
+                continue
+            df = pd.read_csv(io.StringIO(text_csv))
+            out = _normalize_listing_frame(df, default_market="KRX")
+            if len(out) > 100:
+                return out
+        except Exception:
+            continue
+    return _empty_krx_master()
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_krx_master_fdr():
+    # 1차: 기존 FDR KRX. 정상일 때는 거래대금/시총/거래량까지 가장 좋다.
+    frames = []
+    krx = _load_fdr_listing_safe("KRX")
+    if len(krx) > 100:
+        frames.append(krx)
+
+    def needs_fallback(current_frames):
+        if sum(len(x) for x in current_frames) <= 100:
+            return True
+        try:
+            total_signal = sum(float(x["Close"].sum() + x["Amount"].sum() + x["Volume"].sum()) for x in current_frames)
+            return total_signal <= 0
+        except Exception:
+            return True
+
+    # 2차: FDR KRX가 0행/소량이거나 가격·거래대금이 비어 있으면 KRX 직접 CSV로 복구한다.
+    if needs_fallback(frames):
+        krx_direct = _load_krx_current_listing_direct_api(max_back_days=10)
+        if len(krx_direct) > 100:
+            frames.append(krx_direct)
+
+    # 3차: 직접 CSV도 실패하면 FDR KOSPI/KOSDAQ 개별 목록으로 최소한 전체 코드 목록은 살린다.
+    if needs_fallback(frames):
+        for market in ["KOSPI", "KOSDAQ"]:
+            part = _load_fdr_listing_safe(market)
+            if len(part) > 0:
+                part["Market"] = market
+                frames.append(part)
+
+    if not frames:
+        return _empty_krx_master()
+
+    master = pd.concat(frames, ignore_index=True)
+    master = _normalize_listing_frame(master, default_market="KRX")
+
+    # 중복 코드가 있으면 거래대금/현재가가 있는 행을 우선한다.
+    master["_has_amount"] = (master["Amount"] > 0).astype(int)
+    master["_has_close"] = (master["Close"] > 0).astype(int)
+    master = master.sort_values(["_has_amount", "_has_close", "Amount", "Marcap", "Volume"], ascending=False)
+    master = master.drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+    master = master.drop(columns=["_has_amount", "_has_close"], errors="ignore")
+
+    return master[["Code", "Name", "Market", "Close", "Amount", "Marcap", "Volume"]]
 
 
 def find_valid_krx_date(end_date=None, max_back=30):
@@ -4463,7 +4596,7 @@ def adjust_new_buy_by_regime(new_buy_limit, regime):
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def build_universe_fdr(price_limit, max_codes, extra_codes=None):
     diag = {
-        "engine": "FinanceDataReader RealFullMarket",
+        "engine": "FDR KRX + KRX CSV + KOSPI/KOSDAQ fallback",
         "listing_rows": 0,
         "market_filtered": 0,
         "price_filtered": 0,
@@ -4501,7 +4634,7 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
         krx = load_krx_master_fdr()
         diag["listing_rows"] = len(krx)
         if len(krx) == 0:
-            raise RuntimeError("FDR StockListing KRX 0 rows")
+            raise RuntimeError("KRX/FDR listing fallback all failed: 0 rows")
 
         df = krx.copy()
 
@@ -4836,7 +4969,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("FDR로 코스피/코스닥 전체시장을 매일 새로 스캔하는 실전형입니다. 회전점수/업종라벨/데이터기준 보정 포함.")
+    st.caption("FDR KRX를 기본으로 쓰고, 실패 시 KRX 직접 CSV/KOSPI/KOSDAQ 백업으로 전체시장 유니버스를 복구합니다.")
 
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
