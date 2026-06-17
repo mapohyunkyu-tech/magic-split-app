@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_ADD_BUY_AT_CAP_FIX_20260617"
+APP_VERSION = "v27_LIVE_TRIGGER_PRICE_HINT_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -69,7 +69,7 @@ HOLDINGS_COLUMNS = [
 
 HOLDING_JUDGE_COLUMNS = [
     "순위", "종목", "코드", "오늘추가매수", "보유판정", "판정사유", "차수",
-    "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
+    "진입단가", "현재가", "추가매수기준가", "현재장도달시", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "다음차수", "추가매수기준률", "기준까지남은하락률", "기준도달여부",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
     "등급", "점수", "그룹", "과열상태", "당일등락률", "갭상승률", "눌림률",
@@ -4022,6 +4022,49 @@ def get_lot_trigger_status(step, pnl_pct):
     }
 
 
+
+
+def get_lot_trigger_price(entry, trigger):
+    """차수별 추가매수 기준가. FDR 현재가가 늦을 때 HTS/증권앱 현재가와 비교하기 위한 값."""
+    try:
+        entry = float(entry)
+        trigger = float(trigger)
+        if entry <= 0 or trigger <= 0:
+            return 0
+        return int(round(entry * (1 - trigger / 100.0), 0))
+    except Exception:
+        return 0
+
+
+def get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason):
+    """FDR 가격 지연 대비: 증권앱 현재가가 기준가 이하로 내려오면 매수가능 후보인지 표시."""
+    trigger = trigger_status.get("trigger") if isinstance(trigger_status, dict) else None
+    trigger_price = get_lot_trigger_price(entry, trigger)
+    if trigger_price <= 0:
+        return "", ""
+
+    if bool(trigger_status.get("reached")):
+        return int(trigger_price), "FDR기준 이미도달"
+
+    # 가격 지연으로 FDR은 미도달이지만, HTS/증권앱 현재가가 기준가를 터치하면 후보가 될 수 있는 경우만 표시한다.
+    # 과열/급락/회수모드/요양원/최대차수 등 다른 금지사유는 매수가능 문구를 띄우지 않는다.
+    if "기준 미도달" not in str(reason):
+        return int(trigger_price), f"HTS {trigger_price:,}원 이하 여부만 참고"
+
+    score = _safe_float_value(info.get("점수", 0), 0)
+    mode = str(op.get("운영모드", ""))
+    step = _safe_int_value(step, 1)
+
+    live_allowed = False
+    if score >= 80 and step <= 5:
+        live_allowed = True
+    elif score >= 70 and step <= 5 and mode in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
+        live_allowed = True
+
+    if live_allowed:
+        return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달시 매수가능후보"
+    return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달해도 점수/운영모드 확인"
+
 def judge_holding_row(row, info, op, is_excluded=False):
     mode = op.get("운영모드", "")
     entry = _safe_float_value(row.get("진입단가", 0), 0)
@@ -4198,6 +4241,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
             trigger_status = get_lot_trigger_status(step, pnl_pct)
             is_excluded = code in exclude_codes
             judgement, allow_raw, reason = judge_holding_row(h, info, op, is_excluded=is_excluded)
+            live_trigger_price, live_trigger_hint = get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason)
 
             rows.append({
                 "순위": 0,
@@ -4209,6 +4253,8 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "차수": int(step),
                 "진입단가": int(entry),
                 "현재가": int(current),
+                "추가매수기준가": live_trigger_price,
+                "현재장도달시": live_trigger_hint,
                 "수량": qty,
                 "매입금액": int(cost),
                 "차수평가금액": int(eval_amount),
