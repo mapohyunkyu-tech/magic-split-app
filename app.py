@@ -24,13 +24,73 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_LIVE_TRIGGER_PRICE_HINT_20260617"
+APP_VERSION = "v27_PINNED_STOCK_COLUMN_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
     page_icon="📈",
     layout="wide"
 )
+
+
+# =====================================================
+# 표 표시 유틸: 모바일 가로 스크롤 시 종목/코드 고정
+# =====================================================
+
+def _safe_text_column(label, width=None, pinned=False):
+    """Streamlit 버전별 pinned 인자 호환용."""
+    try:
+        return st.column_config.TextColumn(label, width=width, pinned=pinned)
+    except TypeError:
+        return st.column_config.TextColumn(label, width=width)
+
+
+def _safe_number_column(label, width=None, pinned=False, format=None):
+    kwargs = {"width": width}
+    if format is not None:
+        kwargs["format"] = format
+    try:
+        return st.column_config.NumberColumn(label, pinned=pinned, **kwargs)
+    except TypeError:
+        return st.column_config.NumberColumn(label, **kwargs)
+
+
+def _safe_checkbox_column(label, help=None, pinned=False):
+    try:
+        return st.column_config.CheckboxColumn(label, help=help, pinned=pinned)
+    except TypeError:
+        return st.column_config.CheckboxColumn(label, help=help)
+
+
+def pinned_stock_column_config(df, pin_rank=False, pin_action=False):
+    """종목/코드를 왼쪽에 고정해서 모바일 가로 스크롤 때 종목명이 사라지지 않게 한다."""
+    cfg = {}
+    cols = set(df.columns) if hasattr(df, "columns") else set()
+    if pin_action and "삭제" in cols:
+        cfg["삭제"] = _safe_checkbox_column("삭제", help="체크 후 삭제 버튼을 누르면 해당 행이 삭제됩니다.", pinned=True)
+    if pin_rank and "순위" in cols:
+        cfg["순위"] = _safe_number_column("순위", width="small", pinned=True)
+    if "종목" in cols:
+        cfg["종목"] = _safe_text_column("종목", width="medium", pinned=True)
+    if "코드" in cols:
+        cfg["코드"] = _safe_text_column("코드", width="small", pinned=True)
+    return cfg
+
+
+def show_pinned_dataframe(df, *, height=None, pin_rank=False, pin_action=False):
+    kwargs = {
+        "use_container_width": True,
+        "column_config": pinned_stock_column_config(df, pin_rank=pin_rank, pin_action=pin_action),
+        "hide_index": True,
+    }
+    if height is not None:
+        kwargs["height"] = height
+    try:
+        return st.dataframe(df, **kwargs)
+    except TypeError:
+        # 구버전 Streamlit 호환: hide_index/pinned 미지원 시에도 앱이 죽지 않게 표시
+        kwargs.pop("hide_index", None)
+        return st.dataframe(df, **kwargs)
 
 NURSING_COLUMNS = [
     "코드", "종목", "입력명", "상태", "차수",
@@ -5508,7 +5568,7 @@ elif menu == "3. TOP50":
             st.warning("현재 신규매수 0개. 아래 후보는 참고용입니다.")
         if use_relaxed:
             st.warning("완화후보는 필터를 낮춘 참고용입니다. 실제 매수는 차트/보유 여부 확인 후 판단.")
-        st.dataframe(top50, use_container_width=True)
+        show_pinned_dataframe(top50, pin_rank=True)
         st.download_button("TOP50 CSV 다운로드", data=top50.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_top50_{asof_date}.csv", mime="text/csv")
 
 # =====================================================
@@ -5545,7 +5605,7 @@ elif menu == "4. 보유종목 판단기":
                 raw = pd.read_csv(uploaded, encoding="cp949")
             norm, not_found = normalize_holdings_upload(raw, krx)
             st.write("인식 결과")
-            st.dataframe(norm, use_container_width=True)
+            show_pinned_dataframe(norm)
             if not_found:
                 st.warning("종목코드/종목명을 못 찾은 항목: " + ", ".join(not_found[:20]))
             if st.button("업로드 보유차수 저장", type="primary"):
@@ -5564,7 +5624,7 @@ elif menu == "4. 보유종목 판단기":
             parsed, not_found = parse_manual_group_lot_text(manual_text, krx)
             if len(parsed) > 0:
                 st.write("인식 결과")
-                st.dataframe(parsed, use_container_width=True)
+                show_pinned_dataframe(parsed)
                 current = load_holdings_df()
                 combined = pd.concat([current, parsed], ignore_index=True)
                 save_holdings_df(combined)
@@ -5585,17 +5645,18 @@ elif menu == "4. 보유종목 판단기":
 
         delete_df = holdings_df.copy().reset_index(drop=True)
         delete_df.insert(0, "삭제", False)
+        editor_column_config = pinned_stock_column_config(delete_df, pin_action=True)
+        editor_column_config.update({
+            "업데이트일": _safe_text_column("업데이트일"),
+        })
         edited = st.data_editor(
             delete_df,
             use_container_width=True,
+            hide_index=True,
             num_rows="dynamic",
             key="holdings_lot_editor_with_delete",
-            column_config={
-                "삭제": st.column_config.CheckboxColumn("삭제", help="체크 후 '체크한 차수 삭제'를 누르면 해당 행이 삭제됩니다."),
-                "코드": st.column_config.TextColumn("코드", disabled=True),
-                "종목": st.column_config.TextColumn("종목"),
-                "업데이트일": st.column_config.TextColumn("업데이트일", disabled=True),
-            }
+            column_config=editor_column_config,
+            disabled=["코드", "업데이트일"]
         )
 
         b1, b2, b3 = st.columns([1, 1, 2])
@@ -5679,7 +5740,7 @@ elif menu == "4. 보유종목 판단기":
                 st.success("보유차수 판단 완료")
                 st.caption("저장 데이터는 1차/2차 모두 유지됩니다. 판단표는 종목별 현재 보유 최고차수 1줄만 표시하고, 종목/코드를 앞쪽에 배치했습니다. 종목평균단가_자동/종목전체손익률_자동은 전체 저장차수 기준입니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
-                st.dataframe(result, use_container_width=True, height=600)
+                show_pinned_dataframe(result, height=600, pin_rank=True)
                 st.write("진단")
                 st.json(diag)
 
