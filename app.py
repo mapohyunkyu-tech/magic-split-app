@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_HOLDING_LOT_TRIGGER_FIX_20260617"
+APP_VERSION = "v27_HOLDING_LATEST_LOT_VIEW_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -68,7 +68,7 @@ HOLDINGS_COLUMNS = [
 ]
 
 HOLDING_JUDGE_COLUMNS = [
-    "순위", "오늘추가매수", "보유판정", "판정사유", "코드", "종목", "차수",
+    "순위", "종목", "코드", "오늘추가매수", "보유판정", "판정사유", "차수",
     "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "다음차수", "추가매수기준률", "기준까지남은하락률", "기준도달여부",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
@@ -4110,19 +4110,40 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     daily_budget = int(op.get("일일매수상한", 0))
     mode = op.get("운영모드", "")
 
-    # 종목별 현재 보유 최고 차수. 추가매수 판단은 최고 차수의 다음 차수 기준으로만 본다.
+    # 저장 데이터는 1차/2차/3차 모두 유지한다.
+    # 다만 추가매수 판단표는 종목별 현재 보유 최고 차수 1줄만 보여준다.
     holdings_for_step = holdings_df.copy()
     if "코드" in holdings_for_step.columns and "차수" in holdings_for_step.columns:
         holdings_for_step["코드정규"] = holdings_for_step["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
         holdings_for_step["차수정수"] = holdings_for_step["차수"].apply(lambda x: _safe_int_value(x, 1))
+        holdings_for_step["수량숫자"] = holdings_for_step["수량"].apply(lambda x: _safe_float_value(x, 0)) if "수량" in holdings_for_step.columns else 0
+        holdings_for_step["진입단가숫자"] = holdings_for_step["진입단가"].apply(lambda x: _safe_float_value(x, 0)) if "진입단가" in holdings_for_step.columns else 0
+        holdings_for_step["매입금액숫자"] = holdings_for_step["매입금액"].apply(lambda x: _safe_float_value(x, 0)) if "매입금액" in holdings_for_step.columns else 0
+        holdings_for_step["매입금액계산"] = np.where(
+            holdings_for_step["매입금액숫자"] > 0,
+            holdings_for_step["매입금액숫자"],
+            holdings_for_step["진입단가숫자"] * holdings_for_step["수량숫자"]
+        )
         max_step_by_code = holdings_for_step.groupby("코드정규")["차수정수"].max().to_dict()
+        total_by_code = holdings_for_step.groupby("코드정규").agg(
+            종목총수량=("수량숫자", "sum"),
+            종목총매입금액=("매입금액계산", "sum"),
+        ).to_dict("index")
+        latest_mask = holdings_for_step["차수정수"].eq(holdings_for_step["코드정규"].map(max_step_by_code))
+        judgement_source = holdings_for_step.loc[latest_mask].drop_duplicates(subset=["코드정규"], keep="last").copy()
     else:
         max_step_by_code = {}
+        total_by_code = {}
+        judgement_source = holdings_df.copy()
+
+    diag["저장차수"] = int(len(holdings_df))
+    diag["판단표시차수"] = int(len(judgement_source))
+    diag["판단방식"] = "저장 데이터는 전체 유지 / 판단표는 종목별 최고차수만 표시"
 
     # 같은 종목 여러 차수는 현재가/점수 조회를 1번만 하기 위한 캐시
     info_cache = {}
 
-    for _, h in holdings_df.head(int(max_rows)).iterrows():
+    for _, h in judgement_source.head(int(max_rows)).iterrows():
         diag["대상차수"] += 1
         code = str(h.get("코드", "")).replace(".0", "").zfill(6)
         name = str(h.get("종목", "")).strip() or name_map.get(code, code)
@@ -4226,21 +4247,24 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
 
     out = pd.DataFrame(rows)
 
-    # 참고용 종목 전체 평균단가/전체손익률은 프로그램이 자동 계산한다. 사용자가 입력할 필요 없다.
-    grp = out.groupby("코드").agg(
-        종목총수량=("수량", "sum"),
-        종목총매입금액=("매입금액", "sum"),
-        종목총평가금액=("차수평가금액", "sum"),
-        종목전체평가손익_자동=("차수평가손익", "sum")
-    ).reset_index()
-    grp["종목평균단가_자동"] = np.where(grp["종목총수량"] > 0, grp["종목총매입금액"] / grp["종목총수량"], 0)
-    grp["종목전체손익률_자동"] = np.where(grp["종목총매입금액"] > 0, (grp["종목총평가금액"] / grp["종목총매입금액"] - 1) * 100, 0)
-    out = out.drop(columns=["종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동"], errors="ignore").merge(
-        grp[["코드", "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동"]], on="코드", how="left"
-    )
+    # 참고용 종목 전체 평균단가/전체손익률은 저장된 모든 차수 기준으로 계산한다.
+    # 판단표에는 최고차수 1줄만 나오지만, 총수량/평균단가/전체손익률은 전체 보유차수를 반영한다.
+    def _total_qty_for_code(code):
+        return float(total_by_code.get(str(code).zfill(6), {}).get("종목총수량", 0))
+
+    def _total_cost_for_code(code):
+        return float(total_by_code.get(str(code).zfill(6), {}).get("종목총매입금액", 0))
+
+    out["종목총수량"] = out["코드"].apply(_total_qty_for_code)
+    out["종목총매입금액"] = out["코드"].apply(_total_cost_for_code)
+    out["종목평균단가_자동"] = np.where(out["종목총수량"] > 0, out["종목총매입금액"] / out["종목총수량"], 0)
+    out["종목전체평가금액_자동"] = out["현재가"].apply(lambda x: _safe_float_value(x, 0)) * out["종목총수량"]
+    out["종목전체평가손익_자동"] = out["종목전체평가금액_자동"] - out["종목총매입금액"]
+    out["종목전체손익률_자동"] = np.where(out["종목총매입금액"] > 0, (out["종목전체평가금액_자동"] / out["종목총매입금액"] - 1) * 100, 0)
     out["종목평균단가_자동"] = out["종목평균단가_자동"].round(0).astype(int)
     out["종목전체평가손익_자동"] = out["종목전체평가손익_자동"].round(0).astype(int)
     out["종목전체손익률_자동"] = out["종목전체손익률_자동"].round(2)
+    out = out.drop(columns=["종목총매입금액", "종목전체평가금액_자동"], errors="ignore")
 
     out["허용순위"] = out["보유판정"].map({"추가매수 A": 5, "추가매수 B": 4, "하위차수유지": 2, "유지": 2, "익절검토": 1, "회수후보": 0, "요양원후보": 0}).fillna(1)
     out["기준남은값"] = out["기준까지남은하락률"].apply(lambda x: _safe_float_value(x, 999))
@@ -5602,7 +5626,7 @@ elif menu == "4. 보유종목 판단기":
                 st.error(diag["error"])
             else:
                 st.success("보유차수 판단 완료")
-                st.caption("평균단가는 사용자가 입력하지 않습니다. 종목평균단가_자동/종목전체손익률_자동은 참고용으로 프로그램이 계산합니다.")
+                st.caption("저장 데이터는 1차/2차 모두 유지됩니다. 판단표는 종목별 현재 보유 최고차수 1줄만 표시하고, 종목/코드를 앞쪽에 배치했습니다. 종목평균단가_자동/종목전체손익률_자동은 전체 저장차수 기준입니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
                 st.dataframe(result, use_container_width=True, height=600)
                 st.write("진단")
@@ -5621,7 +5645,7 @@ else:
 
 ### 이번 버전 핵심
 
-- v19의 보유차수 판단기를 유지합니다. 1차/2차/3차를 각각 평가합니다.
+- 보유차수 저장데이터는 1차/2차/3차 모두 유지하되, 판단표는 종목별 현재 보유 최고차수 1줄만 표시합니다.
 - 수동입력에서 종목명을 여러 번 쓰지 않아도 됩니다. `[종목명]` 아래에 차수만 여러 줄 입력합니다.
 - 기존 `종목명,차수,진입단가,수량` 한 줄 입력도 계속 지원합니다.
 - 예수금 방어선은 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
@@ -5634,7 +5658,7 @@ else:
 1. 요양원 메뉴에서 요양원 등록/졸업 관리
 2. 운영판단기에서 오늘 모드 확인
 3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
-4. 보유차수 판단기에서 차수별 기준도달 여부와 추가매수/유지/회수 판단
+4. 보유차수 판단기에서 종목별 최고차수 기준도달 여부와 추가매수/유지/회수 판단
 5. TOP50에서 신규 후보 출력
 
 ### 묶음수동입력 예시
