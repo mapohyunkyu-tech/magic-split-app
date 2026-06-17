@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FDR_LISTING_FALLBACK_FIX_20260617"
+APP_VERSION = "v27_MARKET_REGIME_DISPLAY_FIX_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -48,7 +48,7 @@ TOP50_COLUMNS = [
     "그룹", "섹터신뢰", "데이터기준일", "데이터주의",
     "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "회전빈도20", "회전빈도60", "기술점수", "모멘텀점수",
-    "장세", "운영모드", "장세매수코멘트"
+    "중기장세", "당일장세", "장세근거", "장세", "운영모드", "장세매수코멘트"
 ]
 
 OPERATION_COLUMNS = [
@@ -3431,6 +3431,7 @@ def calc_today_gap_metrics(indicator_df):
 def judge_final_entry(row):
     """14:30 이후 실제 신규 진입 가능 여부를 한 줄로 판정."""
     reasons = []
+    pending_reasons = []
     critical = False
 
     mode = str(row.get("운영모드", ""))
@@ -3452,7 +3453,7 @@ def judge_final_entry(row):
         critical = True
 
     if today_buy != "매수가능":
-        reasons.append(f"오늘매수 {today_buy}")
+        pending_reasons.append(f"오늘매수 {today_buy}" if today_buy else "오늘매수 대기")
 
     if buy_state not in ["OK", "눌림후보"]:
         reasons.append(f"상태 {buy_state}")
@@ -3475,13 +3476,15 @@ def judge_final_entry(row):
         reasons.append(f"당일급락 {day_pct}%")
         critical = True
 
-    if not reasons:
-        return "진입가능", "조건통과"
-
     if critical:
-        return "금지", " / ".join(reasons)
+        # 금지일 때는 "오늘매수 대기" 같은 보조 문구를 빼고 실제 금지 사유만 보여준다.
+        return "금지", " / ".join(reasons) if reasons else "신규매수금지"
 
-    return "대기", " / ".join(reasons)
+    if reasons or pending_reasons:
+        return "대기", " / ".join(reasons + pending_reasons)
+
+    return "진입가능", "조건통과"
+
 
 # =====================================================
 # FinanceDataReader 데이터 엔진
@@ -4029,13 +4032,14 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     name_map = dict(zip(krx["Code"].astype(str).str.zfill(6), krx["Name"].astype(str))) if len(krx) else {}
     exclude_codes = get_nursing_exclude_codes()
     asof_date = find_valid_krx_date()
-    regime = ms_regime_asof_from_etf(asof_date)
+    regime_detail = ms_market_regime_detail_asof(asof_date)
+    regime = regime_detail.get("중기장세", "장세불명")
     data_start = (pd.to_datetime(asof_date) - pd.DateOffset(days=1400)).strftime("%Y%m%d")
 
     rows = []
     diag = {"대상차수": 0, "대상종목": int(holdings_df["코드"].nunique()) if "코드" in holdings_df.columns else 0,
             "가격데이터없음": 0, "지표계산실패": 0, "판정완료": 0, "예외": 0,
-            "기준일": asof_date, "장세": regime}
+            "기준일": asof_date, "중기장세": regime, "당일장세": regime_detail.get("당일장세", ""), "장세근거": regime_detail.get("장세근거", "")}
 
     target_amount = int(op.get("기본매수금액", 150000))
     add_limit = int(op.get("추가매수가능개수", 0))
@@ -4233,30 +4237,161 @@ def get_ohlcv_fdr_cached(code, start_date, end_date):
         return pd.DataFrame()
 
 
-def ms_regime_asof_from_etf(asof_date):
+def _safe_float(x, default=0.0):
+    try:
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _ohlcv_close_series(raw):
+    """FDR 지수/ETF/종목 데이터를 close 시리즈로 통일한다."""
+    if raw is None or len(raw) == 0:
+        return pd.Series(dtype="float64")
+    df = raw.copy()
+    close_col = None
+    for c in ["Close", "close", "종가"]:
+        if c in df.columns:
+            close_col = c
+            break
+    if close_col is None:
+        return pd.Series(dtype="float64")
+    close = pd.to_numeric(df[close_col], errors="coerce").dropna()
+    return close
+
+
+@st.cache_data(ttl=60 * 60 * 3, show_spinner=False)
+def ms_index_day_change_cached(symbol, asof_date):
+    """KS11/KQ11 같은 지수의 최근 거래일 당일등락률을 계산한다."""
+    try:
+        start = (pd.to_datetime(asof_date) - pd.DateOffset(days=15)).strftime("%Y%m%d")
+        raw = get_ohlcv_fdr_cached(symbol, start, asof_date)
+        close = _ohlcv_close_series(raw)
+        if len(close) < 2:
+            return None
+        prev = float(close.iloc[-2])
+        last = float(close.iloc[-1])
+        if prev <= 0:
+            return None
+        return round((last / prev - 1) * 100, 2)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60 * 60 * 3, show_spinner=False)
+def ms_mid_regime_detail_asof_from_etf(asof_date):
+    """KODEX200(069500) 기준 중기장세. '폭등장'은 당일 급등이 아니라 20거래일 급등 의미."""
+    detail = {
+        "중기장세": "장세불명",
+        "중기근거": "KODEX200 데이터 부족",
+        "KODEX200_20일수익률": None,
+        "KODEX200_60일수익률": None,
+        "KODEX200_MA60위치": "",
+        "KODEX200_MA120위치": "",
+    }
     start = (pd.to_datetime(asof_date) - pd.DateOffset(days=300)).strftime("%Y%m%d")
     try:
         raw = get_ohlcv_fdr_cached("069500", start, asof_date)
         df = ms_prepare_indicator_df(raw)
         if len(df) < 120:
-            return "장세불명"
+            return detail
         last = df.iloc[-1]
-        close = float(last["close"])
-        ma60 = float(last["ma60"])
-        ma120 = float(last["ma120"])
-        ret20 = float(last["ret20"])
-        ret60 = float(last["ret60"])
+        close = _safe_float(last.get("close"))
+        ma60 = _safe_float(last.get("ma60"))
+        ma120 = _safe_float(last.get("ma120"))
+        ret20 = _safe_float(last.get("ret20"))
+        ret60 = _safe_float(last.get("ret60"))
+
+        detail["KODEX200_20일수익률"] = round(ret20, 2)
+        detail["KODEX200_60일수익률"] = round(ret60, 2)
+        detail["KODEX200_MA60위치"] = "MA60상단" if close > ma60 else "MA60하단"
+        detail["KODEX200_MA120위치"] = "MA120상단" if close > ma120 else "MA120하단"
+
         if close < ma120 and ret60 < -3:
-            return "하락장"
-        if ret20 < -5:
-            return "약세장"
-        if ret20 > 12:
-            return "폭등장"
-        if close > ma60 and ret60 > 5:
-            return "상승장"
-        return "횡보장"
-    except Exception:
-        return "장세불명"
+            regime = "중기하락장"
+        elif ret20 < -5:
+            regime = "중기약세장"
+        elif ret20 > 12:
+            regime = "20일급등장"
+        elif close > ma60 and ret60 > 5:
+            regime = "중기상승장"
+        else:
+            regime = "중기횡보장"
+
+        detail["중기장세"] = regime
+        detail["중기근거"] = f"KODEX200 20일 {ret20:.2f}% / 60일 {ret60:.2f}% / {detail['KODEX200_MA60위치']} / {detail['KODEX200_MA120위치']}"
+        return detail
+    except Exception as e:
+        detail["중기근거"] = f"KODEX200 장세판단 실패: {e}"
+        return detail
+
+
+@st.cache_data(ttl=60 * 60 * 3, show_spinner=False)
+def ms_today_market_detail_asof(asof_date):
+    """KOSPI/KOSDAQ 당일장세. 중기장세와 분리해서 체감장을 보여준다."""
+    kospi = ms_index_day_change_cached("KS11", asof_date)
+    kosdaq = ms_index_day_change_cached("KQ11", asof_date)
+
+    # 지수 호출 실패 시 KODEX200 당일 변화율이라도 보조로 쓴다.
+    if kospi is None:
+        kospi = ms_index_day_change_cached("069500", asof_date)
+
+    if kospi is None and kosdaq is None:
+        return {
+            "당일장세": "당일장세불명",
+            "당일근거": "KOSPI/KOSDAQ 당일등락률 데이터 부족",
+            "KOSPI_당일등락률": None,
+            "KOSDAQ_당일등락률": None,
+        }
+
+    k1 = 0.0 if kospi is None else float(kospi)
+    k2 = 0.0 if kosdaq is None else float(kosdaq)
+
+    if k1 >= 1.0 and k2 >= 1.0:
+        today = "당일강세"
+    elif k1 <= -1.0 and k2 <= -1.0:
+        today = "당일약세"
+    elif k1 >= 0.7 and k2 >= 0.0:
+        today = "코스피강세"
+    elif k2 >= 0.7 and k1 >= 0.0:
+        today = "코스닥강세"
+    elif k2 <= -1.0 and k1 > -0.5:
+        today = "혼조/코스닥약세"
+    elif k1 <= -1.0 and k2 > -0.5:
+        today = "혼조/코스피약세"
+    elif abs(k1) <= 0.3 and abs(k2) <= 0.3:
+        today = "당일보합"
+    elif (k1 >= 0 and k2 < 0) or (k1 < 0 and k2 >= 0):
+        today = "당일혼조"
+    elif k1 < 0 and k2 < 0:
+        today = "당일약보합"
+    else:
+        today = "당일양호"
+
+    return {
+        "당일장세": today,
+        "당일근거": f"KOSPI {k1:.2f}% / KOSDAQ {k2:.2f}%",
+        "KOSPI_당일등락률": None if kospi is None else round(float(kospi), 2),
+        "KOSDAQ_당일등락률": None if kosdaq is None else round(float(kosdaq), 2),
+    }
+
+
+def ms_market_regime_detail_asof(asof_date):
+    mid = ms_mid_regime_detail_asof_from_etf(asof_date)
+    today = ms_today_market_detail_asof(asof_date)
+    detail = {}
+    detail.update(mid)
+    detail.update(today)
+    detail["장세표시"] = f"중기:{detail.get('중기장세', '장세불명')} / 당일:{detail.get('당일장세', '당일장세불명')}"
+    detail["장세근거"] = f"{detail.get('중기근거', '')} / {detail.get('당일근거', '')}"
+    return detail
+
+
+def ms_regime_asof_from_etf(asof_date):
+    """기존 코드 호환용. 점수/매수수 제한은 중기장세 기준으로 유지한다."""
+    return ms_market_regime_detail_asof(asof_date).get("중기장세", "장세불명")
 
 
 # =====================================================
@@ -4587,9 +4722,9 @@ def adjust_new_buy_by_regime(new_buy_limit, regime):
     if "횡보" in regime_text:
         return min(new_buy_limit, 3), "횡보장 3개 이하"
     if "상승" in regime_text:
-        return min(new_buy_limit, 7), "상승장 정상 매수"
-    if "폭등" in regime_text:
-        return min(new_buy_limit, 5), "폭등장 과열 추격 제한"
+        return min(new_buy_limit, 7), "중기상승장 정상 매수"
+    if "폭등" in regime_text or "급등" in regime_text:
+        return min(new_buy_limit, 5), "20일급등장 과열 추격 제한"
     return min(new_buy_limit, 3), "장세 불명 3개 이하"
 
 
@@ -5016,12 +5151,16 @@ elif menu == "3. TOP50":
 
         exclude_codes = get_nursing_exclude_codes()
         asof_date = find_valid_krx_date()
-        regime = ms_regime_asof_from_etf(asof_date)
+        regime_detail = ms_market_regime_detail_asof(asof_date)
+        regime = regime_detail.get("중기장세", "장세불명")
+        today_regime = regime_detail.get("당일장세", "당일장세불명")
         original_new_buy_limit = new_buy_limit
         new_buy_limit, regime_buy_comment = adjust_new_buy_by_regime(new_buy_limit, regime)
 
         st.write("기준일:", asof_date)
-        st.write("장세:", regime)
+        st.write("중기장세:", regime)
+        st.write("당일장세:", today_regime)
+        st.caption("장세근거: " + str(regime_detail.get("장세근거", "")))
         st.write("운영모드:", mode_name)
         st.write("신규매수:", original_new_buy_limit, "→", new_buy_limit, "/", regime_buy_comment)
         st.write("요양원/재진입금지 제외 종목수:", len(exclude_codes))
@@ -5098,7 +5237,10 @@ elif menu == "3. TOP50":
                         info["실제매수금액"] = buy_amount
                         info["목표매수금액"] = target_amount
                         info["허용상한"] = price_limit
-                        info["장세"] = regime
+                        info["중기장세"] = regime
+                        info["당일장세"] = today_regime
+                        info["장세근거"] = regime_detail.get("장세근거", "")
+                        info["장세"] = regime_detail.get("장세표시", regime)
                         info["운영모드"] = mode_name
                         if str(info.get("매수상태", "OK")) != "OK":
                             info["장세매수코멘트"] = f"{regime_buy_comment} / {info.get('과열상태', '')}"
@@ -5135,7 +5277,10 @@ elif menu == "3. TOP50":
                             relaxed["실제매수금액"] = buy_amount
                             relaxed["목표매수금액"] = target_amount
                             relaxed["허용상한"] = price_limit
-                            relaxed["장세"] = regime
+                            relaxed["중기장세"] = regime
+                            relaxed["당일장세"] = today_regime
+                            relaxed["장세근거"] = regime_detail.get("장세근거", "")
+                            relaxed["장세"] = regime_detail.get("장세표시", regime)
                             relaxed["운영모드"] = mode_name
                             relaxed["장세매수코멘트"] = f"완화후보 / {relaxed.get('과열상태', '')}"
                             relaxed_rows.append(relaxed)

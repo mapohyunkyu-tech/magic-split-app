@@ -1,54 +1,34 @@
-# MAGIC v27 FDR LISTING FALLBACK FIX
+# MAGIC SPLIT v27_MARKET_REGIME_DISPLAY_FIX_20260617
 
-## 수정명
-v27_FDR_LISTING_FALLBACK_FIX_20260617
-
-## 수정 이유
-TOP50에서 `계산 종목수 700`으로 실행했는데 유니버스 진단이 아래처럼 뜨는 문제가 있었습니다.
-
-```text
-listing_rows: 0
-final_universe: 10
-error: FDR StockListing KRX 0 rows
-```
-
-이 상태는 700개를 계산한 것이 아니라, FinanceDataReader의 `StockListing("KRX")`가 0행으로 실패해서 강제포함/보유종목만 계산한 상태입니다.
+장세 표시가 “오늘 폭등”처럼 보이는 문제를 수정한 안정 패치입니다.
 
 ## 수정 내용
-1. FDR `StockListing("KRX")` 1차 시도
-2. 실패 또는 0행/소량/가격·거래대금 비어 있음 감지
-3. KRX 직접 CSV 다운로드 백업으로 전종목 시세 복구
-4. KRX 직접 CSV도 실패하면 FDR `KOSPI` + `KOSDAQ` 개별 목록으로 최소 전체 코드 목록 복구
-5. 유니버스 진단 engine 문구 변경
-   - `FDR KRX + KRX CSV + KOSPI/KOSDAQ fallback`
-6. TOP50 설명 문구 변경
-   - FDR 실패 시 백업 유니버스로 복구한다고 표시
 
-## 정상 확인 기준
-TOP50 실행 후 유니버스 진단에서 아래처럼 나와야 합니다.
+- 기존 `장세: 폭등장` 단일 표시를 분리했습니다.
+  - `중기장세`: KODEX200(069500) 최근 20/60거래일, MA60/MA120 기준
+  - `당일장세`: KOSPI(KS11), KOSDAQ(KQ11) 당일등락률 기준
+  - `장세근거`: KODEX200 20일/60일 수익률 + KOSPI/KOSDAQ 당일등락률
+- `폭등장` 문구를 `20일급등장`으로 변경했습니다.
+  - 오늘 하루 폭등이라는 뜻이 아니라 최근 20거래일 급등이라는 의미를 명확히 했습니다.
+- TOP50 저장 컬럼에 `중기장세`, `당일장세`, `장세근거`를 추가했습니다.
+- 보유차수 판단기 진단에도 중기/당일 장세 근거를 표시합니다.
+- 최종판정이 `금지`일 때 `오늘매수 대기` 같은 보조 문구가 판정사유에 섞이지 않도록 정리했습니다.
 
-```text
-listing_rows: 2000 이상 권장
-market_filtered: 2000 이상 권장
-final_universe: 계산 종목수 + 강제포함/보유종목 근처
-error: 빈값
-```
+## 해석 예시
 
-계산 종목수를 700으로 넣었다면 `final_universe`가 10개 수준이면 안 됩니다.
+- `중기장세: 20일급등장`
+  - KODEX200 최근 20거래일 수익률이 높은 상태
+- `당일장세: 혼조/코스닥약세`
+  - 오늘 코스피는 보합 또는 양호하지만 코스닥이 약한 상태
+- `운영모드: 제한매수모드`
+  - 중기 과열 상태라 신규 추격매수를 제한하는 상태
 
-## 설치
-GitHub 루트에 아래 파일을 덮어쓰기하세요.
+## 배포 방법
+
+GitHub 루트에 아래 3개 파일을 올리세요.
 
 - app.py
 - requirements.txt
 - runtime.txt
 
-Streamlit Cloud에서는 배포 후 반드시 아래를 권장합니다.
-
-1. Manage app
-2. Clear cache
-3. Reboot app
-4. TOP50 재실행
-
-## 참고
-KRX/FDR 외부 데이터가 모두 막히면 그래도 0개가 될 수 있습니다. 그 경우에는 Streamlit Cloud 네트워크/일시적 KRX 응답 문제일 수 있으니 Reboot 후 재실행하세요.
+Streamlit 배포 후 캐시가 꼬이면 Clear cache / Reboot을 실행하세요.
