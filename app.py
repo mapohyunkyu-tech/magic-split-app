@@ -8,10 +8,6 @@
 
 import re
 import time
-import html
-import io
-import zipfile
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -21,13 +17,12 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 import gspread
 import FinanceDataReader as fdr
-import requests
 
 # =====================================================
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_JUDGE_REASON_TEXT_FIX_20260616"
+APP_VERSION = "v27_MANUAL_LOT_PARSER_FIX_20260617"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -48,8 +43,7 @@ TOP50_COLUMNS = [
     "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
     "매수상태", "과열상태", "추격주의여부", "당일등락률", "갭상승률", "요양원여부",
-    "그룹", "섹터분류", "섹터신뢰", "섹터판정", "테마실체", "테마리스크",
-    "테마원천", "테마리스크사유", "데이터기준일", "데이터주의",
+    "그룹", "섹터신뢰", "데이터기준일", "데이터주의",
     "거래대금60억", "눌림률", "20일수익률", "60일수익률",
     "거래대금점수", "회전점수", "회전빈도20", "회전빈도60", "기술점수", "모멘텀점수",
     "장세", "운영모드", "장세매수코멘트"
@@ -75,31 +69,23 @@ HOLDING_JUDGE_COLUMNS = [
     "순위", "오늘추가매수", "보유판정", "판정사유", "코드", "종목", "차수",
     "진입단가", "현재가", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
-    "등급", "점수", "그룹", "섹터분류", "섹터신뢰", "섹터판정", "테마실체", "테마리스크",
-    "테마원천", "테마리스크사유", "과열상태", "당일등락률", "갭상승률", "눌림률",
+    "등급", "점수", "그룹", "과열상태", "당일등락률", "갭상승률", "눌림률",
     "20일수익률", "60일수익률", "거래대금60억", "거래대금점수", "회전점수",
     "기술점수", "모멘텀점수", "데이터기준일", "데이터주의",
     "운영모드", "일일추가매수상한", "추가매수가능개수"
 ]
 
-SECTOR_MAPPING_COLUMNS = [
-    "종목코드", "종목명", "그룹", "섹터신뢰", "메모"
-]
-
-SECTOR_UNCLASSIFIED_COLUMNS = [
-    "최초발생일", "최근발생일", "발생원천", "발생횟수",
-    "종목코드", "종목명", "현재그룹", "현재신뢰", "현재판정",
-    "추천섹터", "추천신뢰", "추천사유",
-    "테마실체", "테마리스크", "점수", "20일수익률", "60일수익률",
-    "처리상태", "메모"
-]
-
 NAME_ALIAS = {
     "금호석유화학": "금호석유",
     "금호석화": "금호석유",
+    "DB하이텍": "DB하이텍",
+    "디비하이텍": "DB하이텍",
 }
 
 MANUAL_CODE_MAP = {
+    "DB하이텍": ("000990", "DB하이텍"),
+    "디비하이텍": ("000990", "DB하이텍"),
+    "DB하이텍 000990": ("000990", "DB하이텍"),
     "성광벤드": ("014620", "성광벤드"),
     "성광벤드 014620": ("014620", "성광벤드"),
     "태광": ("023160", "태광"),
@@ -2734,98 +2720,6 @@ def today_str():
     return datetime.today().strftime("%Y-%m-%d")
 
 
-def _sector_code_norm_v27(v):
-    s = str(v or "").strip().replace(".0", "")
-    s = re.sub(r"[^0-9]", "", s)
-    if not s:
-        return ""
-    return s.zfill(6)
-
-
-def _sector_name_key_v27(v):
-    return str(v or "").strip().upper().replace(" ", "")
-
-
-def load_sector_mapping_df_v27():
-    """Google Sheets 섹터매핑 탭을 읽는다. 없으면 자동 생성된다."""
-    ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
-    df = read_worksheet_df(ws, SECTOR_MAPPING_COLUMNS)
-    for c in SECTOR_MAPPING_COLUMNS:
-        if c not in df.columns:
-            df[c] = ""
-    if len(df) > 0:
-        df["종목코드"] = df["종목코드"].apply(_sector_code_norm_v27)
-    return df[SECTOR_MAPPING_COLUMNS].copy()
-
-
-def save_sector_mapping_df_v27(df):
-    ws = get_ws("섹터매핑", SECTOR_MAPPING_COLUMNS)
-    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_MAPPING_COLUMNS)
-    for c in SECTOR_MAPPING_COLUMNS:
-        if c not in out.columns:
-            out[c] = ""
-    if len(out) > 0:
-        out["종목코드"] = out["종목코드"].apply(_sector_code_norm_v27)
-        out = out[(out["종목코드"].astype(str).str.len() > 0) | (out["종목명"].astype(str).str.len() > 0)].copy()
-        out = out.drop_duplicates(subset=["종목코드", "종목명"], keep="last").reset_index(drop=True)
-    write_worksheet(ws, out[SECTOR_MAPPING_COLUMNS], SECTOR_MAPPING_COLUMNS)
-    try:
-        load_sector_mapping_v27.clear()
-    except Exception:
-        pass
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_sector_mapping_v27():
-    """섹터매핑 탭을 코드/종목명 딕셔너리로 캐시한다. TOP50/보유차수 공통 최우선 원천."""
-    result = {"by_code": {}, "by_name": {}}
-    try:
-        df = load_sector_mapping_df_v27()
-    except Exception:
-        return result
-    if df is None or len(df) == 0:
-        return result
-    for _, r in df.iterrows():
-        code = _sector_code_norm_v27(r.get("종목코드", ""))
-        name = str(r.get("종목명", "")).strip()
-        group = str(r.get("그룹", "")).strip()
-        trust = str(r.get("섹터신뢰", "")).strip() or "확정"
-        memo = str(r.get("메모", "")).strip() or "섹터매핑"
-        if not group or group == "기타":
-            continue
-        rec = (group, trust, memo)
-        if code:
-            result["by_code"][code] = rec
-        if name:
-            result["by_name"][_sector_name_key_v27(name)] = rec
-    return result
-
-
-def load_sector_unclassified_df_v27():
-    """Google Sheets 섹터미분류 탭을 읽는다. 없으면 자동 생성된다."""
-    ws = get_ws("섹터미분류", SECTOR_UNCLASSIFIED_COLUMNS)
-    df = read_worksheet_df(ws, SECTOR_UNCLASSIFIED_COLUMNS)
-    for c in SECTOR_UNCLASSIFIED_COLUMNS:
-        if c not in df.columns:
-            df[c] = ""
-    if len(df) > 0:
-        df["종목코드"] = df["종목코드"].apply(_sector_code_norm_v27)
-    return df[SECTOR_UNCLASSIFIED_COLUMNS].copy()
-
-
-def save_sector_unclassified_df_v27(df):
-    ws = get_ws("섹터미분류", SECTOR_UNCLASSIFIED_COLUMNS)
-    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_UNCLASSIFIED_COLUMNS)
-    for c in SECTOR_UNCLASSIFIED_COLUMNS:
-        if c not in out.columns:
-            out[c] = ""
-    if len(out) > 0:
-        out["종목코드"] = out["종목코드"].apply(_sector_code_norm_v27)
-        out = out[(out["종목코드"].astype(str).str.len() > 0) | (out["종목명"].astype(str).str.len() > 0)].copy()
-        out = out.drop_duplicates(subset=["종목코드"], keep="last").reset_index(drop=True)
-    write_worksheet(ws, out[SECTOR_UNCLASSIFIED_COLUMNS], SECTOR_UNCLASSIFIED_COLUMNS)
-
-
 def load_nursing_df():
     ws = get_ws("요양원목록", NURSING_COLUMNS)
     df = read_worksheet_df(ws, NURSING_COLUMNS)
@@ -3285,16 +3179,29 @@ def normalize_holdings_upload(raw_df, krx):
     return out, not_found
 
 
+def _normalize_manual_stock_text(x):
+    """수동입력 종목명에서 보이지 않는 문자와 불필요한 공백을 제거한다."""
+    s = str(x or "")
+    s = s.replace("\ufeff", "").replace("\u200b", "").replace("\xa0", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _manual_step_token(x):
+    """1 / 1차 / 01 같은 차수 토큰 여부."""
+    s = str(x or "").strip().replace("차", "")
+    return re.fullmatch(r"\d+", s) is not None
+
+
 def parse_manual_group_lot_text(manual_text, krx):
     """
-    v22 묶음입력 파서. [종목명]뿐 아니라 그냥 종목명 한 줄도 헤더로 인식한다.
+    v27 수동 보유차수 파서.
 
     지원 형식 1) 묶음입력
-    삼성E&A
-    1,64800,3
-    2,58400,3
+    DB하이텍
+    1,193300,1
+    2,174200,1
 
-    지원 형식 1-2) 괄호형 묶음입력도 계속 지원
+    지원 형식 1-2) 괄호형 묶음입력
     [삼성E&A]
     1,64800,3
     2,58400,3
@@ -3303,69 +3210,89 @@ def parse_manual_group_lot_text(manual_text, krx):
     삼성E&A,1,64800,3
     삼성E&A,2,58400,3
 
-    종목명 뒤에 6자리 코드가 있어도 인식한다.
+    핵심 수정:
+    - 종목 헤더를 못 찾은 상태에서 1,193300,1 같은 차수 줄을 종목명 "1"로 오인하지 않는다.
+    - 못 찾은 항목에는 차수 숫자 1/2가 아니라 실제 헤더 종목명을 표시한다.
+    - DB하이텍처럼 종목명이 먼저 오고 아래 차수 줄이 오는 입력을 안정적으로 처리한다.
     """
     rows = []
     not_found = []
     current_stock = None
+    pending_header = ""
+
+    def add_not_found(name):
+        name = _normalize_manual_stock_text(name)
+        if name and name not in not_found:
+            not_found.append(name)
 
     raw_lines = str(manual_text or "").splitlines()
     for raw in raw_lines:
-        line = str(raw).strip()
+        line = _normalize_manual_stock_text(raw)
         if not line or line.startswith("#") or line.startswith("//"):
             continue
 
         # [종목명] 또는 【종목명】 헤더
         if (line.startswith("[") and "]" in line) or (line.startswith("【") and "】" in line):
             close = "]" if line.startswith("[") else "】"
-            name_text = line[1:line.find(close)].strip()
+            name_text = _normalize_manual_stock_text(line[1:line.find(close)])
             found = find_stock_by_name(name_text, krx)
             if found is None:
                 current_stock = None
-                if name_text:
-                    not_found.append(name_text)
+                pending_header = name_text
+                add_not_found(name_text)
             else:
                 current_stock = found
+                pending_header = ""
             continue
 
-        # v22: 괄호 없이 종목명 한 줄만 써도 묶음 헤더로 인식한다.
-        # 예:
-        # 삼성E&A
-        # 1,64800,3
-        # 2,58400,3
-        header_candidate = line.rstrip(":：").strip()
-        has_separator = ("," in line) or ("	" in line) or (len(re.split(r"\s+", line)) >= 3)
-        if not has_separator:
-            maybe_stock = find_stock_by_name(header_candidate, krx)
-            if maybe_stock is not None:
-                current_stock = maybe_stock
-                continue
-
-        # 구분자는 쉼표 우선. 탭/공백만 있는 경우도 최소 지원.
+        # 구분자는 쉼표 우선. 탭/공백도 지원.
         if "," in line:
             parts = [x.strip() for x in line.split(",")]
-        elif "	" in line:
-            parts = [x.strip() for x in line.split("	")]
+        elif "\t" in line:
+            parts = [x.strip() for x in line.split("\t")]
         else:
             parts = [x.strip() for x in re.split(r"\s+", line) if x.strip()]
+
+        parts = [p for p in parts if p != ""]
+
+        # 종목명 한 줄 헤더: 쉼표/탭이 없고, 3개 이상의 숫자 토큰으로 보이는 차수 줄도 아닐 때만 헤더로 본다.
+        has_separator = ("," in line) or ("\t" in line) or (len(parts) >= 3)
+        if not has_separator:
+            header_candidate = _normalize_manual_stock_text(line.rstrip(":："))
+            found = find_stock_by_name(header_candidate, krx)
+            if found is None:
+                current_stock = None
+                pending_header = header_candidate
+                add_not_found(header_candidate)
+            else:
+                current_stock = found
+                pending_header = ""
+            continue
 
         if len(parts) < 3:
             continue
 
+        first_is_step = _manual_step_token(parts[0])
+
         # 묶음 헤더 아래: 차수,단가,수량[,요양원여부][,메모]
-        # 기존 방식: 종목명,차수,단가,수량[,요양원여부][,메모]
-        use_stock = current_stock
-        offset = 0
-        if current_stock is None or not re.fullmatch(r"\d+", str(parts[0]).replace("차", "")):
+        if first_is_step:
+            if current_stock is None:
+                # 기존 버그 방지: 1,193300,1을 종목명 "1"로 찾지 않는다.
+                # 위에서 종목 헤더가 안 잡혔으면 실제 헤더명만 못 찾은 종목으로 남긴다.
+                if pending_header:
+                    add_not_found(pending_header)
+                continue
+            use_stock = current_stock
+            offset = 0
+        else:
+            # 기존 방식: 종목명,차수,단가,수량[,요양원여부][,메모]
             found = find_stock_by_name(parts[0], krx)
             if found is None:
-                not_found.append(parts[0])
+                add_not_found(parts[0])
                 continue
             use_stock = found
             offset = 1
 
-        if use_stock is None:
-            continue
         if len(parts) < offset + 3:
             continue
 
@@ -3508,10 +3435,6 @@ def judge_final_entry(row):
     today_buy = str(row.get("오늘매수", ""))
     buy_state = str(row.get("매수상태", ""))
     heat_state = str(row.get("과열상태", ""))
-    sector_trust = str(row.get("섹터신뢰", ""))
-    sector_judge = str(row.get("섹터판정", ""))
-    theme_state = str(row.get("테마실체", ""))
-    theme_risk = str(row.get("테마리스크", ""))
 
     try:
         day_pct = float(row.get("당일등락률", 0) or 0)
@@ -3526,26 +3449,13 @@ def judge_final_entry(row):
         reasons.append("운영모드 매수중단")
         critical = True
 
-    # 오늘매수는 예산/순위 때문에 대기일 수 있다.
-    # 금지 사유가 따로 있는 경우 판정사유에 "오늘매수 대기"를 섞으면 헷갈리므로
-    # 먼저 플래그만 보관하고, 마지막에 최종판정별로 문구를 조립한다.
-    today_gate_reason = ""
     if today_buy != "매수가능":
-        today_gate_reason = f"오늘매수 {today_buy}"
+        reasons.append(f"오늘매수 {today_buy}")
 
     if buy_state not in ["OK", "눌림후보"]:
         reasons.append(f"상태 {buy_state}")
         if buy_state in ["추격주의", "관찰주의"]:
             critical = True
-
-    if sector_trust == "낮음" or "수동확인" in sector_judge:
-        reasons.append("섹터 수동확인필요")
-
-    if theme_risk == "고위험":
-        reasons.append(f"테마실체 고위험({theme_state})")
-        critical = True
-    elif theme_risk == "주의":
-        reasons.append(f"테마실체 확인필요({theme_state})")
 
     if ("추격" in heat_state) or ("과열" in heat_state):
         reasons.append(heat_state)
@@ -3563,15 +3473,11 @@ def judge_final_entry(row):
         reasons.append(f"당일급락 {day_pct}%")
         critical = True
 
-    if critical:
-        # 금지 판정에서는 예산/순위성 대기 문구를 빼고 실제 금지 사유만 보여준다.
-        return "금지", " / ".join(reasons) if reasons else "신규매수금지"
-
-    if today_gate_reason:
-        reasons.insert(0, today_gate_reason)
-
     if not reasons:
         return "진입가능", "조건통과"
+
+    if critical:
+        return "금지", " / ".join(reasons)
 
     return "대기", " / ".join(reasons)
 
@@ -4046,7 +3952,6 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 info_cache[code] = info.copy()
 
             info = info_cache.get(code, {}).copy()
-            info = apply_sector_theme_policy_v27(info, code, name, is_holding=True)
             current = _safe_float_value(info.get("현재가", 0), 0)
             eval_amount = current * qty if current > 0 and qty > 0 else 0
             pnl_amount = (eval_amount - cost) if current > 0 and qty > 0 and cost > 0 else 0
@@ -4055,13 +3960,6 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
             info["현재손익률"] = pnl_pct
             is_excluded = code in exclude_codes
             judgement, allow_raw, reason = judge_holding_row(h, info, op, is_excluded=is_excluded)
-            hold_notes = []
-            if str(info.get("섹터신뢰", "")) == "낮음":
-                hold_notes.append("섹터 수동확인필요")
-            if str(info.get("테마리스크", "")) in ["주의", "고위험"]:
-                hold_notes.append(f"테마실체 {info.get('테마리스크', '')}")
-            if hold_notes:
-                reason = str(reason) + " / " + " / ".join(hold_notes)
 
             rows.append({
                 "순위": 0,
@@ -4084,14 +3982,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "요양원여부": "Y" if str(h.get("요양원여부", "N")).upper() == "Y" or is_excluded else "N",
                 "등급": info.get("등급", ""),
                 "점수": round(_safe_float_value(info.get("점수", 0), 0), 2),
-                "그룹": info.get("그룹", infer_group_by_name(name)),
-                "섹터분류": info.get("섹터분류", info.get("그룹", "")),
-                "섹터신뢰": info.get("섹터신뢰", ""),
-                "섹터판정": info.get("섹터판정", ""),
-                "테마실체": info.get("테마실체", ""),
-                "테마리스크": info.get("테마리스크", ""),
-                "테마원천": info.get("테마원천", ""),
-                "테마리스크사유": info.get("테마리스크사유", ""),
+                "그룹": infer_group_by_name(name),
                 "과열상태": info.get("과열상태", ""),
                 "당일등락률": info.get("당일등락률", 0),
                 "갭상승률": info.get("갭상승률", 0),
@@ -4320,10 +4211,7 @@ def infer_group_by_name(name):
         "오리온": "음식료/내수",
         "코웨이": "렌탈/내수",
         "GS": "지주/에너지",
-        "LG": "지주회사/그룹지주",
         "LG유플러스": "통신",
-        "두산에너빌리티": "원전/발전설비/에너지",
-        "두산로보틱스": "로봇/자동화",
         "SKC": "소재/필름",
         "동진쎄미켐": "반도체소재",
         "한켐": "화학소재",
@@ -4375,736 +4263,6 @@ def infer_group_by_name(name):
     if any(k in n for k in ["전자", "전기", "로보", "로봇", "자동화", "무벡스", "시스템"]):
         return "전자/장비"
     return "기타"
-
-
-# =====================================================
-# v27 섹터신뢰 + 테마실체 리스크 엔진
-# =====================================================
-
-SECTOR_CODE_MAP_V27 = {
-    # 사용자가 요청한 핵심 보정 종목
-    "420770": ("PCB/검사장비", "확정", "코드확정맵"),
-    "252990": ("반도체소재/부품", "확정", "코드확정맵"),
-    "170920": ("반도체/디스플레이 소재", "확정", "코드확정맵"),
-    "160980": ("반도체장비", "확정", "코드확정맵"),
-    "475150": ("신재생/전력/에너지", "확정", "코드확정맵"),
-    "375500": ("건설/EPC", "확정", "코드확정맵"),
-    "028050": ("플랜트/EPC", "확정", "코드확정맵"),
-    "011200": ("해운", "확정", "코드확정맵"),
-    "010950": ("정유", "확정", "코드확정맵"),
-    "042660": ("조선/방산", "확정", "코드확정맵"),
-    "088350": ("보험", "확정", "코드확정맵"),
-    "008770": ("면세/호텔", "확정", "코드확정맵"),
-
-    # TOP50에서 낮음으로 자주 뜨는 후보 보정
-    "066430": ("산업용필름/로봇감속기 신사업", "보정", "기존사업과 로봇테마 불일치 가능"),
-    "007810": ("PCB", "확정", "코드확정맵"),
-    "183300": ("반도체부품/세정", "확정", "코드확정맵"),
-    "064290": ("반도체/검사장비", "확정", "코드확정맵"),
-    "178320": ("전력/통신장비", "확정", "코드확정맵"),
-    "067310": ("반도체후공정", "확정", "코드확정맵"),
-    "446540": ("반도체부품", "확정", "코드확정맵"),
-    "031980": ("반도체장비/후공정", "확정", "코드확정맵"),
-    "417840": ("반도체장비", "확정", "코드확정맵"),
-    "281820": ("반도체장비", "확정", "코드확정맵"),
-    "219130": ("PCB/반도체기판", "확정", "코드확정맵"),
-    "074600": ("반도체소재", "확정", "코드확정맵"),
-    "098460": ("반도체/검사장비", "확정", "코드확정맵"),
-    "053610": ("반도체장비", "확정", "코드확정맵"),
-    "089030": ("반도체장비", "확정", "코드확정맵"),
-    "005290": ("반도체소재", "확정", "코드확정맵"),
-    "195870": ("반도체기판/패키징", "확정", "코드확정맵"),
-    "102710": ("반도체/디스플레이 소재", "확정", "코드확정맵"),
-    "007660": ("PCB", "확정", "코드확정맵"),
-    "090460": ("PCB/FPCB", "확정", "코드확정맵"),
-    "489790": ("방산/영상보안", "확정", "코드확정맵"),
-    "034220": ("디스플레이", "확정", "코드확정맵"),
-    "323410": ("금융/인터넷은행", "확정", "코드확정맵"),
-
-    # v27 obvious fix: 대형주/명확 섹터가 기타로 떨어지는 케이스 방지
-    "003550": ("지주회사/그룹지주", "확정", "코드확정맵"),
-    "034020": ("원전/발전설비/에너지", "확정", "코드확정맵"),
-    "000150": ("지주회사/그룹지주", "확정", "코드확정맵"),
-    "454910": ("로봇/자동화", "확정", "코드확정맵"),
-    "336260": ("수소/연료전지", "확정", "코드확정맵"),
-    "241560": ("건설기계", "확정", "코드확정맵"),
-    "066570": ("전자/가전", "확정", "코드확정맵"),
-    "051910": ("화학/2차전지소재", "확정", "코드확정맵"),
-    "373220": ("2차전지/배터리", "확정", "코드확정맵"),
-}
-
-SECTOR_NAME_MAP_V27 = {
-    "기가비스": ("PCB/검사장비", "확정", "종목명확정맵"),
-    "샘씨엔에스": ("반도체소재/부품", "확정", "종목명확정맵"),
-    "엘티씨": ("반도체/디스플레이 소재", "확정", "종목명확정맵"),
-    "싸이맥스": ("반도체장비", "확정", "종목명확정맵"),
-    "SK이터닉스": ("신재생/전력/에너지", "확정", "종목명확정맵"),
-    "DL이앤씨": ("건설/EPC", "확정", "종목명확정맵"),
-    "삼성E&A": ("플랜트/EPC", "확정", "종목명확정맵"),
-    "삼성엔지니어링": ("플랜트/EPC", "확정", "종목명확정맵"),
-    "HMM": ("해운", "확정", "종목명확정맵"),
-    "S-Oil": ("정유", "확정", "종목명확정맵"),
-    "S-OIL": ("정유", "확정", "종목명확정맵"),
-    "한화오션": ("조선/방산", "확정", "종목명확정맵"),
-    "한화생명": ("보험", "확정", "종목명확정맵"),
-    "호텔신라": ("면세/호텔", "확정", "종목명확정맵"),
-    "아이로보틱스": ("산업용필름/로봇감속기 신사업", "보정", "기존사업과 로봇테마 불일치 가능"),
-
-    # v27 obvious fix
-    "두산에너빌리티": ("원전/발전설비/에너지", "확정", "종목명확정맵"),
-    "두산로보틱스": ("로봇/자동화", "확정", "종목명확정맵"),
-    "두산퓨얼셀": ("수소/연료전지", "확정", "종목명확정맵"),
-    "LG디스플레이": ("디스플레이", "확정", "종목명확정맵"),
-    "LG유플러스": ("통신", "확정", "종목명확정맵"),
-    "LG전자": ("전자/가전", "확정", "종목명확정맵"),
-    "LG화학": ("화학/2차전지소재", "확정", "종목명확정맵"),
-    "LG에너지솔루션": ("2차전지/배터리", "확정", "종목명확정맵"),
-}
-
-THEME_REALITY_WATCH_CODES = {
-    "066430": "기존 주력사업과 로봇테마 불일치 가능. 급등 시 신규매수 금지 후보",
-}
-
-HOT_THEME_KEYWORDS = [
-    "로봇", "로보틱스", "AI", "인공지능", "방산", "2차전지", "이차전지", "전고체",
-    "양자", "초전도", "원전", "우주", "항공우주", "테슬라", "옵티머스", "감속기"
-]
-LEGACY_BUSINESS_KEYWORDS = [
-    "필름", "비닐", "플라스틱", "원료", "유통", "도매", "무역", "임대", "부동산", "포장재", "생활용품"
-]
-
-
-# 뉴스/공시 기반 테마실체 리스크 자동 점검용 키워드
-# - 네이버뉴스: 공식 검색 API 키가 있을 때만 사용
-# - DART: OpenDART API 키가 있을 때만 사용
-NEWS_THEME_KEYWORDS_V27 = [
-    "로봇", "로보틱스", "AI", "인공지능", "방산", "2차전지", "이차전지", "전고체",
-    "양자", "초전도", "원전", "우주", "테슬라", "옵티머스", "감속기", "신사업", "수주"
-]
-NEWS_RISK_KEYWORDS_V27 = [
-    "실체", "논란", "급등", "급락", "투자주의", "투자경고", "투자위험", "조회공시",
-    "전환사채", "CB", "BW", "유상증자", "무상감자", "관리종목", "거래정지",
-    "불성실공시", "횡령", "배임", "소송", "감사의견", "한계기업", "적자", "매출 없음"
-]
-DART_RISK_REPORT_KEYWORDS_V27 = [
-    "전환사채권발행결정", "신주인수권부사채권발행결정", "유상증자결정", "감자결정",
-    "불성실공시", "관리종목", "거래정지", "조회공시", "소송", "횡령", "배임", "감사의견"
-]
-
-
-def _get_secret_value_v27(*keys):
-    """Streamlit secrets에서 선택값을 안전하게 읽는다. 없으면 빈 문자열."""
-    for key in keys:
-        try:
-            if key in st.secrets:
-                v = st.secrets[key]
-                if v is not None and str(v).strip():
-                    return str(v).strip()
-        except Exception:
-            pass
-        try:
-            v = st.secrets.get(key, "")
-            if v is not None and str(v).strip():
-                return str(v).strip()
-        except Exception:
-            pass
-    return ""
-
-
-def _truthy_v27(v):
-    return str(v).strip().lower() in ["1", "true", "yes", "y", "on", "사용", "켜기"]
-
-
-def theme_crawl_enabled_v27():
-    """TOP50 전체 계산 중 외부 API 호출 여부. secrets에서 THEME_CRAWL_ENABLED=true일 때만 켠다."""
-    return _truthy_v27(_get_secret_value_v27("THEME_CRAWL_ENABLED", "theme_crawl_enabled"))
-
-
-def _strip_html_v27(text):
-    text = html.unescape(str(text or ""))
-    text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _keyword_hits_v27(text, keywords):
-    t = str(text or "").upper().replace(" ", "")
-    hits = []
-    for k in keywords:
-        kk = str(k).upper().replace(" ", "")
-        if kk and kk in t:
-            hits.append(k)
-    return sorted(set(hits))
-
-
-@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def fetch_naver_news_theme_signal_v27(code, name):
-    """네이버 뉴스 공식 검색 API 기반 테마/리스크 신호. API 키 없으면 조용히 비활성."""
-    client_id = _get_secret_value_v27("NAVER_CLIENT_ID", "naver_client_id")
-    client_secret = _get_secret_value_v27("NAVER_CLIENT_SECRET", "naver_client_secret")
-    if not client_id or not client_secret:
-        return {"enabled": False, "source": "NAVER_NEWS_API_OFF", "text": "", "theme_hits": [], "risk_hits": [], "news_count": 0}
-
-    query = f"{name} 로봇 AI 방산 2차전지 감속기 신사업 실체 투자경고 전환사채 유상증자"
-    try:
-        r = requests.get(
-            "https://openapi.naver.com/v1/search/news.json",
-            params={"query": query, "display": 20, "start": 1, "sort": "date"},
-            headers={"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret},
-            timeout=8,
-        )
-        if r.status_code != 200:
-            return {"enabled": True, "source": f"NAVER_NEWS_API_ERROR_{r.status_code}", "text": "", "theme_hits": [], "risk_hits": [], "news_count": 0}
-        data = r.json()
-        items = data.get("items", []) or []
-        text = " ".join(_strip_html_v27(str(x.get("title", "")) + " " + str(x.get("description", ""))) for x in items)
-        return {
-            "enabled": True,
-            "source": "NAVER_NEWS_API",
-            "text": text[:3000],
-            "theme_hits": _keyword_hits_v27(text, NEWS_THEME_KEYWORDS_V27),
-            "risk_hits": _keyword_hits_v27(text, NEWS_RISK_KEYWORDS_V27),
-            "news_count": len(items),
-        }
-    except Exception as e:
-        return {"enabled": True, "source": "NAVER_NEWS_API_FAIL", "text": "", "theme_hits": [], "risk_hits": [str(e)[:40]], "news_count": 0}
-
-
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_dart_corp_code_map_v27():
-    """OpenDART 고유번호 ZIP에서 종목코드 -> corp_code 맵을 만든다. API 키 없으면 빈 dict."""
-    dart_key = _get_secret_value_v27("DART_API_KEY", "dart_api_key", "OPENDART_API_KEY", "opendart_api_key")
-    if not dart_key:
-        return {}
-    try:
-        r = requests.get("https://opendart.fss.or.kr/api/corpCode.xml", params={"crtfc_key": dart_key}, timeout=15)
-        if r.status_code != 200 or not r.content:
-            return {}
-        zf = zipfile.ZipFile(io.BytesIO(r.content))
-        xml_name = zf.namelist()[0]
-        root = ET.fromstring(zf.read(xml_name))
-        out = {}
-        for item in root.findall("list"):
-            stock_code = (item.findtext("stock_code") or "").strip()
-            corp_code = (item.findtext("corp_code") or "").strip()
-            if stock_code and corp_code:
-                out[stock_code.zfill(6)] = corp_code
-        return out
-    except Exception:
-        return {}
-
-
-@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def fetch_dart_disclosure_signal_v27(code):
-    """최근 90일 DART 공시 제목 기반 리스크 신호. API 키 없으면 조용히 비활성."""
-    dart_key = _get_secret_value_v27("DART_API_KEY", "dart_api_key", "OPENDART_API_KEY", "opendart_api_key")
-    if not dart_key:
-        return {"enabled": False, "source": "DART_API_OFF", "risk_hits": [], "report_count": 0, "text": ""}
-    code = str(code).replace(".0", "").strip().zfill(6)
-    corp_code = load_dart_corp_code_map_v27().get(code, "")
-    if not corp_code:
-        return {"enabled": True, "source": "DART_CORP_CODE_NOT_FOUND", "risk_hits": [], "report_count": 0, "text": ""}
-    try:
-        end_de = datetime.now().strftime("%Y%m%d")
-        bgn_de = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-        r = requests.get(
-            "https://opendart.fss.or.kr/api/list.json",
-            params={"crtfc_key": dart_key, "corp_code": corp_code, "bgn_de": bgn_de, "end_de": end_de, "page_count": 100},
-            timeout=8,
-        )
-        if r.status_code != 200:
-            return {"enabled": True, "source": f"DART_API_ERROR_{r.status_code}", "risk_hits": [], "report_count": 0, "text": ""}
-        data = r.json()
-        rows = data.get("list", []) or []
-        text = " ".join(str(x.get("report_nm", "")) for x in rows)
-        return {
-            "enabled": True,
-            "source": "DART_DISCLOSURE_API",
-            "risk_hits": _keyword_hits_v27(text, DART_RISK_REPORT_KEYWORDS_V27 + NEWS_RISK_KEYWORDS_V27),
-            "report_count": len(rows),
-            "text": text[:2000],
-        }
-    except Exception as e:
-        return {"enabled": True, "source": "DART_API_FAIL", "risk_hits": [str(e)[:40]], "report_count": 0, "text": ""}
-
-
-def fetch_external_theme_reality_signal_v27(code, name):
-    """네이버 뉴스 + DART 공시 신호를 합쳐 테마실체 리스크를 만든다."""
-    news = fetch_naver_news_theme_signal_v27(str(code).zfill(6), str(name))
-    dart = fetch_dart_disclosure_signal_v27(str(code).zfill(6))
-
-    theme_hits = news.get("theme_hits", []) if news.get("enabled") else []
-    news_risk_hits = news.get("risk_hits", []) if news.get("enabled") else []
-    dart_risk_hits = dart.get("risk_hits", []) if dart.get("enabled") else []
-
-    sources = []
-    if news.get("enabled"):
-        sources.append(news.get("source", "NAVER"))
-    if dart.get("enabled"):
-        sources.append(dart.get("source", "DART"))
-    source = "+".join(sources) if sources else "외부API미설정"
-
-    if dart_risk_hits:
-        return {
-            "state": "공시리스크확인필요",
-            "risk": "고위험",
-            "source": source,
-            "reason": "DART공시:" + ",".join(dart_risk_hits[:5]),
-        }
-    if len(news_risk_hits) >= 3:
-        return {
-            "state": "뉴스리스크확인필요",
-            "risk": "주의",
-            "source": source,
-            "reason": "뉴스리스크:" + ",".join(news_risk_hits[:5]),
-        }
-    if len(theme_hits) >= 3 and news.get("news_count", 0) >= 5:
-        return {
-            "state": "테마뉴스집중",
-            "risk": "주의",
-            "source": source,
-            "reason": "테마뉴스:" + ",".join(theme_hits[:5]),
-        }
-    return {"state": "정상", "risk": "정상", "source": source, "reason": ""}
-
-
-def _sector_norm_text(*parts):
-    return " ".join(str(x) for x in parts if x is not None).upper().replace(" ", "")
-
-
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_external_sector_text_map_v27():
-    """KIND/FDR에서 업종·주요제품성 텍스트를 최대한 모아온다. 실패해도 앱은 계속 돈다."""
-    out = {}
-
-    def put(code, text):
-        code = str(code).replace(".0", "").strip().zfill(6)
-        if code == "000000":
-            return
-        text = str(text).strip()
-        if not text:
-            return
-        out[code] = (out.get(code, "") + " " + text).strip()
-
-    # 1) FinanceDataReader KRX-DESC: 환경에 따라 Sector/Industry/Dept 등이 들어올 수 있다.
-    try:
-        desc = fdr.StockListing("KRX-DESC")
-        if desc is not None and len(desc) > 0:
-            d = desc.copy()
-            code_col = None
-            for c in ["Code", "Symbol", "종목코드", "단축코드"]:
-                if c in d.columns:
-                    code_col = c
-                    break
-            if code_col is not None:
-                text_cols = [c for c in d.columns if c != code_col and d[c].dtype == object]
-                for _, r in d.iterrows():
-                    put(r[code_col], " ".join(str(r.get(c, "")) for c in text_cols[:12]))
-    except Exception:
-        pass
-
-    # 2) KIND 상장법인목록: 업종/주요제품 컬럼이 있으면 추가한다.
-    try:
-        kind_url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-        tables = pd.read_html(kind_url, header=0)
-        if tables:
-            kdf = tables[0].copy()
-            code_col = None
-            for c in ["종목코드", "단축코드", "Code", "Symbol"]:
-                if c in kdf.columns:
-                    code_col = c
-                    break
-            if code_col is not None:
-                use_cols = [c for c in kdf.columns if any(w in str(c) for w in ["회사명", "업종", "주요제품", "제품", "업종명"])]
-                for _, r in kdf.iterrows():
-                    put(r[code_col], " ".join(str(r.get(c, "")) for c in use_cols))
-    except Exception:
-        pass
-
-    return out
-
-
-def infer_sector_from_text_v27(name, source_text=""):
-    n = _sector_norm_text(name, source_text)
-    name_only = _sector_norm_text(name)
-
-    # 코드맵이 없는 수동 진단 입력에서도 명확한 지주/대형주를 기타로 보내지 않는다.
-    if name_only in ["LG", "SK", "CJ", "GS", "LS", "DB", "DL", "두산", "한화", "HD현대"]:
-        return "지주회사/그룹지주"
-
-    if any(k in n for k in ["PCB", "FPCB", "인쇄회로", "회로기판", "기판", "써키트", "써킷", "대덕전자", "심텍", "이수페타시스", "비에이치", "티엘비", "기가비스"]):
-        if any(k in n for k in ["검사", "검사장비", "AOI", "자동광학", "비전"]):
-            return "PCB/검사장비"
-        return "PCB/기판"
-    if any(k in n for k in ["반도체장비", "세정장비", "증착", "식각", "테스터", "핸들러", "프로브", "웨이퍼", "싸이맥스", "테크윙", "피에스케이", "예스티", "유니셈", "고영", "인텍플러스"]):
-        return "반도체장비"
-    if any(k in n for k in ["반도체소재", "소재", "케미칼", "쿼츠", "실리콘", "머티리얼", "원익QNC", "동진쎄미켐", "엘티씨", "샘씨엔에스"]):
-        return "반도체소재/부품"
-    if any(k in n for k in ["반도체", "패키징", "후공정", "파운드리", "메모리", "하이닉스", "마이크론", "네패스", "하나마이크론", "코미코"]):
-        return "반도체/전자"
-    if any(k in n for k in ["디스플레이", "OLED", "LCD", "엘씨디", "LG디스플레이"]):
-        return "디스플레이"
-    if any(k in n for k in ["로봇", "로보틱스", "자동화", "감속기"]):
-        return "로봇/자동화"
-    if any(k in n for k in ["필름", "비닐", "플라스틱", "원료유통", "원료", "포장재"]):
-        return "소재/필름/원료"
-    if any(k in n for k in ["건설", "EPC", "플랜트", "엔지니어링", "삼성E&A", "DL이앤씨", "현대건설"]):
-        return "건설/플랜트/EPC"
-    if any(k in n for k in ["해운", "선박운송", "컨테이너", "HMM"]):
-        return "해운"
-    if any(k in n for k in ["정유", "석유", "윤활유", "S-OIL", "SOIL"]):
-        return "정유"
-    if any(k in n for k in ["조선", "선박", "특수선", "함정", "방산", "한화오션", "한화에어로", "현대로템"]):
-        return "조선/방산"
-    if any(k in n for k in ["원전", "원자력", "SMR", "소형모듈원전", "터빈", "발전설비", "발전기", "두산에너빌리티", "에너빌리티"]):
-        return "원전/발전설비/에너지"
-    if any(k in n for k in ["전력", "전선", "변압기", "송배전", "신재생", "태양광", "풍력", "에너지", "SK이터닉스", "LS"]):
-        return "전력/에너지"
-    if any(k in n for k in ["자동차", "차부품", "타이어", "만도", "모비스", "현대차", "기아"]):
-        return "자동차/부품"
-    if any(k in n for k in ["은행", "금융", "증권", "보험", "생명", "화재", "카카오뱅크"]):
-        return "금융/보험"
-    if any(k in n for k in ["호텔", "면세", "리조트", "신라"]):
-        return "면세/호텔"
-    if any(k in n for k in ["게임", "콘텐츠", "미디어", "광고", "엔터"]):
-        return "콘텐츠/미디어"
-    if any(k in n for k in ["통신", "네트워크", "광통신", "안테나", "텔레콤"]):
-        return "통신/장비"
-    if any(k in n for k in ["화학", "케미칼", "첨단소재", "소재"]):
-        return "소재/화학"
-    return "기타"
-
-
-def classify_sector_v27(code, name):
-    """TOP50/보유차수 공통 섹터 분류. 섹터매핑 > 코드맵 > 외부업종텍스트 > 종목명 키워드 순."""
-    code = _sector_code_norm_v27(code)
-    name = str(name).strip()
-    name_key = _sector_name_key_v27(name)
-
-    # Google Sheets 섹터매핑 탭이 최우선이다.
-    # 사용자가 직접 분류하지 않아도, 섹터미분류 자동학습에서 반영된 보정값도 여기로 들어온다.
-    try:
-        mapping = load_sector_mapping_v27()
-        if code in mapping.get("by_code", {}):
-            group, trust, memo = mapping["by_code"][code]
-            judgement = "정상" if trust == "확정" else "자동보정확인"
-            return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": f"섹터매핑:{memo}"}
-        if name_key in mapping.get("by_name", {}):
-            group, trust, memo = mapping["by_name"][name_key]
-            judgement = "정상" if trust == "확정" else "자동보정확인"
-            return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": f"섹터매핑:{memo}"}
-    except Exception:
-        pass
-
-    if code in SECTOR_CODE_MAP_V27:
-        group, trust, memo = SECTOR_CODE_MAP_V27[code]
-        judgement = "정상" if trust == "확정" else "자동보정확인"
-        return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": memo}
-
-    for k, v in SECTOR_NAME_MAP_V27.items():
-        if k.upper().replace(" ", "") in name_key:
-            group, trust, memo = v
-            judgement = "정상" if trust == "확정" else "자동보정확인"
-            return {"그룹": group, "섹터분류": group, "섹터신뢰": trust, "섹터판정": judgement, "섹터메모": memo}
-
-    source_text = ""
-    try:
-        source_text = load_external_sector_text_map_v27().get(code, "")
-    except Exception:
-        source_text = ""
-
-    if source_text:
-        group = infer_sector_from_text_v27(name, source_text)
-        if group != "기타":
-            return {"그룹": group, "섹터분류": group, "섹터신뢰": "보정", "섹터판정": "자동업종보정", "섹터메모": source_text[:80]}
-
-    group = infer_sector_from_text_v27(name, "")
-    if group != "기타":
-        return {"그룹": group, "섹터분류": group, "섹터신뢰": "보정", "섹터판정": "종목명키워드보정", "섹터메모": "종목명키워드"}
-
-    # 구버전 infer_group도 마지막 보조로 사용한다.
-    old_group = infer_group_by_name(name)
-    if old_group and old_group != "기타":
-        return {"그룹": old_group, "섹터분류": old_group, "섹터신뢰": "보정", "섹터판정": "구버전키워드보정", "섹터메모": "infer_group_by_name"}
-
-    return {"그룹": "기타", "섹터분류": "기타", "섹터신뢰": "낮음", "섹터판정": "수동확인필요", "섹터메모": "자동분류실패"}
-
-
-def diagnose_theme_reality_v27(code, name, sector_info, score_info):
-    code = str(code).replace(".0", "").strip().zfill(6)
-    group = str(sector_info.get("섹터분류", sector_info.get("그룹", "")))
-    memo = str(sector_info.get("섹터메모", ""))
-    text = _sector_norm_text(name, group, memo)
-    has_hot_theme = any(k.upper().replace(" ", "") in text for k in HOT_THEME_KEYWORDS)
-    has_legacy = any(k.upper().replace(" ", "") in text for k in LEGACY_BUSINESS_KEYWORDS)
-    ret20 = _safe_float_value(score_info.get("20일수익률", 0), 0)
-    ret60 = _safe_float_value(score_info.get("60일수익률", 0), 0)
-    score = _safe_float_value(score_info.get("점수", 0), 0)
-    is_hot = ret60 >= 30 or ret20 >= 15 or score >= 90
-
-    if code in THEME_REALITY_WATCH_CODES:
-        if is_hot:
-            return "테마실체확인필요", "고위험", THEME_REALITY_WATCH_CODES[code]
-        return "사업실체확인필요", "주의", THEME_REALITY_WATCH_CODES[code]
-
-    if has_hot_theme and has_legacy and is_hot:
-        return "테마실체확인필요", "고위험", "기존사업 키워드와 급등테마 키워드 동시 감지"
-
-    if has_hot_theme and str(sector_info.get("섹터신뢰", "")) == "낮음" and is_hot:
-        return "테마근거확인필요", "주의", "섹터신뢰 낮음 + 급등테마명 감지"
-
-    if str(sector_info.get("섹터신뢰", "")) == "낮음" and (ret60 >= 50 or score >= 95):
-        return "섹터실체확인필요", "주의", "섹터신뢰 낮음 + 점수/수익률 과다"
-
-    return "정상", "정상", ""
-
-
-def apply_sector_theme_policy_v27(info, code, name, is_holding=False):
-    """섹터/테마 정보를 붙이고, 신규 TOP50일 때만 점수상한을 적용한다."""
-    if info is None:
-        return info
-    info = info.copy()
-    sector = classify_sector_v27(code, name)
-    theme_state, theme_risk, theme_reason = diagnose_theme_reality_v27(code, name, sector, info)
-    theme_source = "내장규칙"
-
-    # TOP50 전체 계산 중 외부 API 호출은 secrets에서 THEME_CRAWL_ENABLED=true일 때만 수행한다.
-    # 과도한 호출을 막기 위해 이미 위험/주의이거나, 점수·수익률이 높은 후보에 한해서만 확인한다.
-    original_score_for_crawl = _safe_float_value(info.get("점수", 0), 0)
-    ret20_for_crawl = _safe_float_value(info.get("20일수익률", 0), 0)
-    ret60_for_crawl = _safe_float_value(info.get("60일수익률", 0), 0)
-    should_crawl = (
-        theme_crawl_enabled_v27()
-        and not is_holding
-        and (theme_risk != "정상" or sector.get("섹터신뢰") == "낮음" or original_score_for_crawl >= 90 or ret20_for_crawl >= 15 or ret60_for_crawl >= 30)
-    )
-    if should_crawl:
-        ext = fetch_external_theme_reality_signal_v27(code, name)
-        if ext.get("risk") == "고위험" or (ext.get("risk") == "주의" and theme_risk == "정상"):
-            theme_state = ext.get("state", theme_state)
-            theme_risk = ext.get("risk", theme_risk)
-            theme_reason = ext.get("reason", theme_reason)
-            theme_source = ext.get("source", "외부API")
-
-    info["그룹"] = sector["그룹"]
-    info["섹터분류"] = sector["섹터분류"]
-    info["섹터신뢰"] = sector["섹터신뢰"]
-    info["섹터판정"] = sector["섹터판정"]
-    info["테마실체"] = theme_state
-    info["테마리스크"] = theme_risk
-    info["테마원천"] = theme_source
-    if theme_reason:
-        info["테마리스크사유"] = theme_reason
-
-    if not is_holding:
-        original_score = _safe_float_value(info.get("점수", 0), 0)
-        score = original_score
-        if sector["섹터신뢰"] == "보정":
-            score -= 1.5
-        elif sector["섹터신뢰"] == "낮음":
-            score = min(score, 74.9)
-        if theme_risk == "주의":
-            score = min(score, 76.0)
-        elif theme_risk == "고위험":
-            score = min(score, 72.0)
-        score = max(0, score)
-        if abs(score - original_score) > 0.001:
-            info["점수원본"] = round(original_score, 2)
-            info["점수"] = round(score, 2)
-    return info
-
-
-def sync_today_buy_with_final_v27(row):
-    """최종판정이 금지/대기인데 오늘매수만 매수가능으로 남는 불일치 방지."""
-    final = str(row.get("최종판정", ""))
-    today = str(row.get("오늘매수", ""))
-    if final == "진입가능":
-        return today
-    if final == "금지":
-        return "금지"
-    if today == "매수가능":
-        return "대기"
-    return today
-
-
-def suggest_sector_candidate_v27(row):
-    """기타/낮음 종목을 섹터미분류 탭에 쌓을 때 추천섹터 후보를 붙인다."""
-    code = _sector_code_norm_v27(row.get("코드", row.get("종목코드", "")))
-    name = str(row.get("종목", row.get("종목명", ""))).strip()
-
-    if code in SECTOR_CODE_MAP_V27:
-        group, trust, memo = SECTOR_CODE_MAP_V27[code]
-        return group, "확정후보", f"코드확정맵:{memo}"
-
-    name_key = _sector_name_key_v27(name)
-    for k, v in SECTOR_NAME_MAP_V27.items():
-        if _sector_name_key_v27(k) in name_key:
-            group, trust, memo = v
-            return group, "확정후보" if trust == "확정" else "보정후보", f"종목명확정맵:{memo}"
-
-    try:
-        source_text = load_external_sector_text_map_v27().get(code, "")
-    except Exception:
-        source_text = ""
-
-    if source_text:
-        group = infer_sector_from_text_v27(name, source_text)
-        if group and group != "기타":
-            return group, "보정후보", "KIND/FDR업종:" + str(source_text)[:80]
-
-    group = infer_sector_from_text_v27(name, "")
-    if group and group != "기타":
-        return group, "보정후보", "종목명키워드"
-
-    old_group = infer_group_by_name(name)
-    if old_group and old_group != "기타":
-        return old_group, "보정후보", "구버전키워드"
-
-    return "추천불가", "낮음", "자동추천실패"
-
-
-def upsert_sector_unclassified_candidates_v27(df, source="TOP50"):
-    """섹터신뢰 낮음/기타 종목을 섹터미분류 탭에 누적한다."""
-    if df is None or len(df) == 0:
-        return 0
-    work = df.copy()
-    for c in ["코드", "종목", "그룹", "섹터분류", "섹터신뢰", "섹터판정"]:
-        if c not in work.columns:
-            work[c] = ""
-    mask = (
-        work["섹터신뢰"].astype(str).eq("낮음")
-        | work["그룹"].astype(str).eq("기타")
-        | work["섹터분류"].astype(str).eq("기타")
-        | work["섹터판정"].astype(str).str.contains("수동확인", na=False)
-    )
-    target = work[mask].copy()
-    if len(target) == 0:
-        return 0
-
-    try:
-        exist = load_sector_unclassified_df_v27()
-    except Exception:
-        exist = pd.DataFrame(columns=SECTOR_UNCLASSIFIED_COLUMNS)
-    for c in SECTOR_UNCLASSIFIED_COLUMNS:
-        if c not in exist.columns:
-            exist[c] = ""
-    if len(exist) > 0:
-        exist["종목코드"] = exist["종목코드"].apply(_sector_code_norm_v27)
-
-    today = today_str()
-    by_code = {}
-    if len(exist) > 0:
-        for idx, r in exist.iterrows():
-            code = _sector_code_norm_v27(r.get("종목코드", ""))
-            if code:
-                by_code[code] = idx
-
-    changed = 0
-    for _, r in target.head(300).iterrows():
-        code = _sector_code_norm_v27(r.get("코드", ""))
-        if not code:
-            continue
-        name = str(r.get("종목", "")).strip()
-        rec_sector, rec_trust, rec_reason = suggest_sector_candidate_v27(r)
-        base = {
-            "최초발생일": today,
-            "최근발생일": today,
-            "발생원천": source,
-            "발생횟수": 1,
-            "종목코드": code,
-            "종목명": name,
-            "현재그룹": str(r.get("섹터분류", r.get("그룹", ""))) or str(r.get("그룹", "")),
-            "현재신뢰": str(r.get("섹터신뢰", "")),
-            "현재판정": str(r.get("섹터판정", "")),
-            "추천섹터": rec_sector,
-            "추천신뢰": rec_trust,
-            "추천사유": rec_reason,
-            "테마실체": str(r.get("테마실체", "")),
-            "테마리스크": str(r.get("테마리스크", "")),
-            "점수": r.get("점수", ""),
-            "20일수익률": r.get("20일수익률", ""),
-            "60일수익률": r.get("60일수익률", ""),
-            "처리상태": "대기",
-            "메모": "자동수집",
-        }
-        if code in by_code:
-            idx = by_code[code]
-            old_count = _safe_int_value(exist.at[idx, "발생횟수"], 0)
-            old_sources = str(exist.at[idx, "발생원천"] or "")
-            source_set = [x for x in old_sources.split("+") if x]
-            if source not in source_set:
-                source_set.append(source)
-            for k, v in base.items():
-                if k == "최초발생일":
-                    continue
-                if k == "발생횟수":
-                    exist.at[idx, k] = old_count + 1
-                elif k == "발생원천":
-                    exist.at[idx, k] = "+".join(source_set)
-                elif k == "처리상태" and str(exist.at[idx, k]) == "반영완료":
-                    continue
-                else:
-                    exist.at[idx, k] = v
-        else:
-            exist = pd.concat([exist, pd.DataFrame([base])], ignore_index=True)
-            by_code[code] = len(exist) - 1
-        changed += 1
-
-    if changed > 0:
-        save_sector_unclassified_df_v27(exist[SECTOR_UNCLASSIFIED_COLUMNS])
-    return changed
-
-
-def promote_sector_unclassified_to_mapping_v27(auto_only=True):
-    """섹터미분류의 추천섹터를 섹터매핑 탭에 반영한다. 추천불가/고위험은 제외."""
-    uncls = load_sector_unclassified_df_v27()
-    if uncls is None or len(uncls) == 0:
-        return 0
-    work = uncls.copy()
-    for c in SECTOR_UNCLASSIFIED_COLUMNS:
-        if c not in work.columns:
-            work[c] = ""
-    mask = (
-        ~work["처리상태"].astype(str).eq("반영완료")
-        & ~work["추천섹터"].astype(str).isin(["", "기타", "추천불가"])
-        & work["추천신뢰"].astype(str).isin(["확정후보", "보정후보", "보정"])
-        & ~work["테마리스크"].astype(str).eq("고위험")
-    )
-    candidates = work[mask].copy()
-    if len(candidates) == 0:
-        return 0
-
-    mapping = load_sector_mapping_df_v27()
-    rows = []
-    for _, r in candidates.iterrows():
-        code = _sector_code_norm_v27(r.get("종목코드", ""))
-        if not code:
-            continue
-        trust = "확정" if str(r.get("추천신뢰", "")) == "확정후보" else "보정"
-        rows.append({
-            "종목코드": code,
-            "종목명": str(r.get("종목명", "")).strip(),
-            "그룹": str(r.get("추천섹터", "")).strip(),
-            "섹터신뢰": trust,
-            "메모": "섹터미분류 자동학습: " + str(r.get("추천사유", ""))[:80],
-        })
-        target_mask = work["종목코드"].apply(_sector_code_norm_v27).eq(code)
-        work.loc[target_mask, "처리상태"] = "반영완료"
-        work.loc[target_mask, "메모"] = "섹터매핑 반영완료"
-
-    if not rows:
-        return 0
-    add_df = pd.DataFrame(rows)
-    merged = pd.concat([mapping, add_df], ignore_index=True)
-    merged["종목코드"] = merged["종목코드"].apply(_sector_code_norm_v27)
-    merged = merged.drop_duplicates(subset=["종목코드"], keep="last").reset_index(drop=True)
-    save_sector_mapping_df_v27(merged[SECTOR_MAPPING_COLUMNS])
-    save_sector_unclassified_df_v27(work[SECTOR_UNCLASSIFIED_COLUMNS])
-    try:
-        load_sector_mapping_v27.clear()
-    except Exception:
-        pass
-    return len(add_df)
-
 
 def score_candidate_core(df, name, regime="장세불명", high_price_limit=160000, strict=True, code=None):
     if df is None or len(df) < 80:
@@ -5442,7 +4600,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터진단", "6. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -5788,7 +4946,8 @@ elif menu == "3. TOP50":
                     shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                     if buy_status == "OK":
                         info["코드"] = code
-                        info = apply_sector_theme_policy_v27(info, code, name, is_holding=False)
+                        info["그룹"] = infer_group_by_name(name)
+                        info["섹터신뢰"] = "보정" if info["그룹"] != "기타" else "낮음"
                         heat_status = str(info.get("과열상태", "정상"))
                         if heat_status in ["추격주의", "과열주의", "신고가추격주의"]:
                             info["매수상태"] = "추격주의"
@@ -5824,7 +4983,8 @@ elif menu == "3. TOP50":
                         shares, buy_amount, buy_status = calc_magic_buy_amount(price, target_amount)
                         if buy_status == "OK":
                             relaxed["코드"] = code
-                            relaxed = apply_sector_theme_policy_v27(relaxed, code, name, is_holding=False)
+                            relaxed["그룹"] = infer_group_by_name(name)
+                            relaxed["섹터신뢰"] = "보정" if relaxed["그룹"] != "기타" else "낮음"
                             heat_status = str(relaxed.get("과열상태", "정상"))
                             if heat_status in ["과열제외", "추격주의", "과열주의", "신고가추격주의"]:
                                 relaxed["매수상태"] = "추격주의"
@@ -5900,15 +5060,6 @@ elif menu == "3. TOP50":
         final_judgements = result_df.apply(judge_final_entry, axis=1)
         result_df["최종판정"] = [x[0] for x in final_judgements]
         result_df["판정사유"] = [x[1] for x in final_judgements]
-        result_df["오늘매수"] = result_df.apply(sync_today_buy_with_final_v27, axis=1)
-
-        if not is_operation_test_mode():
-            try:
-                learned_count = upsert_sector_unclassified_candidates_v27(result_df, source="TOP50")
-                if learned_count > 0:
-                    st.info(f"섹터미분류 탭에 기타/낮음 후보 {learned_count}개를 자동 수집했습니다.")
-            except Exception as e:
-                st.warning(f"섹터미분류 자동수집은 건너뛰었습니다: {e}")
 
         for c in TOP50_COLUMNS:
             if c not in result_df.columns:
@@ -6093,13 +5244,6 @@ elif menu == "4. 보유종목 판단기":
                 st.error(diag["error"])
             else:
                 st.success("보유차수 판단 완료")
-                if not is_operation_test_mode():
-                    try:
-                        learned_count = upsert_sector_unclassified_candidates_v27(result, source="보유차수")
-                        if learned_count > 0:
-                            st.info(f"섹터미분류 탭에 보유차수 기타/낮음 후보 {learned_count}개를 자동 수집했습니다.")
-                    except Exception as e:
-                        st.warning(f"섹터미분류 자동수집은 건너뛰었습니다: {e}")
                 st.caption("평균단가는 사용자가 입력하지 않습니다. 종목평균단가_자동/종목전체손익률_자동은 참고용으로 프로그램이 계산합니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
                 st.dataframe(result, use_container_width=True, height=600)
@@ -6107,107 +5251,11 @@ elif menu == "4. 보유종목 판단기":
                 st.json(diag)
 
 # =====================================================
-# 5. 섹터/테마 진단
-# =====================================================
-
-elif menu == "5. 섹터진단":
-    st.header("5. 섹터/테마 진단")
-    st.caption("확인용 메뉴입니다. TOP50/보유차수 판단기는 이 메뉴를 켜지 않아도 같은 섹터·테마 엔진을 자동 적용합니다.")
-
-    try:
-        external_map = load_external_sector_text_map_v27()
-        st.metric("자동 업종 원천 종목수", f"{len(external_map):,}개")
-    except Exception:
-        external_map = {}
-        st.warning("외부 업종 원천은 현재 불러오지 못했습니다. 코드확정맵/종목명 키워드로만 진단합니다.")
-
-    st.subheader("섹터 자동학습 현황")
-    try:
-        mapping_df = load_sector_mapping_df_v27()
-        uncls_df = load_sector_unclassified_df_v27()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("섹터매핑 반영", f"{len(mapping_df):,}개")
-        c2.metric("섹터미분류 누적", f"{len(uncls_df):,}개")
-        pending_count = int((uncls_df.get("처리상태", pd.Series(dtype=str)).astype(str) != "반영완료").sum()) if len(uncls_df) else 0
-        c3.metric("미처리", f"{pending_count:,}개")
-
-        with st.expander("섹터미분류 탭 보기", expanded=False):
-            st.caption("TOP50/보유차수에서 기타·낮음·수동확인필요로 나온 종목을 자동 누적합니다.")
-            st.dataframe(uncls_df.tail(200), use_container_width=True, height=300)
-            if st.button("추천섹터를 섹터매핑에 자동 반영", type="secondary"):
-                promoted = promote_sector_unclassified_to_mapping_v27()
-                if promoted > 0:
-                    st.success(f"섹터매핑 탭에 {promoted}개 반영 완료. 다음 TOP50/보유차수부터 우선 적용됩니다.")
-                    st.rerun()
-                else:
-                    st.info("자동 반영 가능한 추천섹터가 없습니다. 추천불가 또는 테마 고위험 후보는 그대로 대기합니다.")
-        with st.expander("섹터매핑 탭 보기", expanded=False):
-            st.caption("섹터매핑 탭은 TOP50/보유차수 공통 최우선 원천입니다.")
-            st.dataframe(mapping_df.tail(200), use_container_width=True, height=300)
-    except Exception as e:
-        st.warning(f"섹터 자동학습 탭 확인은 건너뛰었습니다: {e}")
-
-    krx = load_krx_master_fdr()
-    q = st.text_input("종목코드 또는 종목명", value="아이로보틱스", placeholder="예: 066430 또는 아이로보틱스")
-    c1, c2, c3 = st.columns(3)
-    sample_score = c1.number_input("가정 점수", value=100.0, step=1.0)
-    sample_ret20 = c2.number_input("가정 20일수익률", value=25.0, step=1.0)
-    sample_ret60 = c3.number_input("가정 60일수익률", value=80.0, step=1.0)
-
-    if st.button("섹터/테마 진단", type="primary"):
-        raw = str(q).strip()
-        code = ""
-        name = raw
-        if raw.replace(".", "").isdigit():
-            code = raw.replace(".0", "").zfill(6)
-            hit = krx[krx["Code"].astype(str).str.zfill(6) == code] if len(krx) else pd.DataFrame()
-            if len(hit):
-                name = str(hit.iloc[0]["Name"])
-            elif code == "066430":
-                name = "아이로보틱스"
-        else:
-            hit = krx[krx["Name"].astype(str).str.contains(raw, case=False, regex=False, na=False)] if len(krx) else pd.DataFrame()
-            if len(hit):
-                code = str(hit.iloc[0]["Code"]).zfill(6)
-                name = str(hit.iloc[0]["Name"])
-            elif raw == "아이로보틱스":
-                code = "066430"
-                name = "아이로보틱스"
-
-        if not code:
-            st.error("종목코드/종목명을 찾지 못했습니다. 코드 6자리로 다시 입력하세요.")
-        else:
-            info = {"점수": float(sample_score), "20일수익률": float(sample_ret20), "60일수익률": float(sample_ret60)}
-            sector = classify_sector_v27(code, name)
-            policy = apply_sector_theme_policy_v27(info, code, name, is_holding=False)
-            st.subheader(f"{name} ({code})")
-            ext_signal = fetch_external_theme_reality_signal_v27(code, name)
-            st.json({
-                "섹터분류": sector.get("섹터분류"),
-                "섹터신뢰": sector.get("섹터신뢰"),
-                "섹터판정": sector.get("섹터판정"),
-                "섹터메모": sector.get("섹터메모"),
-                "테마실체": policy.get("테마실체"),
-                "테마리스크": policy.get("테마리스크"),
-                "테마원천": policy.get("테마원천", "내장규칙"),
-                "외부뉴스공시신호": ext_signal,
-                "점수원본": policy.get("점수원본", sample_score),
-                "정책반영점수": policy.get("점수"),
-                "테마리스크사유": policy.get("테마리스크사유", ""),
-            })
-            if policy.get("테마리스크") == "고위험":
-                st.error("테마실체 고위험: TOP50 신규매수는 금지 처리됩니다.")
-            elif sector.get("섹터신뢰") == "낮음" or policy.get("테마리스크") == "주의":
-                st.warning("신뢰도 확인 필요: TOP50 신규매수는 최대 대기로 제한됩니다.")
-            else:
-                st.success("섹터/테마 정책상 큰 제한은 없습니다.")
-
-# =====================================================
-# 6. 도움말
+# 5. 도움말
 # =====================================================
 
 else:
-    st.header("6. 도움말")
+    st.header("5. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -6215,11 +5263,10 @@ else:
 
 ### 이번 버전 핵심
 
-- v27: 섹터신뢰 + 테마실체 리스크 필터를 TOP50/보유차수 공통 적용합니다.
-- v27 크롤러 준비형: 네이버 뉴스 공식 Search API와 OpenDART API 키가 있으면 뉴스/공시 기반 테마리스크를 자동 점검할 수 있습니다.
-- 아이로보틱스처럼 점수는 높지만 기존사업과 급등테마가 엇갈리는 종목은 `테마실체확인필요`로 잡고 신규매수는 금지/대기 처리합니다.
-- `최종판정=금지`인데 `오늘매수=매수가능`으로 남는 불일치 버그를 차단합니다.
-- 섹터신뢰 낮음은 신규 TOP50에서 점수상한을 걸고, 보유차수 판단기에서는 무조건 요양원으로 보내지 않고 손익률/차수/거래대금 기준을 유지합니다.
+- v19의 보유차수 판단기를 유지합니다. 1차/2차/3차를 각각 평가합니다.
+- 수동입력에서 종목명을 여러 번 쓰지 않아도 됩니다. `[종목명]` 아래에 차수만 여러 줄 입력합니다.
+- 기존 `종목명,차수,진입단가,수량` 한 줄 입력도 계속 지원합니다.
+- 예수금 방어선은 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
 - 보유종목은 TOP50 유니버스 밖이어도 강제 계산 대상에 포함됩니다.
 - 제한매수모드에서는 보유종목 중 `추가매수 A`만 매수가능으로 표시합니다.
 
