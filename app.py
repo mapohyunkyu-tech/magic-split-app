@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_PINNED_STOCK_COLUMN_20260617"
+APP_VERSION = "v27_HOLDING_ACTION_FOCUS_UI_20260618"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -128,7 +128,7 @@ HOLDINGS_COLUMNS = [
 ]
 
 HOLDING_JUDGE_COLUMNS = [
-    "순위", "종목", "코드", "오늘추가매수", "보유판정", "판정사유", "차수",
+    "순위", "종목", "코드", "핵심행동", "현재장판단", "오늘추가매수", "보유판정", "판정사유", "차수",
     "진입단가", "현재가", "추가매수기준가", "현재장도달시", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "다음차수", "추가매수기준률", "기준까지남은하락률", "기준도달여부",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
@@ -4125,6 +4125,64 @@ def get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason):
         return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달시 매수가능후보"
     return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달해도 점수/운영모드 확인"
 
+
+def make_holding_action_label(row):
+    """보유차수 판단표를 모바일에서 바로 볼 수 있게 핵심 액션만 요약한다."""
+    today = str(row.get("오늘추가매수", ""))
+    judge = str(row.get("보유판정", ""))
+    hint = str(row.get("현재장도달시", ""))
+    reached = str(row.get("기준도달여부", ""))
+    if today == "매수가능":
+        return "🟢 오늘매수가능"
+    if judge in ["익절검토", "회수후보"]:
+        return "🔵 회수/익절검토"
+    if "요양원" in judge:
+        return "⚫ 요양원/금지"
+    if reached == "미도달" and "매수가능후보" in hint:
+        return "🟡 기준가대기"
+    if today == "금지":
+        return "⛔ 금지"
+    return "⚪ 관망"
+
+
+def make_holding_live_decision(row):
+    """FDR 현재가 지연을 감안해 HTS/증권앱에서 무엇만 보면 되는지 짧게 표시한다."""
+    action = str(row.get("핵심행동", ""))
+    judge = str(row.get("보유판정", ""))
+    reason = str(row.get("판정사유", ""))
+    hint = str(row.get("현재장도달시", ""))
+    trigger_price = _safe_int_value(row.get("추가매수기준가", 0), 0)
+    remaining = _safe_float_value(row.get("기준까지남은하락률", 0), 0)
+    if "오늘매수가능" in action:
+        return "앱 기준 이미 도달 / 예산·개수 안에서 가능"
+    if "기준가대기" in action and trigger_price > 0:
+        return f"HTS 현재가 {trigger_price:,}원 이하이면 후보"
+    if judge == "익절검토":
+        return "수익권: 회수/분할매도 검토"
+    if judge == "회수후보":
+        return "본전권·약손실권: 회수 우선 검토"
+    if "미도달" in str(row.get("기준도달여부", "")):
+        return f"아직 {remaining:.2f}% 더 하락해야 기준"
+    if hint:
+        return hint
+    return reason[:80]
+
+
+def split_holding_action_tables(result):
+    """보유차수 판단 결과를 실제 액션별로 나눠 화면 위에 먼저 보여준다."""
+    if result is None or len(result) == 0 or "핵심행동" not in result.columns:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    buy = result[result["핵심행동"].astype(str).str.contains("오늘매수가능", na=False)].copy()
+    wait = result[result["핵심행동"].astype(str).str.contains("기준가대기", na=False)].copy()
+    recovery = result[result["핵심행동"].astype(str).str.contains("회수/익절", na=False)].copy()
+    focus_cols = [
+        "종목", "코드", "핵심행동", "현재장판단", "차수", "현재가", "추가매수기준가",
+        "차수손익률", "기준까지남은하락률", "점수", "보유판정", "판정사유"
+    ]
+    focus_cols = [c for c in focus_cols if c in result.columns]
+    return buy[focus_cols], wait[focus_cols], recovery[focus_cols]
+
 def judge_holding_row(row, info, op, is_excluded=False):
     mode = op.get("운영모드", "")
     entry = _safe_float_value(row.get("진입단가", 0), 0)
@@ -4310,6 +4368,8 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "판정사유": reason,
                 "코드": code,
                 "종목": name,
+                "핵심행동": "",
+                "현재장판단": "",
                 "차수": int(step),
                 "진입단가": int(entry),
                 "현재가": int(current),
@@ -4401,6 +4461,11 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
         idxs = list(out[allow_mask].drop_duplicates(subset=["코드"], keep="first").head(final_limit).index)
         out.loc[idxs, "오늘추가매수"] = "매수가능"
     out.loc[~allow_mask, "오늘추가매수"] = "금지"
+
+    # 실제 화면에서 제일 먼저 볼 액션 요약.
+    # 오늘추가매수 확정 이후 계산해야 매수가능/대기/금지와 일치한다.
+    out["핵심행동"] = out.apply(make_holding_action_label, axis=1)
+    out["현재장판단"] = out.apply(make_holding_live_decision, axis=1)
 
     for c in HOLDING_JUDGE_COLUMNS:
         if c not in out.columns:
@@ -5740,6 +5805,25 @@ elif menu == "4. 보유종목 판단기":
                 st.success("보유차수 판단 완료")
                 st.caption("저장 데이터는 1차/2차 모두 유지됩니다. 판단표는 종목별 현재 보유 최고차수 1줄만 표시하고, 종목/코드를 앞쪽에 배치했습니다. 종목평균단가_자동/종목전체손익률_자동은 전체 저장차수 기준입니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
+
+                buy_df, wait_df, recovery_df = split_holding_action_tables(result)
+                a1, a2, a3 = st.columns(3)
+                a1.metric("🟢 오늘매수가능", f"{len(buy_df)}개")
+                a2.metric("🟡 기준가대기", f"{len(wait_df)}개")
+                a3.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
+
+                if len(buy_df) > 0:
+                    st.success("오늘 실제로 볼 매수 후보입니다. 예산/개수 제한 안에서만 확인하세요.")
+                    show_pinned_dataframe(buy_df, height=220, pin_rank=False)
+                if len(wait_df) > 0:
+                    with st.expander("🟡 현재장 기준가 도달 시 후보", expanded=True):
+                        st.caption("FDR 현재가가 늦을 수 있으니, 증권앱 현재가가 추가매수기준가 이하인지 보는 표입니다.")
+                        show_pinned_dataframe(wait_df, height=260, pin_rank=False)
+                if len(recovery_df) > 0:
+                    with st.expander("🔵 회수/익절 검토 후보", expanded=False):
+                        show_pinned_dataframe(recovery_df, height=240, pin_rank=False)
+
+                st.write("전체 판단표")
                 show_pinned_dataframe(result, height=600, pin_rank=True)
                 st.write("진단")
                 st.json(diag)
@@ -5763,7 +5847,9 @@ else:
 - 예수금 방어선은 고정 700/1000/1500만원이 아니라 `장부자산 비율 + 기본매수금액`으로 자동 계산됩니다.
 - 보유종목은 TOP50 유니버스 밖이어도 강제 계산 대상에 포함됩니다.
 - 보유차수 판단기는 1차→2차 -10%, 2차→3차 -11.11%, 3차→4차 -12.50%, 4차→5차 -14.29%, 5차→6차 -16.67% 기준에 도달해야 매수가능 후보로 표시합니다.
-- 한 종목에 여러 차수를 입력하면 현재 보유 최고 차수만 다음 차수 매수 기준으로 판단합니다. 낮은 차수 행은 하위차수유지로 표시합니다.
+- 한 종목에 여러 차수를 입력하면 현재 보유 최고 차수만 다음 차수 매수 기준으로 판단합니다. 낮은 차수 행은 판단표에서 숨깁니다.
+- 보유차수 판단 결과 위에 `오늘매수가능`, `기준가대기`, `회수/익절검토` 요약표를 먼저 보여줍니다.
+- FDR 현재가가 늦을 수 있으므로 `현재장판단`에는 HTS/증권앱 현재가로 볼 기준가를 짧게 표시합니다.
 
 ### 사용 순서
 
