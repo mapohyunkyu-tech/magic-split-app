@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_HOLDING_ACTION_FOCUS_UI_20260618"
+APP_VERSION = "v27_RECOVERY_CANDIDATE_THRESHOLD_FIX_20260618"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4127,19 +4127,33 @@ def get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason):
 
 
 def make_holding_action_label(row):
-    """보유차수 판단표를 모바일에서 바로 볼 수 있게 핵심 액션만 요약한다."""
+    """보유차수 판단표를 모바일에서 바로 볼 수 있게 핵심 액션만 요약한다.
+
+    회수모드에서는 본전권/약수익 종목이 많이 잡힐 수 있다.
+    다만 사용자가 바로 행동해야 할 "회수/익절검토" 상단표에는
+    실질 수익권만 올리고, +5% 미만 본전권은 보유관망으로 둔다.
+    """
     today = str(row.get("오늘추가매수", ""))
     judge = str(row.get("보유판정", ""))
     hint = str(row.get("현재장도달시", ""))
     reached = str(row.get("기준도달여부", ""))
+    pnl_pct = _safe_float_value(row.get("차수손익률", 0), 0)
+    whole_pct = _safe_float_value(row.get("종목전체손익률_자동", pnl_pct), pnl_pct)
+
     if today == "매수가능":
         return "🟢 오늘매수가능"
-    if judge in ["익절검토", "회수후보"]:
+
+    # 진짜 수익권만 상단 회수/익절표에 올린다.
+    # 이수화학처럼 막 산 종목이 +2~3%라면 회수검토가 아니라 보유관망으로 표시한다.
+    if judge == "익절검토" or pnl_pct >= 5 or whole_pct >= 5:
         return "🔵 회수/익절검토"
+
     if "요양원" in judge:
         return "⚫ 요양원/금지"
     if reached == "미도달" and "매수가능후보" in hint:
         return "🟡 기준가대기"
+    if judge == "회수후보":
+        return "⚪ 보유관망"
     if today == "금지":
         return "⛔ 금지"
     return "⚪ 관망"
@@ -4153,14 +4167,17 @@ def make_holding_live_decision(row):
     hint = str(row.get("현재장도달시", ""))
     trigger_price = _safe_int_value(row.get("추가매수기준가", 0), 0)
     remaining = _safe_float_value(row.get("기준까지남은하락률", 0), 0)
+    pnl_pct = _safe_float_value(row.get("차수손익률", 0), 0)
+    whole_pct = _safe_float_value(row.get("종목전체손익률_자동", pnl_pct), pnl_pct)
+
     if "오늘매수가능" in action:
         return "앱 기준 이미 도달 / 예산·개수 안에서 가능"
     if "기준가대기" in action and trigger_price > 0:
         return f"HTS 현재가 {trigger_price:,}원 이하이면 후보"
-    if judge == "익절검토":
+    if "회수/익절" in action:
         return "수익권: 회수/분할매도 검토"
     if judge == "회수후보":
-        return "본전권·약손실권: 회수 우선 검토"
+        return f"약수익/본전권 보유관망: 현재 {pnl_pct:.2f}% / 전체 {whole_pct:.2f}%"
     if "미도달" in str(row.get("기준도달여부", "")):
         return f"아직 {remaining:.2f}% 더 하락해야 기준"
     if hint:
