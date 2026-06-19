@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_RECOVERY_CANDIDATE_THRESHOLD_FIX_20260618"
+APP_VERSION = "v27_FEAR_BUY_ALLOWED_EXPANSION_LOCK_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -127,9 +127,16 @@ HOLDINGS_COLUMNS = [
     "코드", "종목", "차수", "진입단가", "수량", "매입금액", "요양원여부", "메모", "업데이트일"
 ]
 
+# 공포매수/금액확장용 간편 보유 입력.
+# 정밀 차수 입력이 어려운 100개 이상 보유 상황에서 "종목명,현재차수[,마지막진입가]"만 저장한다.
+SIMPLE_HOLDINGS_COLUMNS = [
+    "코드", "종목", "현재차수", "마지막진입가", "메모", "업데이트일"
+]
+
 HOLDING_JUDGE_COLUMNS = [
-    "순위", "종목", "코드", "핵심행동", "현재장판단", "오늘추가매수", "보유판정", "판정사유", "차수",
-    "진입단가", "현재가", "추가매수기준가", "현재장도달시", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
+    "순위", "종목", "코드", "입력방식", "자동등급", "기준가신뢰",
+    "핵심행동", "현재장판단", "오늘추가매수", "보유판정", "판정사유", "차수",
+    "진입단가", "현재가", "추가매수기준가", "현재장도달시", "추천매수금액", "확장상태", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "다음차수", "추가매수기준률", "기준까지남은하락률", "기준도달여부",
     "종목총수량", "종목평균단가_자동", "종목전체평가손익_자동", "종목전체손익률_자동", "요양원여부",
     "등급", "점수", "그룹", "과열상태", "당일등락률", "갭상승률", "눌림률",
@@ -3150,6 +3157,121 @@ def save_holdings_df(df):
         pass
 
 
+
+def load_simple_holdings_df():
+    """간편 보유 탭: 종목명+현재차수 중심의 공포매수 와꾸 저장소."""
+    try:
+        ws = get_ws("보유간편", SIMPLE_HOLDINGS_COLUMNS)
+        df = read_worksheet_df(ws, SIMPLE_HOLDINGS_COLUMNS)
+    except Exception:
+        return pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS)
+    if len(df) == 0:
+        return pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS)
+    df = df.copy()
+    df["코드"] = df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+    df["현재차수"] = pd.to_numeric(df["현재차수"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(1).astype(int)
+    df["현재차수"] = df["현재차수"].clip(lower=1, upper=MAX_AUTO_LOT_STEP if 'MAX_AUTO_LOT_STEP' in globals() else 6)
+    df["마지막진입가"] = pd.to_numeric(df["마지막진입가"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0).astype(int)
+    return df[SIMPLE_HOLDINGS_COLUMNS]
+
+
+def save_simple_holdings_df(df):
+    ws = get_ws("보유간편", SIMPLE_HOLDINGS_COLUMNS)
+    if df is None or len(df) == 0:
+        out = pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS)
+    else:
+        out = df.copy()
+        for c in SIMPLE_HOLDINGS_COLUMNS:
+            if c not in out.columns:
+                out[c] = ""
+        out["코드"] = out["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+        out["현재차수"] = pd.to_numeric(out["현재차수"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(1).astype(int).clip(lower=1, upper=MAX_AUTO_LOT_STEP if 'MAX_AUTO_LOT_STEP' in globals() else 6)
+        out["마지막진입가"] = pd.to_numeric(out["마지막진입가"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0).astype(int)
+        out["메모"] = out["메모"].fillna("").astype(str)
+        out["업데이트일"] = out["업데이트일"].fillna(today_str()).astype(str)
+        out = out[(out["코드"].astype(str).str.len() > 0) & (out["현재차수"] > 0)].copy()
+        # 간편 보유는 종목당 1줄만 유지한다. 나중 입력이 현재 상태라고 본다.
+        out = out.drop_duplicates(subset=["코드"], keep="last").reset_index(drop=True)
+        out = out[SIMPLE_HOLDINGS_COLUMNS]
+    write_worksheet(ws, out, SIMPLE_HOLDINGS_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+
+
+def parse_simple_holding_text(simple_text, krx):
+    """
+    간편 보유 입력 파서.
+
+    지원 형식:
+    동진쎄미켐,3
+    동진쎄미켐,3,33333
+    DB하이텍 2
+    DB하이텍 2 174200
+
+    A/B/C는 사용자가 쓰지 않는다. 앱이 점수/거래대금/회전/요양원 여부로 자동 판단한다.
+    마지막진입가가 없으면 보유차수 판단 시 현재가 기준 추정으로 다음 차수 기준가를 만든다.
+    """
+    rows = []
+    not_found = []
+
+    def add_not_found(name):
+        name = _normalize_manual_stock_text(name)
+        if name and name not in not_found:
+            not_found.append(name)
+
+    for raw in str(simple_text or "").splitlines():
+        line = _normalize_manual_stock_text(raw)
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        line = line.replace("，", ",")
+        if "," in line:
+            parts = [p.strip() for p in line.split(",") if p.strip()]
+            if len(parts) < 2:
+                continue
+            name_text = parts[0]
+            step = _safe_int_value(parts[1].replace("차", ""), 0)
+            last_entry = _safe_int_value(parts[2], 0) if len(parts) >= 3 else 0
+            memo = parts[3] if len(parts) >= 4 else "간편입력"
+        else:
+            parts = [p.strip() for p in re.split(r"\s+", line) if p.strip()]
+            if len(parts) < 2:
+                continue
+            nums = []
+            while parts and re.fullmatch(r"[\d,]+(\.0)?", parts[-1].replace(",", "")):
+                nums.insert(0, parts.pop())
+                if len(nums) >= 2:
+                    break
+            if len(nums) == 0 or not parts:
+                continue
+            name_text = " ".join(parts)
+            step = _safe_int_value(nums[0].replace("차", ""), 0)
+            last_entry = _safe_int_value(nums[1], 0) if len(nums) >= 2 else 0
+            memo = "간편입력"
+
+        if step <= 0:
+            continue
+        step = max(1, min(int(step), MAX_AUTO_LOT_STEP if 'MAX_AUTO_LOT_STEP' in globals() else 6))
+        found = find_stock_by_name(name_text, krx)
+        if found is None:
+            add_not_found(name_text)
+            continue
+        rows.append({
+            "코드": found["코드"],
+            "종목": found["종목"],
+            "현재차수": int(step),
+            "마지막진입가": int(last_entry),
+            "메모": memo,
+            "업데이트일": today_str(),
+        })
+
+    out = pd.DataFrame(rows, columns=SIMPLE_HOLDINGS_COLUMNS)
+    if len(out) > 0:
+        out = out.drop_duplicates(subset=["코드"], keep="last").reset_index(drop=True)
+    return out, not_found
+
+
 def _pick_col(df, names):
     norm = {str(c).replace(" ", "").lower(): c for c in df.columns}
     for name in names:
@@ -3843,6 +3965,93 @@ def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
     return int(min(available * 0.30, base_amount * 10))
 
 
+
+
+def get_next_scale_amount(base_amount):
+    """금액확장 후보 금액. 안정 조건이 맞을 때만 적용한다."""
+    base_amount = int(base_amount or 150000)
+    if base_amount < 200000:
+        return 200000
+    if base_amount < 250000:
+        return 250000
+    if base_amount < 300000:
+        return 300000
+    return base_amount
+
+
+def decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_holdings, base_amount, cash_lines, mode):
+    """공포매수와 금액확장을 분리한다.
+
+    - 공포매수: 평가손실/하락장에서 기존 보유종목의 차수 기준가 도달분은 조건부 허용.
+    - 금액확장: 예수금이 충분하고 평가손실이 안정된 뒤에만 15만→20만 같은 증액 허용.
+    """
+    book_asset = max(int(book_asset or 0), 0)
+    cash = int(cash or 0)
+    unrealized = int(unrealized or 0)
+    total_holdings = int(total_holdings or 0)
+    target_holdings = int(target_holdings or 0)
+    base_amount = int(base_amount or 150000)
+    loss_pct = (unrealized / book_asset * 100) if book_asset > 0 else 0
+    cash_ratio = (cash / book_asset * 100) if book_asset > 0 else 0
+    next_amount = get_next_scale_amount(base_amount)
+
+    target_reached = total_holdings >= target_holdings if target_holdings > 0 else False
+    # 15만원 120종목을 깔고 난 뒤, 20만원 슬롯/증액은 장부자산이 최소 9천만 이상이어야 검토.
+    capital_ready = book_asset >= 90_000_000
+    stable_cash = cash >= int(cash_lines.get("여유선", 0)) and cash_ratio >= 25
+    stable_loss = loss_pct >= -3
+    stable_mode = mode == "정상운용"
+
+    reasons = []
+    if not target_reached:
+        reasons.append("목표종목수 미도달: 종목확장 우선")
+    if not capital_ready:
+        reasons.append("장부자산 9천만 미만: 금액확장 보류")
+    if not stable_cash:
+        reasons.append("예수금 여유선/25% 미달")
+    if not stable_loss:
+        reasons.append(f"평가손익률 {loss_pct:.1f}%: 손실 안정 전")
+    if not stable_mode:
+        reasons.append(f"운영모드 {mode}: 안정 정상운용 아님")
+
+    expansion_allowed = target_reached and capital_ready and stable_cash and stable_loss and stable_mode
+    if expansion_allowed:
+        expansion_status = "확장허용"
+        applied_amount = next_amount
+        guide = f"안정 조건 충족: 보유 추가매수 금액 {base_amount:,}→{next_amount:,} 검토 가능"
+    else:
+        expansion_status = "확장잠금"
+        applied_amount = base_amount
+        guide = " / ".join(reasons[:4]) if reasons else "확장 보류"
+
+    # 금액확장과 공포매수는 분리한다.
+    # 하락/손실 구간이라고 해서 공포매수를 막지 않는다.
+    # 다만 예수금 절대방어선 붕괴나 강한 회수모드에서는 현금확보를 우선한다.
+    hard_line = int(cash_lines.get("절대방어선", 0))
+    if cash < hard_line or mode == "강한 회수모드":
+        fear_status = "현금방어우선"
+        fear_guide = "예수금 절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
+    elif mode == "회수모드":
+        fear_status = "공포매수보류"
+        fear_guide = "회수모드: 신규·금액확장 금지, 보유 A급 기준도달분만 예외 검토"
+    elif loss_pct <= -5 or mode in ["제한회복모드", "제한매수모드", "손실주의 정상운용"]:
+        fear_status = "공포매수허용"
+        fear_guide = "금액확장 잠금. 기존 보유 A/B 등급 + 마지막 차수 기준가 도달분만 기본금액으로 확인"
+    else:
+        fear_status = "일반운용"
+        fear_guide = "공포매수 구간 아님. 신규/추가매수는 운영모드와 예수금 기준대로 확인"
+
+    return {
+        "확장상태": expansion_status,
+        "확장가능여부": "가능" if expansion_allowed else "잠금",
+        "확장추천금액": int(next_amount),
+        "오늘적용매수금액": int(applied_amount),
+        "확장잠금사유": guide,
+        "공포매수상태": fear_status,
+        "공포매수가이드": fear_guide,
+    }
+
+
 def get_account_stage(book_asset):
     book_asset = int(book_asset)
     if book_asset < 90_000_000:
@@ -3958,6 +4167,8 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         mode = downgrade_mode(mode, "제한회복모드")
         reasons.append("현재 보유종목수가 목표종목수 도달: 신규매수 중단, 보유종목 기준도달 추가매수만 제한 허용")
 
+    expansion_guard = decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_holdings, base_amount, cash_lines, mode)
+
     daily_budget = calc_daily_buy_budget(cash, base_amount, cash_lines, mode)
     room_to_target = max(int(target_holdings) - int(total_holdings), 0)
 
@@ -3982,7 +4193,8 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         add_buy_count = min(budget_count, 10)
 
     slot_limit = stage["20만원슬롯한도"]
-    if slot_limit <= 0 or cash < cash_lines["정상선"]:
+    # 20만원 슬롯도 금액확장의 한 종류다. 예수금이 털리거나 평가손실이 진행 중이면 잠근다.
+    if expansion_guard.get("확장가능여부") != "가능" or slot_limit <= 0 or cash < cash_lines["정상선"]:
         slot20_possible = 0
     elif slot_limit >= 999:
         slot20_possible = 999
@@ -4011,6 +4223,13 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         "단계": stage["단계"],
         "기본매수금액": base_amount,
         "허용상한": get_allowed_amount(base_amount),
+        "확장상태": expansion_guard.get("확장상태", ""),
+        "확장가능여부": expansion_guard.get("확장가능여부", ""),
+        "확장추천금액": int(expansion_guard.get("확장추천금액", base_amount)),
+        "오늘적용매수금액": int(expansion_guard.get("오늘적용매수금액", base_amount)),
+        "확장잠금사유": expansion_guard.get("확장잠금사유", ""),
+        "공포매수상태": expansion_guard.get("공포매수상태", ""),
+        "공포매수가이드": expansion_guard.get("공포매수가이드", ""),
         "목표종목수": target_holdings,
         "최대종목수": max_holdings,
         "예수금방어선": cash_lines,
@@ -4194,11 +4413,34 @@ def split_holding_action_tables(result):
     wait = result[result["핵심행동"].astype(str).str.contains("기준가대기", na=False)].copy()
     recovery = result[result["핵심행동"].astype(str).str.contains("회수/익절", na=False)].copy()
     focus_cols = [
-        "종목", "코드", "핵심행동", "현재장판단", "차수", "현재가", "추가매수기준가",
+        "종목", "코드", "핵심행동", "현재장판단", "차수", "현재가", "추가매수기준가", "추천매수금액", "확장상태",
         "차수손익률", "기준까지남은하락률", "점수", "보유판정", "판정사유"
     ]
     focus_cols = [c for c in focus_cols if c in result.columns]
     return buy[focus_cols], wait[focus_cols], recovery[focus_cols]
+
+
+def classify_holding_auto_grade(info, is_excluded=False):
+    """사용자는 A/B를 입력하지 않는다. 앱이 점수·거래대금·회전력·데이터 상태로 자동 등급을 붙인다."""
+    if is_excluded:
+        return "제외"
+    score = _safe_float_value(info.get("점수", 0), 0)
+    amount_score = _safe_float_value(info.get("거래대금점수", 0), 0)
+    rotation = _safe_float_value(info.get("회전점수", 0), 0)
+    heat = str(info.get("과열상태", ""))
+    data_note = str(info.get("데이터주의", ""))
+    if score <= 0 or "데이터없음" in heat or "지표실패" in heat:
+        return "제외"
+    if "과열" in heat or "추격" in heat:
+        return "C"
+    if score >= 80 and amount_score >= 20 and rotation >= 8:
+        return "A"
+    if score >= 70 and amount_score >= 17:
+        return "B"
+    if score >= 60:
+        return "C"
+    return "제외"
+
 
 def judge_holding_row(row, info, op, is_excluded=False):
     mode = op.get("운영모드", "")
@@ -4210,6 +4452,7 @@ def judge_holding_row(row, info, op, is_excluded=False):
     day_pct = _safe_float_value(info.get("당일등락률", 0), 0)
     pnl_pct = _safe_float_value(info.get("차수손익률", info.get("현재손익률", 0)), 0)
     heat = str(info.get("과열상태", ""))
+    auto_grade = str(info.get("자동등급", "")).strip()
     nursing = str(row.get("요양원여부", "N")).upper() == "Y" or bool(is_excluded)
     trigger_status = get_lot_trigger_status(step, pnl_pct)
     trigger = trigger_status.get("trigger")
@@ -4255,15 +4498,18 @@ def judge_holding_row(row, info, op, is_excluded=False):
 
     reached_reason = f"{step}차→{step+1}차 기준도달: 현재 {pnl_pct:.2f}% / 기준 -{trigger:.2f}%"
 
-    # 제한운용에서도 가능한 A: 점수 좋고 해당 차수가 정해진 차수별 눌림률에 도달한 경우
-    if score >= 80 and step <= 5:
-        return "추가매수 A", "허용후보", f"{reached_reason} / 점수 {score:.1f}"
+    # 제한운용에서도 가능한 A: 앱이 자동 A등급으로 판정했고 해당 차수 기준에 도달한 경우
+    if auto_grade == "A" and step <= 5:
+        return "추가매수 A", "허용후보", f"{reached_reason} / 자동등급 A / 점수 {score:.1f}"
 
     # 정상운용/제한매수모드에서 가능한 B
-    if score >= 70 and step <= 5:
+    if auto_grade == "B" and step <= 5:
         if mode in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
-            return "추가매수 B", "허용후보", f"{reached_reason} / 점수 {score:.1f}"
+            return "추가매수 B", "허용후보", f"{reached_reason} / 자동등급 B / 점수 {score:.1f}"
         return "유지", "금지", "제한운용에서는 A등급만 추가매수"
+
+    if score >= 70 and auto_grade not in ["A", "B"]:
+        return "유지", "금지", f"기준은 도달했지만 자동등급 {auto_grade or '제외'}: 점수 {score:.1f}"
 
     if score < 60 and pnl_pct <= -12:
         return "회수후보", "금지", "점수 약함 + 손실 확대"
@@ -4271,9 +4517,13 @@ def judge_holding_row(row, info, op, is_excluded=False):
     return "유지", "금지", f"기준은 도달했지만 점수 부족: 점수 {score:.1f}"
 
 
-def build_holdings_judgement(holdings_df, op, max_rows=500):
-    if holdings_df is None or len(holdings_df) == 0:
-        return pd.DataFrame(columns=HOLDING_JUDGE_COLUMNS), {"error": "보유차수 없음"}
+def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=None):
+    if holdings_df is None:
+        holdings_df = pd.DataFrame(columns=HOLDINGS_COLUMNS)
+    if simple_holdings_df is None:
+        simple_holdings_df = pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS)
+    if len(holdings_df) == 0 and len(simple_holdings_df) == 0:
+        return pd.DataFrame(columns=HOLDING_JUDGE_COLUMNS), {"error": "보유차수/간편보유 없음"}
 
     krx = load_krx_master_fdr()
     name_map = dict(zip(krx["Code"].astype(str).str.zfill(6), krx["Name"].astype(str))) if len(krx) else {}
@@ -4284,11 +4534,13 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
     data_start = (pd.to_datetime(asof_date) - pd.DateOffset(days=1400)).strftime("%Y%m%d")
 
     rows = []
-    diag = {"대상차수": 0, "대상종목": int(holdings_df["코드"].nunique()) if "코드" in holdings_df.columns else 0,
+    detailed_target_count = int(holdings_df["코드"].nunique()) if len(holdings_df) > 0 and "코드" in holdings_df.columns else 0
+    simple_target_count = int(simple_holdings_df["코드"].nunique()) if len(simple_holdings_df) > 0 and "코드" in simple_holdings_df.columns else 0
+    diag = {"대상차수": 0, "대상종목": int(detailed_target_count + simple_target_count),
             "가격데이터없음": 0, "지표계산실패": 0, "판정완료": 0, "예외": 0,
             "기준일": asof_date, "중기장세": regime, "당일장세": regime_detail.get("당일장세", ""), "장세근거": regime_detail.get("장세근거", "")}
 
-    target_amount = int(op.get("기본매수금액", 150000))
+    target_amount = int(op.get("오늘적용매수금액", op.get("기본매수금액", 150000)))
     add_limit = int(op.get("추가매수가능개수", 0))
     daily_budget = int(op.get("일일매수상한", 0))
     mode = op.get("운영모드", "")
@@ -4319,9 +4571,54 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
         total_by_code = {}
         judgement_source = holdings_df.copy()
 
+    # 정밀 차수 데이터는 항상 우선한다. 간편 보유는 정밀 데이터가 없는 종목만 판단용으로 붙인다.
+    if len(judgement_source) > 0:
+        judgement_source["__입력방식"] = "정밀"
+        judgement_source["__기준가신뢰"] = "높음"
+    detailed_codes = set()
+    if len(holdings_for_step) > 0 and "코드정규" in holdings_for_step.columns:
+        detailed_codes = set(holdings_for_step["코드정규"].astype(str).str.zfill(6).tolist())
+
+    simple_added = 0
+    simple_estimated = 0
+    if simple_holdings_df is not None and len(simple_holdings_df) > 0:
+        simple_rows = []
+        s_df = simple_holdings_df.copy()
+        s_df["코드"] = s_df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+        for _, s in s_df.iterrows():
+            code_s = str(s.get("코드", "")).replace(".0", "").zfill(6)
+            if not code_s or code_s in detailed_codes:
+                continue
+            step_s = _safe_int_value(s.get("현재차수", 1), 1)
+            last_entry = _safe_float_value(s.get("마지막진입가", 0), 0)
+            trust = "보통" if last_entry > 0 else "낮음"
+            method = "간편(마지막가)" if last_entry > 0 else "간편(현재가추정)"
+            if last_entry <= 0:
+                simple_estimated += 1
+            simple_added += 1
+            simple_rows.append({
+                "코드": code_s,
+                "종목": str(s.get("종목", "")).strip() or name_map.get(code_s, code_s),
+                "차수": int(step_s),
+                "진입단가": int(last_entry),
+                "수량": 1,
+                "매입금액": int(last_entry) if last_entry > 0 else 0,
+                "요양원여부": "N",
+                "메모": str(s.get("메모", "간편입력")),
+                "업데이트일": str(s.get("업데이트일", today_str())),
+                "__입력방식": method,
+                "__기준가신뢰": trust,
+            })
+        if simple_rows:
+            simple_source = pd.DataFrame(simple_rows)
+            judgement_source = pd.concat([judgement_source, simple_source], ignore_index=True)
+
     diag["저장차수"] = int(len(holdings_df))
+    diag["간편보유"] = int(len(simple_holdings_df))
+    diag["간편판단추가"] = int(simple_added)
+    diag["현재가추정간편"] = int(simple_estimated)
     diag["판단표시차수"] = int(len(judgement_source))
-    diag["판단방식"] = "저장 데이터는 전체 유지 / 판단표는 종목별 최고차수만 표시"
+    diag["판단방식"] = "정밀 차수 우선 / 정밀 없는 종목은 보유간편으로 최고차수 판단"
 
     # 같은 종목 여러 차수는 현재가/점수 조회를 1번만 하기 위한 캐시
     info_cache = {}
@@ -4334,6 +4631,8 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
         entry = _safe_float_value(h.get("진입단가", 0), 0)
         qty = _safe_float_value(h.get("수량", 0), 0)
         cost = _safe_float_value(h.get("매입금액", 0), 0)
+        input_method = str(h.get("__입력방식", "정밀") or "정밀")
+        trigger_trust = str(h.get("__기준가신뢰", "높음") or "높음")
         if cost <= 0 and entry > 0 and qty > 0:
             cost = entry * qty
         try:
@@ -4367,6 +4666,12 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
 
             info = info_cache.get(code, {}).copy()
             current = _safe_float_value(info.get("현재가", 0), 0)
+            # 간편(현재가추정): 마지막 진입가가 없으면 현재가를 기준단가로 삼아 다음 차수 기준가만 추정한다.
+            if str(input_method).startswith("간편") and entry <= 0 and current > 0:
+                entry = current
+                qty = max(qty, 1)
+                cost = entry * qty
+                trigger_trust = "낮음"
             eval_amount = current * qty if current > 0 and qty > 0 else 0
             pnl_amount = (eval_amount - cost) if current > 0 and qty > 0 and cost > 0 else 0
             pnl_pct = ((current / entry - 1) * 100) if entry > 0 and current > 0 else 0
@@ -4375,7 +4680,13 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
             info["종목보유최고차수"] = int(max_step_by_code.get(code, step))
             trigger_status = get_lot_trigger_status(step, pnl_pct)
             is_excluded = code in exclude_codes
-            judgement, allow_raw, reason = judge_holding_row(h, info, op, is_excluded=is_excluded)
+            h_for_judge = h.copy()
+            h_for_judge["진입단가"] = entry
+            h_for_judge["수량"] = qty
+            h_for_judge["매입금액"] = cost
+            auto_grade = classify_holding_auto_grade(info, is_excluded=is_excluded)
+            info["자동등급"] = auto_grade
+            judgement, allow_raw, reason = judge_holding_row(h_for_judge, info, op, is_excluded=is_excluded)
             live_trigger_price, live_trigger_hint = get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason)
 
             rows.append({
@@ -4385,6 +4696,9 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "판정사유": reason,
                 "코드": code,
                 "종목": name,
+                "입력방식": input_method,
+                "자동등급": auto_grade,
+                "기준가신뢰": trigger_trust,
                 "핵심행동": "",
                 "현재장판단": "",
                 "차수": int(step),
@@ -4392,6 +4706,8 @@ def build_holdings_judgement(holdings_df, op, max_rows=500):
                 "현재가": int(current),
                 "추가매수기준가": live_trigger_price,
                 "현재장도달시": live_trigger_hint,
+                "추천매수금액": int(op.get("오늘적용매수금액", op.get("기본매수금액", 150000))),
+                "확장상태": str(op.get("확장상태", "")),
                 "수량": qty,
                 "매입금액": int(cost),
                 "차수평가금액": int(eval_amount),
@@ -5373,6 +5689,9 @@ elif menu == "2. 운영판단기":
         st.write("실제평가자산:", fmt_won(result["실제평가자산"]), "/ 예수금비중:", f"{result['예수금비중']}%", "/ 매입금액비중:", f"{result['매입금액비중']}%")
         st.write("평가손익 해석:", result["평가손익해석"])
         st.write("기본매수금액:", fmt_won(result["기본매수금액"]), "/ 허용상한:", fmt_won(result["허용상한"]))
+        st.write("금액확장:", result.get("확장상태", ""), "/ 오늘적용매수금액:", fmt_won(result.get("오늘적용매수금액", result["기본매수금액"])), "/ 다음확장추천:", fmt_won(result.get("확장추천금액", result["기본매수금액"])))
+        st.write("확장판단:", result.get("확장잠금사유", ""))
+        st.write("공포매수:", result.get("공포매수상태", ""), "/", result.get("공포매수가이드", ""))
         st.write("목표종목수:", result["목표종목수"], "/ 최대종목수:", result["최대종목수"])
         st.write("액티브종목수:", result["액티브종목수"], "/ 요양원종목수:", result["요양원종목수"])
         st.write("예수금 방어선:", {k: fmt_won(v) for k, v in result["예수금방어선"].items()})
@@ -5663,17 +5982,21 @@ elif menu == "4. 보유종목 판단기":
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
+    simple_holdings_df = load_simple_holdings_df()
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("저장된 차수", f"{len(holdings_df)}개")
-    unique_codes = int(holdings_df["코드"].nunique()) if len(holdings_df) > 0 else 0
-    c2.metric("실제 보유종목", f"{unique_codes}개")
+    exact_codes_set = set(holdings_df["코드"].astype(str).str.zfill(6)) if len(holdings_df) > 0 else set()
+    simple_codes_set = set(simple_holdings_df["코드"].astype(str).str.zfill(6)) if len(simple_holdings_df) > 0 else set()
+    unique_codes = len(exact_codes_set | simple_codes_set)
+    c2.metric("판단대상 종목", f"{unique_codes}개")
     if len(holdings_df) > 0:
         c3.metric("총 매입금액", fmt_won(pd.to_numeric(holdings_df["매입금액"], errors="coerce").fillna(0).sum()))
         c4.metric("요양원 표시", f"{(holdings_df['요양원여부'].astype(str).str.upper()=='Y').sum()}개")
     else:
         c3.metric("총 매입금액", "0원")
         c4.metric("요양원 표시", "0개")
+    c5.metric("간편 보유", f"{len(simple_holdings_df)}개")
 
     with st.expander("보유차수 CSV 업로드/저장", expanded=(len(holdings_df) == 0)):
         st.write("CSV에 종목코드/종목명/차수/진입단가/수량/매입금액 중 가능한 컬럼이 있으면 자동 인식합니다.")
@@ -5718,6 +6041,51 @@ elif menu == "4. 보유종목 판단기":
                 st.error("추가된 차수 0개. 형식은 `종목명` 다음 줄에 `차수,진입단가,수량` 입니다.")
                 if not_found:
                     st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
+
+    with st.expander("간편 보유 입력(종목명,현재차수)", expanded=(len(holdings_df) == 0 and len(simple_holdings_df) == 0)):
+        st.write("정밀 차수 입력이 힘들 때 쓰는 공포매수 와꾸 입력입니다. A/B/C는 직접 쓰지 않고 앱이 자동 판단합니다.")
+        st.info("예: 동진쎄미켐,3  /  DB하이텍,2,174200  /  이수화학,1")
+        simple_text = st.text_area(
+            "간편 입력",
+            placeholder="동진쎄미켐,3\nDB하이텍,2,174200\n이수화학,1",
+            height=150,
+            key="simple_holding_text"
+        )
+        if st.button("간편 보유 추가/갱신", key="save_simple_holding_text"):
+            parsed_simple, not_found_simple = parse_simple_holding_text(simple_text, krx)
+            if len(parsed_simple) > 0:
+                current_simple = load_simple_holdings_df()
+                combined_simple = pd.concat([current_simple, parsed_simple], ignore_index=True)
+                save_simple_holdings_df(combined_simple)
+                st.success(f"간편 보유 저장 완료: {len(parsed_simple)}개")
+                if not_found_simple:
+                    st.warning("못 찾은 종목: " + ", ".join(not_found_simple[:20]))
+                st.rerun()
+            else:
+                st.error("추가된 간편 보유 0개. 형식은 `종목명,현재차수` 또는 `종목명,현재차수,마지막진입가` 입니다.")
+                if not_found_simple:
+                    st.warning("못 찾은 종목: " + ", ".join(not_found_simple[:20]))
+
+        if len(simple_holdings_df) > 0:
+            st.write("저장된 간편 보유")
+            simple_edit = st.data_editor(
+                simple_holdings_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                key="simple_holding_editor",
+                column_config=pinned_stock_column_config(simple_holdings_df)
+            )
+            b1, b2 = st.columns(2)
+            if b1.button("간편 보유 수정 저장", key="save_simple_holding_editor"):
+                save_simple_holdings_df(simple_edit)
+                st.success("간편 보유 수정 저장 완료")
+                st.rerun()
+            if b2.button("간편 보유 전체 삭제", key="delete_all_simple_holdings"):
+                save_simple_holdings_df(pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS))
+                st.success("간편 보유 전체 삭제 완료")
+                st.rerun()
+            st.download_button("간편 보유 CSV 다운로드", data=simple_holdings_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_simple_holdings.csv", mime="text/csv")
 
     st.subheader("저장된 보유차수")
     if len(holdings_df) == 0:
@@ -5799,8 +6167,8 @@ elif menu == "4. 보유종목 판단기":
         submitted = st.form_submit_button(hold_button_label, type="primary")
 
     if submitted:
-        if len(holdings_df) == 0:
-            st.error("저장된 보유차수가 없습니다.")
+        if len(holdings_df) == 0 and len(simple_holdings_df) == 0:
+            st.error("저장된 보유차수/간편보유가 없습니다.")
         else:
             cash = parse_won(cash_text)
             cost = parse_won(cost_text)
@@ -5812,15 +6180,16 @@ elif menu == "4. 보유종목 판단기":
             c1.metric("운영모드", op["운영모드"])
             c2.metric("일일 매수상한", fmt_won(op.get("일일매수상한", 0)))
             c3.metric("추가매수 가능개수", f"{op.get('추가매수가능개수', 0)}개")
-            c4.metric("기본매수금액", fmt_won(op.get("기본매수금액", 0)))
+            c4.metric("오늘적용금액", fmt_won(op.get("오늘적용매수금액", op.get("기본매수금액", 0))))
+            st.caption(f"금액확장: {op.get('확장상태','')} / {op.get('확장잠금사유','')} | 공포매수: {op.get('공포매수상태','')} / {op.get('공포매수가이드','')}")
 
             with st.spinner("보유차수 현재가/점수 계산 중..."):
-                result, diag = build_holdings_judgement(holdings_df, op, max_rows=500)
+                result, diag = build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=simple_holdings_df)
             if diag.get("error"):
                 st.error(diag["error"])
             else:
                 st.success("보유차수 판단 완료")
-                st.caption("저장 데이터는 1차/2차 모두 유지됩니다. 판단표는 종목별 현재 보유 최고차수 1줄만 표시하고, 종목/코드를 앞쪽에 배치했습니다. 종목평균단가_자동/종목전체손익률_자동은 전체 저장차수 기준입니다.")
+                st.caption("정밀 보유차수는 1차/2차 모두 유지하고, 판단표는 종목별 현재 보유 최고차수 1줄만 표시합니다. 정밀 데이터가 없는 종목은 보유간편 탭의 현재차수로 판단하며 A/B/C는 앱이 자동 판정합니다.")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
                 buy_df, wait_df, recovery_df = split_holding_action_tables(result)
