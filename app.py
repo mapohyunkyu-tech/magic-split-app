@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_B_GRADE_REACHED_REVIEW_20260619"
+APP_VERSION = "v27_OPERATION_TOP50_GUIDE_SYNC_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4164,7 +4164,7 @@ def decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_
         fear_guide = "예수금 절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
     elif mode == "회수모드":
         fear_status = "공포매수허용"
-        fear_guide = "회수모드: 신규·금액확장 금지. 보유 A급 + 마지막 차수 기준가 도달분만 1~2개 예외 허용"
+        fear_guide = "회수모드: 신규·금액확장 금지. 보유 A급 기준도달분은 공포매수 탄창제 슬롯 안에서 허용"
     elif loss_pct <= -5 or mode in ["제한회복모드", "제한매수모드", "손실주의 정상운용"]:
         fear_status = "공포매수허용"
         fear_guide = "금액확장 잠금. 기존 보유 A/B 등급 + 마지막 차수 기준가 도달분만 기본금액으로 확인"
@@ -5875,7 +5875,7 @@ elif menu == "2. 운영판단기":
     nursing_df = load_nursing_df()
     auto_nursing_count = int((nursing_df["상태"] == "요양원").sum()) if len(nursing_df) else 0
     op_defaults = get_effective_operation_settings(auto_nursing_count)
-    st.caption("v26은 어제값/오늘값을 선택 저장합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다. 테스트모드는 저장하지 않습니다.")
+    st.caption("v27 운영판단기는 어제값/오늘값 선택 저장과 테스트모드를 지원합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 공포매수/금액확장 판단의 기준값으로 사용됩니다.")
     show_operation_test_banner("operation")
 
     col_mode1, col_mode2, col_mode3 = st.columns([1.3, 1.2, 1.5])
@@ -5978,15 +5978,15 @@ elif menu == "2. 운영판단기":
             st.info("특이사항 없음")
 
         if result["운영모드"] in ["강한 회수모드", "회수모드"]:
-            st.error("신규매수 금지. 익절/본전/요양원 차수 매도 후 재매수하지 말고 예수금 회복.")
+            st.error("신규매수 금지 / 금액확장 금지. 단, 보유차수 판단기에서 A급 기준도달 공포매수는 탄창제 한도 내 예외 허용합니다.")
         elif result["운영모드"] == "제한회복모드":
-            st.warning(f"신규매수 금지. 보유종목 판단기에서 추가매수 A등급만 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도 내 제한 허용.")
+            st.warning(f"신규매수 금지 / 금액확장 금지. 보유차수 판단기에서 A급 기준도달은 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도 내 공포매수 허용.")
         elif result["운영모드"] == "제한매수모드":
-            st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. 추가매수는 A/B등급만 제한 허용.")
+            st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. 금액확장은 잠금 여부를 따르고, 보유차수 추가매수는 A/B등급 기준도달분만 제한 허용.")
         elif result["운영모드"] == "손실주의 정상운용":
-            st.warning(f"예수금은 충분하지만 남은 평가손실이 큽니다. 신규매수 최대 {result['신규매수가능개수']}개, 보유 A/B등급만 추가매수.")
+            st.warning(f"예수금은 충분하지만 남은 평가손실이 큽니다. 신규매수 최대 {result['신규매수가능개수']}개, 보유 A/B등급 기준도달분만 추가매수.")
         else:
-            st.success(f"정상운용 가능. 신규매수 최대 {result['신규매수가능개수']}개.")
+            st.success(f"정상운용 가능. 신규매수 최대 {result['신규매수가능개수']}개. 금액확장은 확장상태가 허용일 때만 적용합니다.")
 
 # =====================================================
 # 3. TOP50
@@ -5995,6 +5995,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
+    st.caption("TOP50은 신규 후보 참고용입니다. 회수/공포매수 구간에서는 실제 매수 판단은 보유차수 판단기의 A급/B급/기준가 도달표를 우선합니다.")
     st.caption("FDR KRX를 기본으로 쓰고, 실패 시 KRX 직접 CSV/KOSPI/KOSDAQ 백업으로 전체시장 유니버스를 복구합니다.")
 
     nursing_df = load_nursing_df()
@@ -6241,7 +6242,7 @@ elif menu == "3. TOP50":
             save_top50_df(top50)
             st.success("TOP50 생성 완료. Google Sheets의 TOP50 탭에도 저장했습니다.")
         if new_buy_limit <= 0 and not use_relaxed:
-            st.warning("현재 신규매수 0개. 아래 후보는 참고용입니다.")
+            st.warning("현재 신규매수 0개. TOP50은 신규 후보 참고용이며, 공포매수는 보유차수 판단기에서 A급/B급 기준도달표를 확인하세요.")
         if use_relaxed:
             st.warning("완화후보는 필터를 낮춘 참고용입니다. 실제 매수는 차트/보유 여부 확인 후 판단.")
         show_pinned_dataframe(top50, pin_rank=True)
@@ -6253,7 +6254,7 @@ elif menu == "3. TOP50":
 
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
-    st.caption("v26은 어제값/오늘값 선택 저장과 테스트모드를 지원합니다. 오늘값은 TOP50/보유차수 판단기에 연동되고, 어제값은 비교용으로만 저장됩니다.")
+    st.caption("v27 보유차수 판단기는 운영판단기의 오늘값/테스트값을 받아 공포매수 탄창, 금액확장 잠금, A/B/C 자동등급, 기준가 도달 여부를 계산합니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
@@ -6524,7 +6525,9 @@ else:
 - 보유종목은 TOP50 유니버스 밖이어도 강제 계산 대상에 포함됩니다.
 - 보유차수 판단기는 1차→2차 -10%, 2차→3차 -11.11%, 3차→4차 -12.50%, 4차→5차 -14.29%, 5차→6차 -16.67% 기준에 도달해야 매수가능 후보로 표시합니다.
 - 한 종목에 여러 차수를 입력하면 현재 보유 최고 차수만 다음 차수 매수 기준으로 판단합니다. 낮은 차수 행은 판단표에서 숨깁니다.
-- 보유차수 판단 결과 위에 `오늘매수가능`, `기준가대기`, `회수/익절검토` 요약표를 먼저 보여줍니다.
+- 보유차수 판단 결과 위에 `오늘매수가능`, `B급 도달검토`, `기준가대기`, `회수/익절검토` 요약표를 먼저 보여줍니다.
+- 운영판단기는 신규매수/금액확장/공포매수를 분리합니다. 회수모드에서도 보유 A급 기준도달분은 공포매수 탄창제 한도 내 예외 허용됩니다.
+- TOP50은 신규 후보 참고용입니다. 공포매수 실행 판단은 보유차수 판단기를 우선합니다.
 - FDR 현재가가 늦을 수 있으므로 `현재장판단`에는 HTS/증권앱 현재가로 볼 기준가를 짧게 표시합니다.
 
 ### 사용 순서
