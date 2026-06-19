@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_OPERATION_TOP50_GUIDE_SYNC_20260619"
+APP_VERSION = "v27_OPERATION_FEAR_BUY_WORDING_FIX_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5966,7 +5966,17 @@ elif menu == "2. 운영판단기":
         st.write("기본매수금액:", fmt_won(result["기본매수금액"]), "/ 허용상한:", fmt_won(result["허용상한"]))
         st.write("금액확장:", result.get("확장상태", ""), "/ 오늘적용매수금액:", fmt_won(result.get("오늘적용매수금액", result["기본매수금액"])), "/ 다음확장추천:", fmt_won(result.get("확장추천금액", result["기본매수금액"])))
         st.write("확장판단:", result.get("확장잠금사유", ""))
-        st.write("공포매수:", result.get("공포매수상태", ""), "/", result.get("공포매수가이드", ""))
+        st.write("보유 공포매수:", result.get("공포매수상태", ""), "/", result.get("공포매수가이드", ""))
+        if str(result.get("공포매수상태", "")).startswith("공포매수허용"):
+            st.success(
+                "오늘 결론: TOP50 신규매수와 금액확장은 금지/잠금. "
+                "단, 보유차수 판단기의 🟢 A급 기준도달은 공포매수 탄창제 한도 안에서 허용. "
+                "🟠 B급은 수동검토, 🟡 기준가대기는 아직 대기."
+            )
+        else:
+            st.warning(
+                "오늘 결론: 공포매수도 보류. 예수금 절대방어선 또는 강한 회수모드에서는 현금확보가 우선."
+            )
         st.write("목표종목수:", result["목표종목수"], "/ 최대종목수:", result["최대종목수"])
         st.write("액티브종목수:", result["액티브종목수"], "/ 요양원종목수:", result["요양원종목수"])
         st.write("예수금 방어선:", {k: fmt_won(v) for k, v in result["예수금방어선"].items()})
@@ -5977,14 +5987,16 @@ elif menu == "2. 운영판단기":
         else:
             st.info("특이사항 없음")
 
-        if result["운영모드"] in ["강한 회수모드", "회수모드"]:
-            st.error("신규매수 금지 / 금액확장 금지. 단, 보유차수 판단기에서 A급 기준도달 공포매수는 탄창제 한도 내 예외 허용합니다.")
+        if result["운영모드"] == "강한 회수모드":
+            st.error("강한 회수모드: 신규매수 금지 / 금액확장 금지 / 보유 공포매수도 보류. 현금확보가 우선입니다.")
+        elif result["운영모드"] == "회수모드":
+            st.info(f"회수모드: 신규매수 금지 / 금액확장 잠금. 보유 공포매수는 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도에서 🟢 A급 기준도달만 허용합니다.")
         elif result["운영모드"] == "제한회복모드":
-            st.warning(f"신규매수 금지 / 금액확장 금지. 보유차수 판단기에서 A급 기준도달은 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도 내 공포매수 허용.")
+            st.warning(f"제한회복모드: 신규매수 금지 / 금액확장 잠금. 보유 공포매수는 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도에서 허용합니다.")
         elif result["운영모드"] == "제한매수모드":
-            st.warning(f"신규매수 최대 {result['신규매수가능개수']}개. 금액확장은 잠금 여부를 따르고, 보유차수 추가매수는 A/B등급 기준도달분만 제한 허용.")
+            st.warning(f"제한매수모드: 신규매수 최대 {result['신규매수가능개수']}개. 금액확장은 잠금 여부를 따르고, 보유차수 추가매수는 A/B등급 기준도달분만 제한 허용.")
         elif result["운영모드"] == "손실주의 정상운용":
-            st.warning(f"예수금은 충분하지만 남은 평가손실이 큽니다. 신규매수 최대 {result['신규매수가능개수']}개, 보유 A/B등급 기준도달분만 추가매수.")
+            st.warning(f"손실주의 정상운용: 신규매수 최대 {result['신규매수가능개수']}개. 보유 A/B등급 기준도달분은 추가매수 가능하지만 금액확장은 안정 확인 후 적용.")
         else:
             st.success(f"정상운용 가능. 신규매수 최대 {result['신규매수가능개수']}개. 금액확장은 확장상태가 허용일 때만 적용합니다.")
 
@@ -5995,7 +6007,7 @@ elif menu == "2. 운영판단기":
 elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
-    st.caption("TOP50은 신규 후보 참고용입니다. 회수/공포매수 구간에서는 실제 매수 판단은 보유차수 판단기의 A급/B급/기준가 도달표를 우선합니다.")
+    st.caption("TOP50은 신규 후보 참고용입니다. 회수/공포매수 구간에서는 TOP50 신규매수는 보류하고, 실제 공포매수 판단은 보유차수 판단기의 A급/B급/기준가 도달표를 우선합니다.")
     st.caption("FDR KRX를 기본으로 쓰고, 실패 시 KRX 직접 CSV/KOSPI/KOSDAQ 백업으로 전체시장 유니버스를 복구합니다.")
 
     nursing_df = load_nursing_df()
@@ -6255,6 +6267,7 @@ elif menu == "3. TOP50":
 elif menu == "4. 보유종목 판단기":
     st.header("4. 보유차수 판단기")
     st.caption("v27 보유차수 판단기는 운영판단기의 오늘값/테스트값을 받아 공포매수 탄창, 금액확장 잠금, A/B/C 자동등급, 기준가 도달 여부를 계산합니다.")
+    st.info("운영판단기가 막는 것은 TOP50 신규매수와 금액확장입니다. 보유차수 판단기의 🟢 오늘매수가능은 기존 보유종목 공포매수 후보로, 탄창제 한도 안에서 허용됩니다.")
 
     krx = load_krx_master_fdr()
     holdings_df = load_holdings_df()
