@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SIMPLE_HOLDING_OVERRIDE_FIX_20260619"
+APP_VERSION = "v27_FEAR_BUY_AMMO_SYSTEM_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3972,6 +3972,132 @@ def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
 
 
 
+
+def decide_fear_buy_ammo_policy(book_asset, cash, unrealized, base_amount, cash_lines, mode):
+    """공포매수 탄창제.
+
+    핵심 철학:
+    - 금액확장/신규매수는 잠근다.
+    - 기존 보유종목의 차수 기준가 도달분은 공포매수로 열어둔다.
+    - 단, 예수금이 먼저 죽지 않게 방어예수금과 최대 슬롯을 계산한다.
+    """
+    book_asset = max(int(book_asset or 0), 0)
+    cash = int(cash or 0)
+    unrealized = int(unrealized or 0)
+    base_amount = int(base_amount or 150000)
+    hard = int(cash_lines.get("절대방어선", 0))
+    warning = int(cash_lines.get("경고선", 0))
+    normal = int(cash_lines.get("정상선", 0))
+
+    loss_pct = (unrealized / book_asset * 100) if book_asset > 0 else 0.0
+    cash_ratio = (cash / book_asset * 100) if book_asset > 0 else 0.0
+
+    # 공포매수 전용 방어선: 절대방어선보다 높고, 여유선보다 낮게 둔다.
+    # 예수금 전체를 탄창으로 보지 않고 이 선 위쪽만 분할 사용한다.
+    defense_cash = int(max(warning, book_asset * 0.15, base_amount * 80))
+    fear_ammo = max(cash - defense_cash, 0)
+
+    if cash < hard or mode == "강한 회수모드":
+        max_slots = 0
+        status = "현금방어우선"
+        guide = "절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
+    elif cash < warning or cash_ratio < 10:
+        max_slots = 0
+        status = "현금방어우선"
+        guide = "예수금 경고구간: 오늘은 회수/현금확보 우선"
+    elif cash_ratio < 15:
+        max_slots = 1
+        status = "공포매수허용"
+        guide = "예수금 15% 미만: A급 기준도달 1개만"
+    elif cash_ratio < 20:
+        max_slots = 2
+        status = "공포매수허용"
+        guide = "예수금 20% 미만: A급 기준도달 최대 2개"
+    elif loss_pct <= -15:
+        max_slots = 2
+        status = "공포매수허용"
+        guide = "손실 -15% 이하: 금액확장 금지, A급 기준도달 최대 2개"
+    elif loss_pct <= -10:
+        max_slots = 4
+        status = "공포매수허용"
+        guide = "손실 -10%대: A급 기준도달 수/시장급락에 따라 2~4개"
+    elif loss_pct <= -5:
+        max_slots = 4
+        status = "공포매수허용"
+        guide = "손실주의 구간: A/B급 기준도달 수에 따라 2~4개"
+    else:
+        max_slots = 3 if mode in ["회수모드", "제한회복모드", "제한매수모드"] else 5
+        status = "일반운용"
+        guide = "공포구간 아님: 운영모드 기준으로 제한 운용"
+
+    # 탄창이 너무 작으면 슬롯도 줄인다. 다만 2개 기본 운용이 가능한 현금이면 최소 2개는 남긴다.
+    ammo_slots_by_20days = int((fear_ammo / 20) // base_amount) if base_amount > 0 else 0
+    if max_slots > 0:
+        if fear_ammo < base_amount:
+            max_slots = 0
+        elif cash_ratio < 20:
+            max_slots = min(max_slots, max(1, ammo_slots_by_20days + 1))
+        else:
+            max_slots = min(max_slots, max(2, ammo_slots_by_20days + 2))
+
+    daily_cap = int(max_slots * base_amount)
+    return {
+        "공포매수방어예수금": int(defense_cash),
+        "공포매수탄창": int(fear_ammo),
+        "공포매수최대슬롯": int(max_slots),
+        "공포매수일일상한": int(daily_cap),
+        "공포매수상태_탄창": status,
+        "공포매수가이드_탄창": guide,
+    }
+
+
+def calc_market_crash_level(regime_detail):
+    """당일 KOSPI/KOSDAQ 하락 강도를 0~2로 단순화."""
+    try:
+        k1 = regime_detail.get("KOSPI_당일등락률", None)
+        k2 = regime_detail.get("KOSDAQ_당일등락률", None)
+        k1 = 0.0 if k1 is None or str(k1) == "nan" else float(k1)
+        k2 = 0.0 if k2 is None or str(k2) == "nan" else float(k2)
+    except Exception:
+        return 0
+    if min(k1, k2) <= -2.5 or (k1 <= -1.5 and k2 <= -1.5):
+        return 2
+    if min(k1, k2) <= -1.5 or (k1 <= -1.0 and k2 <= -1.0):
+        return 1
+    return 0
+
+
+def decide_dynamic_fear_buy_slots(op, out, target_amount, regime_detail):
+    """후보 개수와 시장 급락 강도에 따라 오늘 실제 공포매수 슬롯을 정한다."""
+    if out is None or len(out) == 0:
+        return {"최종슬롯": 0, "A급도달": 0, "B급도달": 0, "시장급락레벨": 0, "설명": "판단대상 없음"}
+
+    max_slots = int(op.get("공포매수최대슬롯", op.get("추가매수가능개수", 0)) or 0)
+    if max_slots <= 0 or not str(op.get("공포매수상태", "")).startswith("공포매수허용"):
+        return {"최종슬롯": 0, "A급도달": 0, "B급도달": 0, "시장급락레벨": 0, "설명": "공포매수 비허용"}
+
+    a_mask = out["보유판정"].eq("추가매수 A") if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
+    b_mask = out["보유판정"].eq("추가매수 B") if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
+    a_count = int(out.loc[a_mask, "코드"].drop_duplicates().shape[0]) if "코드" in out.columns else int(a_mask.sum())
+    b_count = int(out.loc[b_mask, "코드"].drop_duplicates().shape[0]) if "코드" in out.columns else int(b_mask.sum())
+    crash = calc_market_crash_level(regime_detail or {})
+
+    if a_count <= 0:
+        slots = 0
+    else:
+        slots = min(2, a_count)
+        if a_count >= 5 or crash >= 2:
+            slots = max(slots, min(3, a_count))
+        if a_count >= 8 and crash >= 1:
+            slots = max(slots, min(4, a_count))
+        if a_count >= 10 and crash >= 2:
+            slots = max(slots, min(5, a_count))
+
+    budget_count = int(op.get("일일매수상한", 0) // target_amount) if target_amount > 0 else 0
+    final_slots = int(min(max_slots, budget_count, slots))
+    reason = f"A급 기준도달 {a_count}개 / B급 {b_count}개 / 시장급락레벨 {crash} / 최대탄창 {max_slots}개"
+    return {"최종슬롯": final_slots, "A급도달": a_count, "B급도달": b_count, "시장급락레벨": crash, "설명": reason}
+
 def get_next_scale_amount(base_amount):
     """금액확장 후보 금액. 안정 조건이 맞을 때만 적용한다."""
     base_amount = int(base_amount or 150000)
@@ -4173,23 +4299,31 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         reasons.append("현재 보유종목수가 목표종목수 도달: 신규매수 중단, 보유종목 기준도달 추가매수만 제한 허용")
 
     expansion_guard = decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_holdings, base_amount, cash_lines, mode)
+    ammo_policy = decide_fear_buy_ammo_policy(book_asset, cash, unrealized, base_amount, cash_lines, mode)
 
-    daily_budget = calc_daily_buy_budget(cash, base_amount, cash_lines, mode)
+    # 금액확장은 잠그되, 공포매수 탄창은 별도로 계산한다.
+    base_daily_budget = calc_daily_buy_budget(cash, base_amount, cash_lines, mode)
+    if str(ammo_policy.get("공포매수상태_탄창", "")).startswith("공포매수허용"):
+        daily_budget = max(int(base_daily_budget), int(ammo_policy.get("공포매수일일상한", 0)))
+        expansion_guard["공포매수상태"] = ammo_policy.get("공포매수상태_탄창", expansion_guard.get("공포매수상태", ""))
+        expansion_guard["공포매수가이드"] = ammo_policy.get("공포매수가이드_탄창", expansion_guard.get("공포매수가이드", ""))
+    else:
+        daily_budget = int(base_daily_budget)
     room_to_target = max(int(target_holdings) - int(total_holdings), 0)
 
     if mode == "강한 회수모드":
         new_buy_count = 0
         add_buy_count = 0
     elif mode == "회수모드":
-        # 회수모드는 신규매수/금액확장은 금지하지만, 공포매수 예외는 남긴다.
-        # A급 + 마지막 차수 기준가 도달 종목만 최종 판단표에서 매수가능으로 올라간다.
+        # 회수모드는 신규매수/금액확장은 금지.
+        # 공포매수 탄창제에 따라 후보가 많고 시장이 빠지는 날에는 2개 고정이 아니라 최대 3~5개까지 열 수 있다.
         budget_count = int(daily_budget // base_amount)
         new_buy_count = 0
-        add_buy_count = min(budget_count, 2)
+        add_buy_count = min(budget_count, int(ammo_policy.get("공포매수최대슬롯", 0)))
     elif mode == "제한회복모드":
         budget_count = int(daily_budget // base_amount)
         new_buy_count = 0
-        add_buy_count = min(budget_count, 4)
+        add_buy_count = min(budget_count, int(ammo_policy.get("공포매수최대슬롯", 4)))
     elif mode == "제한매수모드":
         budget_count = int(daily_budget // base_amount)
         new_buy_count = min(room_to_target, budget_count, 2)
@@ -4241,6 +4375,10 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
         "확장잠금사유": expansion_guard.get("확장잠금사유", ""),
         "공포매수상태": expansion_guard.get("공포매수상태", ""),
         "공포매수가이드": expansion_guard.get("공포매수가이드", ""),
+        "공포매수방어예수금": int(ammo_policy.get("공포매수방어예수금", 0)),
+        "공포매수탄창": int(ammo_policy.get("공포매수탄창", 0)),
+        "공포매수최대슬롯": int(ammo_policy.get("공포매수최대슬롯", 0)),
+        "공포매수일일상한": int(ammo_policy.get("공포매수일일상한", 0)),
         "목표종목수": target_holdings,
         "최대종목수": max_holdings,
         "예수금방어선": cash_lines,
@@ -4856,7 +4994,20 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
 
     count_limit = max(int(add_limit), 0)
     budget_count = int(daily_budget // target_amount) if target_amount > 0 else 0
-    final_limit = min(count_limit, budget_count)
+
+    # 공포매수 탄창제: 회수/손실 구간에서는 고정 2개가 아니라
+    # A급 기준도달 개수 + 당일 시장 급락 강도 + 예수금 탄창으로 최종 슬롯을 정한다.
+    dynamic_policy = decide_dynamic_fear_buy_slots(op, out, target_amount, regime_detail)
+    if str(op.get("공포매수상태", "")).startswith("공포매수허용"):
+        final_limit = int(dynamic_policy.get("최종슬롯", 0))
+    else:
+        final_limit = min(count_limit, budget_count)
+    diag["공포매수최종슬롯"] = int(final_limit)
+    diag["공포매수A급도달"] = int(dynamic_policy.get("A급도달", 0))
+    diag["공포매수B급도달"] = int(dynamic_policy.get("B급도달", 0))
+    diag["시장급락레벨"] = int(dynamic_policy.get("시장급락레벨", 0))
+    diag["공포매수슬롯설명"] = dynamic_policy.get("설명", "")
+
     out["오늘추가매수"] = "대기"
     if final_limit > 0 and allow_mask.any():
         # 같은 종목이 여러 차수로 잡혀도 오늘 매수가능은 종목당 1줄만 표시한다.
@@ -6254,6 +6405,7 @@ elif menu == "4. 보유종목 판단기":
             c3.metric("추가매수 가능개수", f"{op.get('추가매수가능개수', 0)}개")
             c4.metric("오늘적용금액", fmt_won(op.get("오늘적용매수금액", op.get("기본매수금액", 0))))
             st.caption(f"금액확장: {op.get('확장상태','')} / {op.get('확장잠금사유','')} | 공포매수: {op.get('공포매수상태','')} / {op.get('공포매수가이드','')}")
+            st.caption(f"공포매수 탄창: 방어예수금 {fmt_won(op.get('공포매수방어예수금', 0))} / 사용가능탄창 {fmt_won(op.get('공포매수탄창', 0))} / 최대슬롯 {op.get('공포매수최대슬롯', 0)}개")
 
             with st.spinner("보유차수 현재가/점수 계산 중..."):
                 result, diag = build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=simple_holdings_df)
@@ -6263,6 +6415,7 @@ elif menu == "4. 보유종목 판단기":
                 st.success("보유차수 판단 완료")
                 st.caption("정밀 보유차수는 1차/2차 모두 유지합니다. 판단표는 종목별 최고차수 1줄만 표시하되, 보유간편 탭에 같거나 더 높은 현재차수가 있으면 그 값을 판단용으로 보정합니다. A/B/C는 앱이 자동 판정합니다.")
                 st.info(f"간편보유 {diag.get('간편보유', 0)}개 중 판단반영 {diag.get('간편판단반영', 0)}개 / 정밀차수보정 {diag.get('간편정밀차수보정', 0)}개 / 신규판단 {diag.get('간편신규판단', 0)}개")
+                st.info(f"공포매수 탄창판정: 최종슬롯 {diag.get('공포매수최종슬롯', 0)}개 / A급 기준도달 {diag.get('공포매수A급도달', 0)}개 / B급 {diag.get('공포매수B급도달', 0)}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
                 buy_df, wait_df, recovery_df = split_holding_action_tables(result)
