@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_OPERATION_FEAR_BUY_WORDING_FIX_20260619"
+APP_VERSION = "v27_PLAIN_KOREAN_FEAR_BUY_GUIDE_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3955,7 +3955,11 @@ def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
     hard = int(cash_lines.get("절대방어선", 0))
     available = max(cash - hard, 0)
     if mode == "강한 회수모드":
-        return 0
+        # 강한 회수모드도 공포매수 철학을 완전히 끄지는 않는다.
+        # 절대방어선 위에 현금이 남아 있으면 A급 기준도달 1개만 예외 검토할 수 있게 최소 탄창을 남긴다.
+        if cash <= hard:
+            return 0
+        return int(min(available * 0.02, base_amount * 1))
     if mode == "회수모드":
         # 회수모드라도 공포매수 철학은 남긴다.
         # 신규/금액확장은 막고, 보유 A급이 마지막 차수 기준가에 도달한 경우만
@@ -3997,10 +4001,14 @@ def decide_fear_buy_ammo_policy(book_asset, cash, unrealized, base_amount, cash_
     defense_cash = int(max(warning, book_asset * 0.15, base_amount * 80))
     fear_ammo = max(cash - defense_cash, 0)
 
-    if cash < hard or mode == "강한 회수모드":
+    if cash < hard:
         max_slots = 0
         status = "현금방어우선"
-        guide = "절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
+        guide = "예수금이 절대방어선 아래라 오늘은 매수보다 현금확보가 우선"
+    elif mode == "강한 회수모드":
+        max_slots = 1
+        status = "공포매수허용"
+        guide = "강한 회수모드: 신규·금액확장은 금지. 단, A급 기준도달이 있으면 1개까지만 예외 검토"
     elif cash < warning or cash_ratio < 10:
         max_slots = 0
         status = "현금방어우선"
@@ -4074,7 +4082,7 @@ def decide_dynamic_fear_buy_slots(op, out, target_amount, regime_detail):
 
     max_slots = int(op.get("공포매수최대슬롯", op.get("추가매수가능개수", 0)) or 0)
     if max_slots <= 0 or not str(op.get("공포매수상태", "")).startswith("공포매수허용"):
-        return {"최종슬롯": 0, "A급도달": 0, "B급도달": 0, "시장급락레벨": 0, "설명": "공포매수 비허용"}
+        return {"최종슬롯": 0, "A급도달": 0, "B급도달": 0, "시장급락레벨": 0, "설명": "오늘은 자동 공포매수 슬롯이 없습니다. 새 종목/금액확장은 쉬고 현금방어가 우선입니다."}
 
     a_mask = out["보유판정"].eq("추가매수 A") if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
     b_mask = out["보유판정"].isin(["추가매수 B", "B급 도달검토"]) if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
@@ -4159,9 +4167,12 @@ def decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_
     # 하락/손실 구간이라고 해서 공포매수를 막지 않는다.
     # 다만 예수금 절대방어선 붕괴나 강한 회수모드에서는 현금확보를 우선한다.
     hard_line = int(cash_lines.get("절대방어선", 0))
-    if cash < hard_line or mode == "강한 회수모드":
+    if cash < hard_line:
         fear_status = "현금방어우선"
-        fear_guide = "예수금 절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
+        fear_guide = "예수금 절대방어선 아래: 오늘은 매수보다 현금확보가 우선"
+    elif mode == "강한 회수모드":
+        fear_status = "공포매수허용"
+        fear_guide = "강한 회수모드: 새 종목/금액확장은 금지. 보유 A급 기준도달만 1개까지 예외 검토"
     elif mode == "회수모드":
         fear_status = "공포매수허용"
         fear_guide = "회수모드: 신규·금액확장 금지. 보유 A급 기준도달분은 공포매수 탄창제 슬롯 안에서 허용"
@@ -4312,8 +4323,10 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     room_to_target = max(int(target_holdings) - int(total_holdings), 0)
 
     if mode == "강한 회수모드":
+        budget_count = int(daily_budget // base_amount)
         new_buy_count = 0
-        add_buy_count = 0
+        # 강한 회수모드에서는 신규/금액확장은 금지하지만 A급 기준도달 1개 예외만 열어둔다.
+        add_buy_count = min(budget_count, int(ammo_policy.get("공포매수최대슬롯", 0)), 1)
     elif mode == "회수모드":
         # 회수모드는 신규매수/금액확장은 금지.
         # 공포매수 탄창제에 따라 후보가 많고 시장이 빠지는 날에는 2개 고정이 아니라 최대 3~5개까지 열 수 있다.
@@ -5036,7 +5049,9 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
     out = out.sort_values(["허용순위", "기준도달여부", "기준남은값", "점수", "거래대금점수"], ascending=[False, True, True, False, False]).reset_index(drop=True)
     out["순위"] = np.arange(1, len(out) + 1)
 
-    if mode == "회수모드" and str(op.get("공포매수상태", "")).startswith("공포매수허용"):
+    if mode == "강한 회수모드" and str(op.get("공포매수상태", "")).startswith("공포매수허용"):
+        allow_mask = out["보유판정"].eq("추가매수 A")
+    elif mode == "회수모드" and str(op.get("공포매수상태", "")).startswith("공포매수허용"):
         allow_mask = out["보유판정"].eq("추가매수 A")
     elif mode == "제한회복모드":
         allow_mask = out["보유판정"].eq("추가매수 A")
@@ -5969,13 +5984,14 @@ elif menu == "2. 운영판단기":
         st.write("보유 공포매수:", result.get("공포매수상태", ""), "/", result.get("공포매수가이드", ""))
         if str(result.get("공포매수상태", "")).startswith("공포매수허용"):
             st.success(
-                "오늘 결론: TOP50 신규매수와 금액확장은 금지/잠금. "
-                "단, 보유차수 판단기의 🟢 A급 기준도달은 공포매수 탄창제 한도 안에서 허용. "
-                "🟠 B급은 수동검토, 🟡 기준가대기는 아직 대기."
+                "오늘 결론을 쉽게 풀면: 새 종목은 사지 말고, 15만원을 20만원/25만원으로 키우지도 마세요. "
+                "대신 보유차수 판단기에서 🟢 오늘매수가능으로 뜨는 A급 기준도달 종목만 탄창 한도 안에서 공포매수 가능합니다. "
+                "🟠 B급은 바로 매수 신호가 아니라 수동검토, 🟡 기준가대기는 아직 기다림입니다."
             )
         else:
             st.warning(
-                "오늘 결론: 공포매수도 보류. 예수금 절대방어선 또는 강한 회수모드에서는 현금확보가 우선."
+                "오늘 결론을 쉽게 풀면: 새 종목도 쉬고, 금액확장도 쉬고, 공포매수도 자동 추천은 없습니다. "
+                "이유는 예수금 방어가 우선이거나 A급 기준도달 후보가 없기 때문입니다."
             )
         st.write("목표종목수:", result["목표종목수"], "/ 최대종목수:", result["최대종목수"])
         st.write("액티브종목수:", result["액티브종목수"], "/ 요양원종목수:", result["요양원종목수"])
@@ -5988,7 +6004,7 @@ elif menu == "2. 운영판단기":
             st.info("특이사항 없음")
 
         if result["운영모드"] == "강한 회수모드":
-            st.error("강한 회수모드: 신규매수 금지 / 금액확장 금지 / 보유 공포매수도 보류. 현금확보가 우선입니다.")
+            st.error("강한 회수모드: 새 종목 매수 금지 / 금액확장 금지. 단, 보유차수 판단기에서 🟢 A급 기준도달이 뜨면 최대 1개까지만 예외 검토합니다. 후보가 없으면 오늘은 쉬는 날입니다.")
         elif result["운영모드"] == "회수모드":
             st.info(f"회수모드: 신규매수 금지 / 금액확장 잠금. 보유 공포매수는 최대 {result['추가매수가능개수']}개 / {fmt_won(result['일일매수상한'])} 한도에서 🟢 A급 기준도달만 허용합니다.")
         elif result["운영모드"] == "제한회복모드":
@@ -6475,6 +6491,10 @@ elif menu == "4. 보유종목 판단기":
             c4.metric("오늘적용금액", fmt_won(op.get("오늘적용매수금액", op.get("기본매수금액", 0))))
             st.caption(f"금액확장: {op.get('확장상태','')} / {op.get('확장잠금사유','')} | 공포매수: {op.get('공포매수상태','')} / {op.get('공포매수가이드','')}")
             st.caption(f"공포매수 탄창: 방어예수금 {fmt_won(op.get('공포매수방어예수금', 0))} / 사용가능탄창 {fmt_won(op.get('공포매수탄창', 0))} / 최대슬롯 {op.get('공포매수최대슬롯', 0)}개")
+            if str(op.get('공포매수상태', '')).startswith('공포매수허용'):
+                st.info("쉽게 말하면: TOP50 새 종목은 안 사고, 금액도 키우지 않습니다. 보유종목 중 A급이 기준가에 닿았을 때만 공포매수 후보로 봅니다.")
+            else:
+                st.info("쉽게 말하면: 오늘은 새 종목도 쉬고, 금액확장도 쉬고, 공포매수 자동후보도 없는 방어일입니다.")
 
             with st.spinner("보유차수 현재가/점수 계산 중..."):
                 result, diag = build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=simple_holdings_df)
@@ -6488,7 +6508,16 @@ elif menu == "4. 보유종목 판단기":
                     st.warning(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
                 else:
                     st.success(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
-                st.info(f"공포매수 탄창판정: 최종슬롯 {diag.get('공포매수최종슬롯', 0)}개 / A급 기준도달 {diag.get('공포매수A급도달', 0)}개 / B급 {diag.get('공포매수B급도달', 0)}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
+                final_slots = int(diag.get('공포매수최종슬롯', 0) or 0)
+                a_reached = int(diag.get('공포매수A급도달', 0) or 0)
+                b_reached = int(diag.get('공포매수B급도달', 0) or 0)
+                if final_slots > 0:
+                    st.success(f"오늘 행동 요약: 🟢 A급 기준도달 {a_reached}개 중 탄창 한도상 {final_slots}개까지 매수 후보입니다. B급 {b_reached}개는 바로 매수가 아니라 수동검토입니다.")
+                elif a_reached <= 0 and b_reached <= 0:
+                    st.info("오늘 행동 요약: 공포매수 탄창은 있어도 A/B급 기준도달 종목이 없습니다. 즉 '공포매수 금지'가 아니라 '오늘은 살 놈이 없음'입니다.")
+                else:
+                    st.warning(f"오늘 행동 요약: 기준도달 후보는 있으나 현재 탄창/현금방어 조건 때문에 자동 매수 슬롯은 0개입니다. A급 {a_reached}개, B급 {b_reached}개는 수동검토만 하세요.")
+                st.info(f"공포매수 탄창판정: 최종슬롯 {final_slots}개 / A급 기준도달 {a_reached}개 / B급 {b_reached}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
                 buy_df, b_review_df, wait_df, recovery_df = split_holding_action_tables(result)
