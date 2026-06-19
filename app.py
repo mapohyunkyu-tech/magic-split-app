@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_AB_WAIT_FILTER_FIX_20260619"
+APP_VERSION = "v27_B_GRADE_REACHED_REVIEW_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4077,7 +4077,7 @@ def decide_dynamic_fear_buy_slots(op, out, target_amount, regime_detail):
         return {"최종슬롯": 0, "A급도달": 0, "B급도달": 0, "시장급락레벨": 0, "설명": "공포매수 비허용"}
 
     a_mask = out["보유판정"].eq("추가매수 A") if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
-    b_mask = out["보유판정"].eq("추가매수 B") if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
+    b_mask = out["보유판정"].isin(["추가매수 B", "B급 도달검토"]) if "보유판정" in out.columns else pd.Series([False] * len(out), index=out.index)
     a_count = int(out.loc[a_mask, "코드"].drop_duplicates().shape[0]) if "코드" in out.columns else int(a_mask.sum())
     b_count = int(out.loc[b_mask, "코드"].drop_duplicates().shape[0]) if "코드" in out.columns else int(b_mask.sum())
     crash = calc_market_crash_level(regime_detail or {})
@@ -4521,6 +4521,9 @@ def make_holding_action_label(row):
     if "요양원" in judge:
         return "⚫ 요양원/금지"
 
+    if judge == "B급 도달검토" or (auto_grade == "B" and reached == "도달" and today == "금지"):
+        return "🟠 B급 도달검토"
+
     # C/제외 등급은 기준가에 가까워져도 상단 '기준가대기'에 올리지 않는다.
     # 단, A/B급은 오늘추가매수가 금지로 표시되더라도 기준가 미도달이면
     # HTS에서 기준가만 감시할 수 있도록 '기준가대기'에 남긴다.
@@ -4553,6 +4556,8 @@ def make_holding_live_decision(row):
         return "앱 기준 이미 도달 / 예산·개수 안에서 가능"
     if "기준가대기" in action and trigger_price > 0:
         return f"HTS 현재가 {trigger_price:,}원 이하이면 후보"
+    if "B급 도달검토" in action:
+        return "B급 기준도달: 회수모드에서는 즉시매수 제외, 급락일/수동검토 후보"
     if "회수/익절" in action:
         return "수익권: 회수/분할매도 검토"
     if "금지" in action and str(row.get("자동등급", "")).strip() in ["C", "제외"]:
@@ -4570,8 +4575,9 @@ def split_holding_action_tables(result):
     """보유차수 판단 결과를 실제 액션별로 나눠 화면 위에 먼저 보여준다."""
     if result is None or len(result) == 0 or "핵심행동" not in result.columns:
         empty = pd.DataFrame()
-        return empty, empty, empty
+        return empty, empty, empty, empty
     buy = result[result["핵심행동"].astype(str).str.contains("오늘매수가능", na=False)].copy()
+    b_review = result[result["핵심행동"].astype(str).str.contains("B급 도달검토", na=False)].copy()
     wait = result[result["핵심행동"].astype(str).str.contains("기준가대기", na=False)].copy()
     recovery = result[result["핵심행동"].astype(str).str.contains("회수/익절", na=False)].copy()
     focus_cols = [
@@ -4579,7 +4585,24 @@ def split_holding_action_tables(result):
         "차수손익률", "기준까지남은하락률", "점수", "보유판정", "판정사유"
     ]
     focus_cols = [c for c in focus_cols if c in result.columns]
-    return buy[focus_cols], wait[focus_cols], recovery[focus_cols]
+    return buy[focus_cols], b_review[focus_cols], wait[focus_cols], recovery[focus_cols]
+
+
+def is_overheat_b_review_exception(info):
+    """과열주의 때문에 C로 떨어졌지만, 점수/거래대금/회전력이 강하면 B급 도달검토까지는 남긴다.
+
+    목적: 대덕전자처럼 60일 급등 이력이 있어 A급 매수가능까지는 애매하지만,
+    기준가 도달 + 고점수 + 고거래대금 + 고회전 종목을 완전 금지로 묻지 않기 위함.
+    """
+    heat = str(info.get("과열상태", ""))
+    if not ("과열" in heat or "추격" in heat):
+        return False
+    score = _safe_float_value(info.get("점수", 0), 0)
+    amount_score = _safe_float_value(info.get("거래대금점수", 0), 0)
+    rotation = _safe_float_value(info.get("회전점수", 0), 0)
+    tech = _safe_float_value(info.get("기술점수", 0), 0)
+    # 매우 강한 종목만 B검토로 살린다. LG전자처럼 점수 70대 과열은 계속 C/금지.
+    return score >= 90 and amount_score >= 25 and rotation >= 12 and tech >= 20
 
 
 def classify_holding_auto_grade(info, is_excluded=False):
@@ -4590,10 +4613,11 @@ def classify_holding_auto_grade(info, is_excluded=False):
     amount_score = _safe_float_value(info.get("거래대금점수", 0), 0)
     rotation = _safe_float_value(info.get("회전점수", 0), 0)
     heat = str(info.get("과열상태", ""))
-    data_note = str(info.get("데이터주의", ""))
     if score <= 0 or "데이터없음" in heat or "지표실패" in heat:
         return "제외"
     if "과열" in heat or "추격" in heat:
+        if is_overheat_b_review_exception(info):
+            return "B"
         return "C"
     if score >= 80 and amount_score >= 20 and rotation >= 8:
         return "A"
@@ -4653,7 +4677,9 @@ def judge_holding_row(row, info, op, is_excluded=False):
     if day_pct >= 8:
         return "추가매수금지", "금지", f"당일급등 {day_pct:.1f}%"
     if "과열" in heat or "추격" in heat:
-        return "유지", "금지", f"{heat}"
+        if not is_overheat_b_review_exception(info):
+            return "유지", "금지", f"{heat}"
+        # 강한 과열예외는 A급 즉시매수가 아니라 아래 B급 도달검토까지 내려보낸다.
 
     if trigger is None:
         return "유지", "금지", f"{step}차 추가매수 기준 없음"
@@ -4671,7 +4697,7 @@ def judge_holding_row(row, info, op, is_excluded=False):
     if auto_grade == "B" and step <= 5:
         if mode in ["정상운용", "손실주의 정상운용", "제한매수모드"]:
             return "추가매수 B", "허용후보", f"{reached_reason} / 자동등급 B / 점수 {score:.1f}"
-        return "유지", "금지", "제한운용에서는 A등급만 추가매수"
+        return "B급 도달검토", "금지", f"{reached_reason} / 자동등급 B / 제한운용: 즉시매수 제외, 검토만"
 
     if score >= 70 and auto_grade not in ["A", "B"]:
         return "유지", "금지", f"기준은 도달했지만 자동등급 {auto_grade or '제외'}: 점수 {score:.1f}"
@@ -5004,7 +5030,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
     out["종목전체손익률_자동"] = out["종목전체손익률_자동"].round(2)
     out = out.drop(columns=["종목총매입금액", "종목전체평가금액_자동"], errors="ignore")
 
-    out["허용순위"] = out["보유판정"].map({"추가매수 A": 5, "추가매수 B": 4, "하위차수유지": 2, "유지": 2, "익절검토": 1, "회수후보": 0, "요양원후보": 0}).fillna(1)
+    out["허용순위"] = out["보유판정"].map({"추가매수 A": 5, "추가매수 B": 4, "B급 도달검토": 3, "하위차수유지": 2, "유지": 2, "익절검토": 1, "회수후보": 0, "요양원후보": 0}).fillna(1)
     out["기준남은값"] = out["기준까지남은하락률"].apply(lambda x: _safe_float_value(x, 999))
     out["손실우선"] = out["차수손익률"].apply(lambda x: abs(float(x)) if float(x) < 0 else 999)
     out = out.sort_values(["허용순위", "기준도달여부", "기준남은값", "점수", "거래대금점수"], ascending=[False, True, True, False, False]).reset_index(drop=True)
@@ -6451,15 +6477,20 @@ elif menu == "4. 보유종목 판단기":
                 st.info(f"공포매수 탄창판정: 최종슬롯 {diag.get('공포매수최종슬롯', 0)}개 / A급 기준도달 {diag.get('공포매수A급도달', 0)}개 / B급 {diag.get('공포매수B급도달', 0)}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
-                buy_df, wait_df, recovery_df = split_holding_action_tables(result)
-                a1, a2, a3 = st.columns(3)
+                buy_df, b_review_df, wait_df, recovery_df = split_holding_action_tables(result)
+                a1, a2, a3, a4 = st.columns(4)
                 a1.metric("🟢 오늘매수가능", f"{len(buy_df)}개")
-                a2.metric("🟡 기준가대기", f"{len(wait_df)}개")
-                a3.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
+                a2.metric("🟠 B급 도달검토", f"{len(b_review_df)}개")
+                a3.metric("🟡 기준가대기", f"{len(wait_df)}개")
+                a4.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
 
                 if len(buy_df) > 0:
-                    st.success("오늘 실제로 볼 매수 후보입니다. 예산/개수 제한 안에서만 확인하세요.")
+                    st.success("오늘 실제로 볼 A급 매수 후보입니다. 예산/개수 제한 안에서만 확인하세요.")
                     show_pinned_dataframe(buy_df, height=220, pin_rank=False)
+                if len(b_review_df) > 0:
+                    with st.expander("🟠 B급 기준도달 검토 후보", expanded=True):
+                        st.caption("기준가는 이미 도달했지만 회수/손실 구간에서는 즉시매수 후보가 아닙니다. 급락일·수동확인용으로만 봅니다.")
+                        show_pinned_dataframe(b_review_df, height=240, pin_rank=False)
                 if len(wait_df) > 0:
                     with st.expander("🟡 현재장 기준가 도달 시 후보", expanded=True):
                         st.caption("FDR 현재가가 늦을 수 있으니, 증권앱 현재가가 추가매수기준가 이하인지 보는 표입니다.")
