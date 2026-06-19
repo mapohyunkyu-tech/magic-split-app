@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FEAR_BUY_EXCEPTION_FIX_20260619"
+APP_VERSION = "v27_SIMPLE_HOLDING_OVERRIDE_FIX_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4595,20 +4595,70 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
 
     simple_added = 0
     simple_estimated = 0
+    simple_override = 0
+    simple_new = 0
+    simple_stale = 0
     if simple_holdings_df is not None and len(simple_holdings_df) > 0:
         simple_rows = []
         s_df = simple_holdings_df.copy()
         s_df["코드"] = s_df["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
         for _, s in s_df.iterrows():
             code_s = str(s.get("코드", "")).replace(".0", "").zfill(6)
-            if not code_s or code_s in detailed_codes:
+            if not code_s:
                 continue
             step_s = _safe_int_value(s.get("현재차수", 1), 1)
             last_entry = _safe_float_value(s.get("마지막진입가", 0), 0)
+            existing_step = int(max_step_by_code.get(code_s, 0))
+            is_detailed = code_s in detailed_codes
+
+            # 간편보유는 단순 신규 종목뿐 아니라, 정밀 차수 입력을 아직 못 한 종목의
+            # "현재 최고차수 보정"으로도 쓴다.
+            # 단, 정밀 데이터보다 낮은 차수로 입력된 간편행은 오래된 값으로 보고 무시한다.
+            if is_detailed and step_s < existing_step:
+                simple_stale += 1
+                continue
+
+            # 정밀 최고차수와 같은 차수인데 마지막진입가가 비어 있으면, 기존 정밀 진입단가를 가져와 기준가를 유지한다.
+            if is_detailed and last_entry <= 0 and len(judgement_source) > 0:
+                try:
+                    mask_existing = judgement_source["코드정규"].astype(str).str.zfill(6).eq(code_s) if "코드정규" in judgement_source.columns else judgement_source["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6).eq(code_s)
+                    existing_rows = judgement_source.loc[mask_existing]
+                    if len(existing_rows) > 0:
+                        last_entry = _safe_float_value(existing_rows.iloc[-1].get("진입단가", 0), 0)
+                except Exception:
+                    pass
+
+            # 정밀 데이터가 있는 종목이면 판단표의 최고차수 1줄을 간편 현재차수로 교체한다.
+            # 저장된 정밀 차수는 삭제하지 않고, 총수량/평균단가 계산용으로 그대로 둔다.
+            if is_detailed and len(judgement_source) > 0:
+                try:
+                    if "코드정규" in judgement_source.columns:
+                        judgement_source = judgement_source.loc[~judgement_source["코드정규"].astype(str).str.zfill(6).eq(code_s)].copy()
+                    elif "코드" in judgement_source.columns:
+                        judgement_source = judgement_source.loc[~judgement_source["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6).eq(code_s)].copy()
+                except Exception:
+                    pass
+
             trust = "보통" if last_entry > 0 else "낮음"
-            method = "간편(마지막가)" if last_entry > 0 else "간편(현재가추정)"
+            if is_detailed:
+                method = "간편차수보정(마지막가)" if last_entry > 0 else "간편차수보정(현재가추정)"
+                simple_override += 1
+            else:
+                method = "간편신규(마지막가)" if last_entry > 0 else "간편신규(현재가추정)"
+                simple_new += 1
             if last_entry <= 0:
                 simple_estimated += 1
+
+            # 새로 산 차수를 간편으로 올린 경우, 수량 1주 기준으로 전체 평균단가 참고값에도 반영한다.
+            # 실제 수량이 다르면 정밀 보유차수에 나중에 입력하면 된다.
+            if last_entry > 0 and step_s > existing_step:
+                old = total_by_code.get(code_s, {"종목총수량": 0, "종목총매입금액": 0})
+                total_by_code[code_s] = {
+                    "종목총수량": float(old.get("종목총수량", 0)) + 1,
+                    "종목총매입금액": float(old.get("종목총매입금액", 0)) + float(last_entry),
+                }
+                max_step_by_code[code_s] = int(step_s)
+
             simple_added += 1
             simple_rows.append({
                 "코드": code_s,
@@ -4629,10 +4679,13 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
 
     diag["저장차수"] = int(len(holdings_df))
     diag["간편보유"] = int(len(simple_holdings_df))
-    diag["간편판단추가"] = int(simple_added)
+    diag["간편판단반영"] = int(simple_added)
+    diag["간편정밀차수보정"] = int(simple_override)
+    diag["간편신규판단"] = int(simple_new)
+    diag["간편무시_정밀보다낮은차수"] = int(simple_stale)
     diag["현재가추정간편"] = int(simple_estimated)
     diag["판단표시차수"] = int(len(judgement_source))
-    diag["판단방식"] = "정밀 차수 우선 / 정밀 없는 종목은 보유간편으로 최고차수 판단"
+    diag["판단방식"] = "정밀 차수 저장 유지 / 간편보유가 같거나 높은 현재차수면 판단표 최고차수를 보정"
 
     # 같은 종목 여러 차수는 현재가/점수 조회를 1번만 하기 위한 캐시
     info_cache = {}
@@ -6077,6 +6130,7 @@ elif menu == "4. 보유종목 판단기":
                 if not_found_simple:
                     st.warning("못 찾은 종목: " + ", ".join(not_found_simple[:20]))
                 st.rerun()
+                st.rerun()
             else:
                 st.error("추가된 간편 보유 0개. 형식은 `종목명,현재차수` 또는 `종목명,현재차수,마지막진입가` 입니다.")
                 if not_found_simple:
@@ -6097,9 +6151,11 @@ elif menu == "4. 보유종목 판단기":
                 save_simple_holdings_df(simple_edit)
                 st.success("간편 보유 수정 저장 완료")
                 st.rerun()
+                st.rerun()
             if b2.button("간편 보유 전체 삭제", key="delete_all_simple_holdings"):
                 save_simple_holdings_df(pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS))
                 st.success("간편 보유 전체 삭제 완료")
+                st.rerun()
                 st.rerun()
             st.download_button("간편 보유 CSV 다운로드", data=simple_holdings_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_simple_holdings.csv", mime="text/csv")
 
@@ -6205,7 +6261,8 @@ elif menu == "4. 보유종목 판단기":
                 st.error(diag["error"])
             else:
                 st.success("보유차수 판단 완료")
-                st.caption("정밀 보유차수는 1차/2차 모두 유지하고, 판단표는 종목별 현재 보유 최고차수 1줄만 표시합니다. 정밀 데이터가 없는 종목은 보유간편 탭의 현재차수로 판단하며 A/B/C는 앱이 자동 판정합니다.")
+                st.caption("정밀 보유차수는 1차/2차 모두 유지합니다. 판단표는 종목별 최고차수 1줄만 표시하되, 보유간편 탭에 같거나 더 높은 현재차수가 있으면 그 값을 판단용으로 보정합니다. A/B/C는 앱이 자동 판정합니다.")
+                st.info(f"간편보유 {diag.get('간편보유', 0)}개 중 판단반영 {diag.get('간편판단반영', 0)}개 / 정밀차수보정 {diag.get('간편정밀차수보정', 0)}개 / 신규판단 {diag.get('간편신규판단', 0)}개")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
                 buy_df, wait_df, recovery_df = split_holding_action_tables(result)
