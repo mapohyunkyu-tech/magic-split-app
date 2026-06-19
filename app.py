@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FEAR_BUY_AMMO_SYSTEM_20260619"
+APP_VERSION = "v27_FEAR_BUY_AMMO_REFINE_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4516,10 +4516,18 @@ def make_holding_action_label(row):
     if judge == "익절검토" or pnl_pct >= 5 or whole_pct >= 5:
         return "🔵 회수/익절검토"
 
+    auto_grade = str(row.get("자동등급", "")).strip()
+
     if "요양원" in judge:
         return "⚫ 요양원/금지"
+
+    # C/제외 등급은 기준가에 가까워져도 상단 '기준가대기'에 올리지 않는다.
+    # 기준가대기는 실제로 HTS 가격만 보면 되는 A/B급 후보만 보여준다.
     if reached == "미도달" and "매수가능후보" in hint:
-        return "🟡 기준가대기"
+        if auto_grade in ["A", "B"] and today != "금지":
+            return "🟡 기준가대기"
+        return "⛔ 금지"
+
     if judge == "회수후보":
         return "⚪ 보유관망"
     if today == "금지":
@@ -4544,6 +4552,8 @@ def make_holding_live_decision(row):
         return f"HTS 현재가 {trigger_price:,}원 이하이면 후보"
     if "회수/익절" in action:
         return "수익권: 회수/분할매도 검토"
+    if "금지" in action and str(row.get("자동등급", "")).strip() in ["C", "제외"]:
+        return "등급 미달: 기준가 도달해도 매수후보 제외"
     if judge == "회수후보":
         return f"약수익/본전권 보유관망: 현재 {pnl_pct:.2f}% / 전체 {whole_pct:.2f}%"
     if "미도달" in str(row.get("기준도달여부", "")):
@@ -4823,6 +4833,22 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
     diag["간편무시_정밀보다낮은차수"] = int(simple_stale)
     diag["현재가추정간편"] = int(simple_estimated)
     diag["판단표시차수"] = int(len(judgement_source))
+
+    # 입력 누락 감시: 총보유 - 요양원 대비 판단표 종목 수가 크게 모자라면 바로 알려준다.
+    expected_active = max(int(op.get("총보유종목수", 0) or 0) - int(op.get("요양원종목수", 0) or 0), 0)
+    try:
+        judged_codes = judgement_source["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6).drop_duplicates()
+        judged_count = int(judged_codes.shape[0])
+    except Exception:
+        judged_count = int(len(judgement_source))
+    missing_est = max(expected_active - judged_count, 0) if expected_active > 0 else 0
+    diag["활동예상종목"] = int(expected_active)
+    diag["판단표시종목"] = int(judged_count)
+    diag["판단누락추정"] = int(missing_est)
+    if expected_active > 0 and missing_est > 0:
+        diag["누락점검메모"] = f"활동예상 {expected_active}개 대비 판단표 {judged_count}개: 약 {missing_est}개 입력/매칭 점검 필요"
+    else:
+        diag["누락점검메모"] = "활동예상 대비 판단표 개수 큰 이상 없음"
     diag["판단방식"] = "정밀 차수 저장 유지 / 간편보유가 같거나 높은 현재차수면 판단표 최고차수를 보정"
 
     # 같은 종목 여러 차수는 현재가/점수 조회를 1번만 하기 위한 캐시
@@ -6415,6 +6441,10 @@ elif menu == "4. 보유종목 판단기":
                 st.success("보유차수 판단 완료")
                 st.caption("정밀 보유차수는 1차/2차 모두 유지합니다. 판단표는 종목별 최고차수 1줄만 표시하되, 보유간편 탭에 같거나 더 높은 현재차수가 있으면 그 값을 판단용으로 보정합니다. A/B/C는 앱이 자동 판정합니다.")
                 st.info(f"간편보유 {diag.get('간편보유', 0)}개 중 판단반영 {diag.get('간편판단반영', 0)}개 / 정밀차수보정 {diag.get('간편정밀차수보정', 0)}개 / 신규판단 {diag.get('간편신규판단', 0)}개")
+                if int(diag.get('판단누락추정', 0) or 0) > 0:
+                    st.warning(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
+                else:
+                    st.success(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
                 st.info(f"공포매수 탄창판정: 최종슬롯 {diag.get('공포매수최종슬롯', 0)}개 / A급 기준도달 {diag.get('공포매수A급도달', 0)}개 / B급 {diag.get('공포매수B급도달', 0)}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
