@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FEAR_BUY_AMMO_REFINE_20260619"
+APP_VERSION = "v27_AB_WAIT_FILTER_FIX_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4522,9 +4522,12 @@ def make_holding_action_label(row):
         return "⚫ 요양원/금지"
 
     # C/제외 등급은 기준가에 가까워져도 상단 '기준가대기'에 올리지 않는다.
-    # 기준가대기는 실제로 HTS 가격만 보면 되는 A/B급 후보만 보여준다.
-    if reached == "미도달" and "매수가능후보" in hint:
-        if auto_grade in ["A", "B"] and today != "금지":
+    # 단, A/B급은 오늘추가매수가 금지로 표시되더라도 기준가 미도달이면
+    # HTS에서 기준가만 감시할 수 있도록 '기준가대기'에 남긴다.
+    # 회수모드에서는 B급이 즉시 매수대상은 아니어도 관찰대기 대상이므로 숨기지 않는다.
+    trigger_price = _safe_int_value(row.get("추가매수기준가", 0), 0)
+    if reached == "미도달" and trigger_price > 0:
+        if auto_grade in ["A", "B"]:
             return "🟡 기준가대기"
         return "⛔ 금지"
 
