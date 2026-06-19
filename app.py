@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FEAR_BUY_ALLOWED_EXPANSION_LOCK_20260619"
+APP_VERSION = "v27_FEAR_BUY_EXCEPTION_FIX_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3954,8 +3954,13 @@ def calc_daily_buy_budget(cash, base_amount, cash_lines, mode):
     base_amount = int(base_amount)
     hard = int(cash_lines.get("절대방어선", 0))
     available = max(cash - hard, 0)
-    if mode in ["강한 회수모드", "회수모드"]:
+    if mode == "강한 회수모드":
         return 0
+    if mode == "회수모드":
+        # 회수모드라도 공포매수 철학은 남긴다.
+        # 신규/금액확장은 막고, 보유 A급이 마지막 차수 기준가에 도달한 경우만
+        # 기본금액 기준 1~2개 이내로 예외 허용한다.
+        return int(min(available * 0.05, base_amount * 2))
     if mode == "제한회복모드":
         return int(min(available * 0.10, base_amount * 4))
     if mode == "손실주의 정상운용":
@@ -4032,8 +4037,8 @@ def decide_expansion_guard(book_asset, cash, unrealized, total_holdings, target_
         fear_status = "현금방어우선"
         fear_guide = "예수금 절대방어선/강한 회수모드: 공포매수보다 현금확보 우선"
     elif mode == "회수모드":
-        fear_status = "공포매수보류"
-        fear_guide = "회수모드: 신규·금액확장 금지, 보유 A급 기준도달분만 예외 검토"
+        fear_status = "공포매수허용"
+        fear_guide = "회수모드: 신규·금액확장 금지. 보유 A급 + 마지막 차수 기준가 도달분만 1~2개 예외 허용"
     elif loss_pct <= -5 or mode in ["제한회복모드", "제한매수모드", "손실주의 정상운용"]:
         fear_status = "공포매수허용"
         fear_guide = "금액확장 잠금. 기존 보유 A/B 등급 + 마지막 차수 기준가 도달분만 기본금액으로 확인"
@@ -4172,9 +4177,15 @@ def decide_operation(cash, cost, unrealized, total_holdings, nursing_count, targ
     daily_budget = calc_daily_buy_budget(cash, base_amount, cash_lines, mode)
     room_to_target = max(int(target_holdings) - int(total_holdings), 0)
 
-    if mode in ["강한 회수모드", "회수모드"]:
+    if mode == "강한 회수모드":
         new_buy_count = 0
         add_buy_count = 0
+    elif mode == "회수모드":
+        # 회수모드는 신규매수/금액확장은 금지하지만, 공포매수 예외는 남긴다.
+        # A급 + 마지막 차수 기준가 도달 종목만 최종 판단표에서 매수가능으로 올라간다.
+        budget_count = int(daily_budget // base_amount)
+        new_buy_count = 0
+        add_buy_count = min(budget_count, 2)
     elif mode == "제한회복모드":
         budget_count = int(daily_budget // base_amount)
         new_buy_count = 0
@@ -4478,10 +4489,13 @@ def judge_holding_row(row, info, op, is_excluded=False):
             return "요양원후보", "금지", "최대차수권/큰손실 + 점수 약함"
         return "유지/추가금지", "금지", "최대차수권 또는 깊은 손실 구간은 자동 추가매수 금지"
 
-    if mode in ["강한 회수모드", "회수모드"]:
+    if mode == "강한 회수모드":
         if pnl_pct >= -2:
-            return "회수후보", "금지", "회수모드: 본전/약손실 회수 우선"
-        return "유지/추가금지", "금지", "회수모드: 신규/추가매수 금지"
+            return "회수후보", "금지", "강한 회수모드: 본전/약손실 회수 우선"
+        return "유지/추가금지", "금지", "강한 회수모드: 공포매수보다 현금방어 우선"
+
+    if mode == "회수모드" and pnl_pct >= -2:
+        return "회수후보", "금지", "회수모드: 본전/약손실 회수 우선"
 
     if day_pct <= -7:
         return "추가매수금지", "금지", f"당일급락 {day_pct:.1f}%"
@@ -4776,7 +4790,9 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
     out = out.sort_values(["허용순위", "기준도달여부", "기준남은값", "점수", "거래대금점수"], ascending=[False, True, True, False, False]).reset_index(drop=True)
     out["순위"] = np.arange(1, len(out) + 1)
 
-    if mode == "제한회복모드":
+    if mode == "회수모드" and str(op.get("공포매수상태", "")).startswith("공포매수허용"):
+        allow_mask = out["보유판정"].eq("추가매수 A")
+    elif mode == "제한회복모드":
         allow_mask = out["보유판정"].eq("추가매수 A")
     elif mode == "제한매수모드":
         allow_mask = out["보유판정"].isin(["추가매수 A", "추가매수 B"])
