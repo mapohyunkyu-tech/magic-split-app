@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_PLAIN_KOREAN_FEAR_BUY_GUIDE_20260619"
+APP_VERSION = "v27_FULL_EXPLAIN_SAFETY_UPDATE_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -134,7 +134,7 @@ SIMPLE_HOLDINGS_COLUMNS = [
 ]
 
 HOLDING_JUDGE_COLUMNS = [
-    "순위", "종목", "코드", "입력방식", "자동등급", "기준가신뢰",
+    "순위", "종목", "코드", "입력방식", "자동등급", "자동등급사유", "기준가신뢰",
     "핵심행동", "현재장판단", "오늘추가매수", "보유판정", "판정사유", "차수",
     "진입단가", "현재가", "추가매수기준가", "현재장도달시", "추천매수금액", "확장상태", "수량", "매입금액", "차수평가금액", "차수평가손익", "차수손익률",
     "다음차수", "추가매수기준률", "기준까지남은하락률", "기준도달여부",
@@ -4503,8 +4503,8 @@ def get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason):
         live_allowed = True
 
     if live_allowed:
-        return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달시 매수가능후보"
-    return int(trigger_price), f"HTS {trigger_price:,}원 이하 도달해도 점수/운영모드 확인"
+        return int(trigger_price), f"증권앱 현재가 {trigger_price:,}원 이하 확인 시 후보"
+    return int(trigger_price), f"증권앱 {trigger_price:,}원 이하라도 점수/운영모드 확인"
 
 
 def make_holding_action_label(row):
@@ -4568,9 +4568,9 @@ def make_holding_live_decision(row):
     if "오늘매수가능" in action:
         return "앱 기준 이미 도달 / 예산·개수 안에서 가능"
     if "기준가대기" in action and trigger_price > 0:
-        return f"HTS 현재가 {trigger_price:,}원 이하이면 후보"
+        return f"증권앱 현재가 {trigger_price:,}원 이하이면 후보"
     if "B급 도달검토" in action:
-        return "B급 기준도달: 회수모드에서는 즉시매수 제외, 급락일/수동검토 후보"
+        return "B급: 바로 사는 칸 아님 / A급 없고 시장 급락일 때만 1개 수동검토"
     if "회수/익절" in action:
         return "수익권: 회수/분할매도 검토"
     if "금지" in action and str(row.get("자동등급", "")).strip() in ["C", "제외"]:
@@ -4594,7 +4594,7 @@ def split_holding_action_tables(result):
     wait = result[result["핵심행동"].astype(str).str.contains("기준가대기", na=False)].copy()
     recovery = result[result["핵심행동"].astype(str).str.contains("회수/익절", na=False)].copy()
     focus_cols = [
-        "종목", "코드", "핵심행동", "현재장판단", "차수", "현재가", "추가매수기준가", "추천매수금액", "확장상태",
+        "종목", "코드", "핵심행동", "현재장판단", "자동등급", "자동등급사유", "차수", "현재가", "추가매수기준가", "추천매수금액", "확장상태",
         "차수손익률", "기준까지남은하락률", "점수", "보유판정", "판정사유"
     ]
     focus_cols = [c for c in focus_cols if c in result.columns]
@@ -4640,6 +4640,87 @@ def classify_holding_auto_grade(info, is_excluded=False):
         return "C"
     return "제외"
 
+
+
+
+def explain_holding_auto_grade(info, is_excluded=False):
+    """A/B/C/제외가 왜 나왔는지 사람이 바로 읽는 짧은 사유."""
+    if is_excluded:
+        return "요양원/재진입금지 목록"
+    score = _safe_float_value(info.get("점수", 0), 0)
+    amount_score = _safe_float_value(info.get("거래대금점수", 0), 0)
+    rotation = _safe_float_value(info.get("회전점수", 0), 0)
+    tech = _safe_float_value(info.get("기술점수", 0), 0)
+    heat = str(info.get("과열상태", ""))
+    group = str(info.get("그룹", ""))
+    data_warn = str(info.get("데이터주의", ""))
+    reasons = []
+    if score <= 0 or "데이터없음" in heat or "지표실패" in heat:
+        return "가격/지표 데이터 부족"
+    if score >= 80:
+        reasons.append(f"점수 {score:.1f} 높음")
+    elif score >= 70:
+        reasons.append(f"점수 {score:.1f} 보통")
+    else:
+        reasons.append(f"점수 {score:.1f} 약함")
+    if amount_score >= 20:
+        reasons.append("거래대금 양호")
+    elif amount_score >= 17:
+        reasons.append("거래대금 보통")
+    else:
+        reasons.append("거래대금 약함")
+    if rotation >= 8:
+        reasons.append("회전 양호")
+    else:
+        reasons.append("회전 약함")
+    if tech >= 20:
+        reasons.append("기술점수 양호")
+    if group and group != "기타":
+        reasons.append(f"섹터 {group}")
+    if "과열" in heat or "추격" in heat:
+        if is_overheat_b_review_exception(info):
+            reasons.append("과열주의지만 고점수라 B검토")
+        else:
+            reasons.append("과열/추격주의")
+    if data_warn:
+        reasons.append(f"데이터 {data_warn}"[:20])
+    return " / ".join(reasons[:5])
+
+
+def simulate_fear_buy_result(current_op, a_count, b_count, crash_level, target_amount):
+    """현재 운영판단값에서 A/B 기준도달 개수를 가정했을 때 슬롯을 설명한다."""
+    max_slots = int(current_op.get("공포매수최대슬롯", current_op.get("추가매수가능개수", 0)) or 0)
+    daily_budget = int(current_op.get("일일매수상한", 0) or 0)
+    target_amount = int(target_amount or current_op.get("오늘적용매수금액", current_op.get("기본매수금액", 150000)) or 150000)
+    budget_slots = int(daily_budget // target_amount) if target_amount > 0 else 0
+    if not str(current_op.get("공포매수상태", "")).startswith("공포매수허용"):
+        return {
+            "최종슬롯": 0,
+            "문장": "현재는 현금방어 우선이라 자동 공포매수 슬롯이 열리지 않습니다. 신규매수/금액확장은 쉬고, A급 기준도달은 수동 확인만 하세요."
+        }
+    a_count = int(a_count or 0)
+    b_count = int(b_count or 0)
+    crash_level = int(crash_level or 0)
+    if a_count <= 0:
+        slots = 0
+    else:
+        slots = min(2, a_count)
+        if a_count >= 5 or crash_level >= 2:
+            slots = max(slots, min(3, a_count))
+        if a_count >= 8 and crash_level >= 1:
+            slots = max(slots, min(4, a_count))
+        if a_count >= 10 and crash_level >= 2:
+            slots = max(slots, min(5, a_count))
+    final_slots = int(min(max_slots, budget_slots, slots))
+    if final_slots > 0:
+        sentence = f"A급 기준도달 {a_count}개 중 오늘은 최대 {final_slots}개까지. B급 {b_count}개는 바로 매수 말고 급락일 수동검토입니다."
+    elif a_count <= 0 and b_count > 0:
+        sentence = f"A급 기준도달이 없어서 자동매수는 0개입니다. B급 {b_count}개는 시장 급락일에만 1개 수동검토입니다."
+    elif a_count <= 0:
+        sentence = "A/B급 기준도달이 없어 오늘은 살 놈이 없습니다. 현금방어가 우선입니다."
+    else:
+        sentence = "A급 기준도달은 있지만 탄창/예산 조건 때문에 자동 슬롯은 0개입니다. 수동검토만 하세요."
+    return {"최종슬롯": final_slots, "문장": sentence}
 
 def judge_holding_row(row, info, op, is_excluded=False):
     mode = op.get("운영모드", "")
@@ -4971,6 +5052,7 @@ def build_holdings_judgement(holdings_df, op, max_rows=500, simple_holdings_df=N
                 "종목": name,
                 "입력방식": input_method,
                 "자동등급": auto_grade,
+                "자동등급사유": explain_holding_auto_grade(info, is_excluded=is_excluded),
                 "기준가신뢰": trigger_trust,
                 "핵심행동": "",
                 "현재장판단": "",
@@ -6506,6 +6588,15 @@ elif menu == "4. 보유종목 판단기":
                 st.info(f"간편보유 {diag.get('간편보유', 0)}개 중 판단반영 {diag.get('간편판단반영', 0)}개 / 정밀차수보정 {diag.get('간편정밀차수보정', 0)}개 / 신규판단 {diag.get('간편신규판단', 0)}개")
                 if int(diag.get('판단누락추정', 0) or 0) > 0:
                     st.warning(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
+                    with st.expander("누락 종목은 어떻게 찾나?", expanded=False):
+                        st.markdown(f"""
+앱이 가진 입력 기준으로는 **판단표 {diag.get('판단표시종목', 0)}개**까지 반영됐습니다.  
+다만 운영판단기에 넣은 `총보유종목수 - 요양원종목수` 기준 활동예상은 **{diag.get('활동예상종목', 0)}개**라서 차이가 납니다.
+
+- 간편보유/정밀차수에 없는 실제 보유종목은 앱이 이름을 알 수 없습니다.
+- 증권사 전체 보유 CSV를 올리거나 간편보유에 `종목명,현재차수`를 추가하면 좁혀집니다.
+- 종목명 매칭 실패가 의심되면 종목명 대신 `종목코드,현재차수`로 넣는 게 가장 확실합니다.
+""")
                 else:
                     st.success(f"보유 입력 점검: {diag.get('누락점검메모', '')}")
                 final_slots = int(diag.get('공포매수최종슬롯', 0) or 0)
@@ -6518,6 +6609,15 @@ elif menu == "4. 보유종목 판단기":
                 else:
                     st.warning(f"오늘 행동 요약: 기준도달 후보는 있으나 현재 탄창/현금방어 조건 때문에 자동 매수 슬롯은 0개입니다. A급 {a_reached}개, B급 {b_reached}개는 수동검토만 하세요.")
                 st.info(f"공포매수 탄창판정: 최종슬롯 {final_slots}개 / A급 기준도달 {a_reached}개 / B급 {b_reached}개 / 시장급락레벨 {diag.get('시장급락레벨', 0)} / {diag.get('공포매수슬롯설명', '')}")
+                st.warning("가격 확인: FDR 현재가는 지연/전일값일 수 있습니다. 실제 매수 전에는 증권앱 현재가가 `추가매수기준가` 이하인지 직접 확인하세요.")
+                with st.expander("공포매수 시뮬레이션", expanded=False):
+                    st.caption("A/B 기준도달 개수가 달라지면 오늘 슬롯이 어떻게 바뀌는지 가상으로 봅니다. 실제 주문 신호가 아니라 운영 점검용입니다.")
+                    s1, s2, s3 = st.columns(3)
+                    sim_a = s1.number_input("가정: A급 기준도달", min_value=0, value=a_reached, step=1, key="sim_a_reached")
+                    sim_b = s2.number_input("가정: B급 도달검토", min_value=0, value=b_reached, step=1, key="sim_b_reached")
+                    sim_crash = s3.number_input("시장급락레벨 0~2", min_value=0, max_value=2, value=int(diag.get('시장급락레벨', 0) or 0), step=1, key="sim_crash_level")
+                    sim = simulate_fear_buy_result(op, sim_a, sim_b, sim_crash, int(op.get('오늘적용매수금액', op.get('기본매수금액', 150000))))
+                    st.info(f"시뮬레이션 결과: 최종슬롯 {sim.get('최종슬롯', 0)}개 / {sim.get('문장', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
                 buy_df, b_review_df, wait_df, recovery_df = split_holding_action_tables(result)
@@ -6527,12 +6627,25 @@ elif menu == "4. 보유종목 판단기":
                 a3.metric("🟡 기준가대기", f"{len(wait_df)}개")
                 a4.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
 
+                with st.expander("🟠 B급은 언제 사는 건가?", expanded=False):
+                    st.markdown("""
+**B급은 바로 매수 신호가 아닙니다.**  
+기준가에 도달했어도 기본은 `수동검토`입니다.
+
+- **A급 오늘매수가능이 있으면:** A급 먼저 보고 B급은 보류
+- **A급이 없거나 1개뿐이고 시장이 크게 밀리면:** B급 1개 정도만 검토
+- **시장 급락이 아니면:** B급은 기준 도달해도 대기
+- **C급/요양원:** 기준가에 와도 매수후보 제외
+
+쉽게 말하면, **A급은 공포매수 후보 / B급은 급락일 예비후보 / C급은 안 사는 후보**입니다.
+""")
+
                 if len(buy_df) > 0:
                     st.success("오늘 실제로 볼 A급 매수 후보입니다. 예산/개수 제한 안에서만 확인하세요.")
                     show_pinned_dataframe(buy_df, height=220, pin_rank=False)
                 if len(b_review_df) > 0:
                     with st.expander("🟠 B급 기준도달 검토 후보", expanded=True):
-                        st.caption("기준가는 이미 도달했지만 회수/손실 구간에서는 즉시매수 후보가 아닙니다. 급락일·수동확인용으로만 봅니다.")
+                        st.caption("B급은 바로 매수 신호가 아닙니다. A급 후보가 없거나 적고, 시장/섹터가 같이 급락한 날에만 1개 정도 수동검토하는 예비 후보입니다.")
                         show_pinned_dataframe(b_review_df, height=240, pin_rank=False)
                 if len(wait_df) > 0:
                     with st.expander("🟡 현재장 기준가 도달 시 후보", expanded=True):
@@ -6568,6 +6681,8 @@ else:
 - 보유차수 판단기는 1차→2차 -10%, 2차→3차 -11.11%, 3차→4차 -12.50%, 4차→5차 -14.29%, 5차→6차 -16.67% 기준에 도달해야 매수가능 후보로 표시합니다.
 - 한 종목에 여러 차수를 입력하면 현재 보유 최고 차수만 다음 차수 매수 기준으로 판단합니다. 낮은 차수 행은 판단표에서 숨깁니다.
 - 보유차수 판단 결과 위에 `오늘매수가능`, `B급 도달검토`, `기준가대기`, `회수/익절검토` 요약표를 먼저 보여줍니다.
+- `자동등급사유` 컬럼에서 왜 A/B/C/제외가 나왔는지 바로 확인합니다.
+- `공포매수 시뮬레이션`에서 A급/B급 도달 개수 변화에 따른 오늘 슬롯을 점검합니다.
 - 운영판단기는 신규매수/금액확장/공포매수를 분리합니다. 회수모드에서도 보유 A급 기준도달분은 공포매수 탄창제 한도 내 예외 허용됩니다.
 - TOP50은 신규 후보 참고용입니다. 공포매수 실행 판단은 보유차수 판단기를 우선합니다.
 - FDR 현재가가 늦을 수 있으므로 `현재장판단`에는 HTS/증권앱 현재가로 볼 기준가를 짧게 표시합니다.
