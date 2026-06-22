@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_FULL_EXPLAIN_SAFETY_UPDATE_20260619"
+APP_VERSION = "v27_SIMPLE_HOLDING_DELETE_FIX_20260619"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -3184,11 +3184,17 @@ def save_simple_holdings_df(df):
         for c in SIMPLE_HOLDINGS_COLUMNS:
             if c not in out.columns:
                 out[c] = ""
-        out["코드"] = out["코드"].astype(str).str.replace(".0", "", regex=False).str.zfill(6)
+        # data_editor에서 빈 행/삭제행이 섞여도 Google Sheets에 쓰레기 코드가 남지 않게 정리한다.
+        raw_code = out["코드"].fillna("").astype(str).str.replace(".0", "", regex=False).str.strip()
+        raw_code = raw_code.replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+        out["코드"] = raw_code
+        out["종목"] = out["종목"].fillna("").astype(str).str.strip()
+        out = out[(out["코드"].astype(str).str.len() > 0) | (out["종목"].astype(str).str.len() > 0)].copy()
+        out["코드"] = out["코드"].astype(str).str.zfill(6)
         out["현재차수"] = pd.to_numeric(out["현재차수"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(1).astype(int).clip(lower=1, upper=MAX_AUTO_LOT_STEP if 'MAX_AUTO_LOT_STEP' in globals() else 6)
         out["마지막진입가"] = pd.to_numeric(out["마지막진입가"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0).astype(int)
         out["메모"] = out["메모"].fillna("").astype(str)
-        out["업데이트일"] = out["업데이트일"].fillna(today_str()).astype(str)
+        out["업데이트일"] = out["업데이트일"].replace("", np.nan).fillna(today_str()).astype(str)
         out = out[(out["코드"].astype(str).str.len() > 0) & (out["현재차수"] > 0)].copy()
         # 간편 보유는 종목당 1줄만 유지한다. 나중 입력이 현재 상태라고 본다.
         out = out.drop_duplicates(subset=["코드"], keep="last").reset_index(drop=True)
@@ -6456,25 +6462,63 @@ elif menu == "4. 보유종목 판단기":
 
         if len(simple_holdings_df) > 0:
             st.write("저장된 간편 보유")
+            st.caption("익절/전량매도한 종목은 왼쪽 '삭제' 체크 후 선택 삭제를 누르면 보유간편에서 빠집니다. 정밀 보유차수에는 영향 없습니다.")
+            simple_view = simple_holdings_df.copy()
+            simple_view.insert(0, "삭제", False)
             simple_edit = st.data_editor(
-                simple_holdings_df,
+                simple_view,
                 use_container_width=True,
                 hide_index=True,
                 num_rows="dynamic",
                 key="simple_holding_editor",
-                column_config=pinned_stock_column_config(simple_holdings_df)
+                column_config=pinned_stock_column_config(simple_view, pin_action=True)
             )
-            b1, b2 = st.columns(2)
+            b1, b2, b3 = st.columns(3)
             if b1.button("간편 보유 수정 저장", key="save_simple_holding_editor"):
-                save_simple_holdings_df(simple_edit)
+                edited = simple_edit.drop(columns=["삭제"], errors="ignore")
+                save_simple_holdings_df(edited)
                 st.success("간편 보유 수정 저장 완료")
                 st.rerun()
-                st.rerun()
-            if b2.button("간편 보유 전체 삭제", key="delete_all_simple_holdings"):
+            if b2.button("선택한 간편 보유 삭제", key="delete_selected_simple_holdings"):
+                edited = simple_edit.copy()
+                if "삭제" in edited.columns:
+                    delete_mask = edited["삭제"].fillna(False).astype(bool)
+                    deleted_count = int(delete_mask.sum())
+                    kept = edited.loc[~delete_mask].drop(columns=["삭제"], errors="ignore")
+                    save_simple_holdings_df(kept)
+                    st.success(f"간편 보유 선택 삭제 완료: {deleted_count}개")
+                    st.rerun()
+                else:
+                    st.warning("삭제 체크 컬럼을 찾지 못했습니다.")
+            if b3.button("간편 보유 전체 삭제", key="delete_all_simple_holdings"):
                 save_simple_holdings_df(pd.DataFrame(columns=SIMPLE_HOLDINGS_COLUMNS))
                 st.success("간편 보유 전체 삭제 완료")
                 st.rerun()
-                st.rerun()
+
+            delete_text = st.text_input("익절/매도 종목명으로 바로 삭제", placeholder="예: 삼성E&A, 서진시스템", key="simple_delete_text")
+            if st.button("종목명으로 간편 보유 삭제", key="delete_simple_by_name"):
+                names = [x.strip() for x in re.split(r"[,\n]+", delete_text or "") if x.strip()]
+                if not names:
+                    st.warning("삭제할 종목명을 입력하세요.")
+                else:
+                    krx_now = load_krx_master_fdr()
+                    current_simple = load_simple_holdings_df()
+                    delete_codes = set()
+                    not_found_delete = []
+                    for nm in names:
+                        code, canon = resolve_code_name(nm, krx_now)
+                        if code:
+                            delete_codes.add(str(code).zfill(6))
+                        else:
+                            not_found_delete.append(nm)
+                    before_count = len(current_simple)
+                    kept = current_simple[~current_simple["코드"].astype(str).str.zfill(6).isin(delete_codes)].copy()
+                    save_simple_holdings_df(kept)
+                    deleted_count = before_count - len(kept)
+                    st.success(f"종목명 삭제 완료: {deleted_count}개")
+                    if not_found_delete:
+                        st.warning("못 찾은 종목: " + ", ".join(not_found_delete[:20]))
+                    st.rerun()
             st.download_button("간편 보유 CSV 다운로드", data=simple_holdings_df.to_csv(index=False).encode("utf-8-sig"), file_name="magic_split_simple_holdings.csv", mime="text/csv")
 
     st.subheader("저장된 보유차수")
