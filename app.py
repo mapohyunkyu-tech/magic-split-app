@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SIMPLE_HOLDING_DELETE_FIX_20260619"
+APP_VERSION = "v27_TOP50_UNIVERSE_GRADE_FIX_20260624"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -102,7 +102,7 @@ LOG_COLUMNS = [
 ]
 
 TOP50_COLUMNS = [
-    "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "점수",
+    "순위", "최종판정", "판정사유", "오늘매수", "코드", "종목", "등급", "등급설명", "점수",
     "현재가", "추천수량", "실제매수금액", "목표매수금액", "허용상한",
     "매수상태", "과열상태", "추격주의여부", "당일등락률", "갭상승률", "요양원여부",
     "그룹", "섹터신뢰", "데이터기준일", "데이터주의",
@@ -5731,6 +5731,7 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
         "listing_included": 0,
         "force_included": 0,
         "holdings_included": 0,
+        "seed_included": 0,
         "final_universe": 0,
         "error": ""
     }
@@ -5752,6 +5753,8 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
             diag["force_included"] += 1
         elif source == "holding":
             diag["holdings_included"] += 1
+        elif source == "seed":
+            diag["seed_included"] += 1
         else:
             diag["listing_included"] += 1
         return True
@@ -5811,6 +5814,14 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
 
     except Exception as e:
         diag["error"] = str(e)
+
+    # FDR/KRX 전체시장 목록이 실패하면 과거 Colab 원본 후보풀이라도 임시로 넣는다.
+    # 목적: 700개 설정인데 17개만 계산되는 상황을 막고, 최소한 보유/관심 후보를 평가하게 하기 위함.
+    if diag.get("listing_included", 0) < max(50, int(max_codes) * 0.2):
+        for code, name in COLAB12_SEED_UNIVERSE.items():
+            if len(universe) >= max_codes:
+                break
+            add_code(code, name, source="seed")
 
     # 수동 강제 포함 종목은 max를 넘어도 계산 대상에 포함
     for code, name in FORCE_UNIVERSE.items():
@@ -6112,6 +6123,7 @@ elif menu == "3. TOP50":
     st.header("3. TOP50")
     st.caption(f"TOP50 엔진: {APP_VERSION}")
     st.caption("TOP50은 신규 후보 참고용입니다. 회수/공포매수 구간에서는 TOP50 신규매수는 보류하고, 실제 공포매수 판단은 보유차수 판단기의 A급/B급/기준가 도달표를 우선합니다.")
+    st.caption("주의: TOP50의 등급은 신규진입 등급이고, 보유차수 판단기의 자동등급 A/B/C와 다릅니다. 대덕전자처럼 보유차수는 A여도 TOP50 신규등급은 B로 나올 수 있습니다.")
     st.caption("FDR KRX를 기본으로 쓰고, 실패 시 KRX 직접 CSV/KOSPI/KOSDAQ 백업으로 전체시장 유니버스를 복구합니다.")
 
     nursing_df = load_nursing_df()
@@ -6174,13 +6186,30 @@ elif menu == "3. TOP50":
         st.write("요양원/재진입금지 제외 종목수:", len(exclude_codes))
 
         holdings_df_for_universe = load_holdings_df()
+        simple_df_for_universe = load_simple_holdings_df()
         extra_holdings = []
         if len(holdings_df_for_universe) > 0:
-            extra_holdings = list(holdings_df_for_universe[["코드", "종목"]].drop_duplicates().itertuples(index=False, name=None))
+            extra_holdings.extend(list(holdings_df_for_universe[["코드", "종목"]].drop_duplicates().itertuples(index=False, name=None)))
+        if len(simple_df_for_universe) > 0:
+            extra_holdings.extend(list(simple_df_for_universe[["코드", "종목"]].drop_duplicates().itertuples(index=False, name=None)))
+        # 중복 제거: 정밀/간편 둘 다 있으면 1개만 TOP50 계산 대상으로 넣는다.
+        extra_holdings = list(dict((str(c).zfill(6), str(n)) for c, n in extra_holdings).items())
         universe, universe_diag = build_universe_fdr(price_limit, int(max_codes), extra_codes=tuple(extra_holdings))
         codes = list(universe.keys())
         st.write("유니버스 진단:", universe_diag)
         st.write("계산 대상 종목수:", len(codes))
+        if universe_diag.get("listing_included", 0) < int(max_codes) * 0.5:
+            st.warning(
+                "700개로 설정했는데 전체시장 편입 수가 적습니다. FDR/KRX 목록 호출이 실패했거나 제한된 상태입니다. "
+                "현재는 Colab 기본후보 + 정밀/간편 보유종목을 임시로 계산합니다. "
+                "이 상태의 TOP50은 전체시장 TOP50이 아니라 복구후보 참고용입니다. Clear cache/Reboot 후 재시도하세요."
+            )
+        if len(codes) < min(100, int(max_codes) * 0.3):
+            st.error(
+                f"계산 대상이 {len(codes)}개뿐입니다. {int(max_codes)}개 전체시장 계산으로 보기 어렵습니다. "
+                "TOP50 저장을 중단합니다. 유니버스 진단의 listing_rows/listing_included/error를 확인하세요."
+            )
+            st.stop()
 
         data_start = (pd.to_datetime(asof_date) - pd.DateOffset(days=1400)).strftime("%Y%m%d")
         rows = []
@@ -6342,6 +6371,15 @@ elif menu == "3. TOP50":
         )
         if "요양원여부" not in result_df.columns:
             result_df["요양원여부"] = "N"
+
+        def _top50_grade_explain(row):
+            grade = str(row.get("등급", ""))
+            score = _safe_float_value(row.get("점수", 0), 0)
+            heat = str(row.get("과열상태", ""))
+            buy_state = str(row.get("매수상태", ""))
+            return f"TOP50 신규후보등급 {grade}: 점수 {score:.1f} / {buy_state} / {heat}. 보유차수 A/B/C와는 별도 기준"
+
+        result_df["등급설명"] = result_df.apply(_top50_grade_explain, axis=1)
 
         final_judgements = result_df.apply(judge_final_entry, axis=1)
         result_df["최종판정"] = [x[0] for x in final_judgements]
