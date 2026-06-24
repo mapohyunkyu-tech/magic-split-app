@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_TOP50_UNIVERSE_GRADE_FIX_20260624"
+APP_VERSION = "v27_A_GRADE_STRONG_RECOVERY_FIX_20260624"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4767,7 +4767,10 @@ def judge_holding_row(row, info, op, is_excluded=False):
     if mode == "강한 회수모드":
         if pnl_pct >= -2:
             return "회수후보", "금지", "강한 회수모드: 본전/약손실 회수 우선"
-        return "유지/추가금지", "금지", "강한 회수모드: 공포매수보다 현금방어 우선"
+        # v27_A_GRADE_STRONG_RECOVERY_FIX:
+        # 강한 회수모드라도 기준가에 도달한 기존 보유 A급은
+        # 공포매수 탄창제 슬롯 안에서 예외 후보가 되어야 한다.
+        # 여기서 무조건 금지로 끝내지 말고 아래 차수 기준/자동등급 판단까지 내려보낸다.
 
     if mode == "회수모드" and pnl_pct >= -2:
         return "회수후보", "금지", "회수모드: 본전/약손실 회수 우선"
