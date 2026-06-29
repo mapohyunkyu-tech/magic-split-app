@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_INPUT_FIX_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10277,6 +10277,62 @@ elif menu == "7. 실전 운영판":
     st.header("7. 실전 운영판")
     st.caption("백테스트 1등 세팅을 실전용으로 고정해, 오늘 사기/대기/회수 신호를 먼저 보는 화면입니다.")
 
+    st.subheader("0) 자본/매수금액 입력")
+    st.caption("7천만원 기준값을 기본으로 넣어뒀습니다. 여기서 총자본과 최저현금, 차수별 매수금액을 직접 바꿀 수 있습니다.")
+
+    capital_preset = st.radio(
+        "자본 프리셋",
+        ["7천만원", "1억원", "직접입력"],
+        horizontal=True,
+        key="live_capital_preset",
+    )
+
+    if capital_preset == "1억원":
+        default_total_cash = 100_000_000
+        default_defense_cash = 50_000_000
+        default_leader_1 = 13_000_000
+        default_leader_2 = 5_000_000
+        default_leader_3 = 3_000_000
+        default_second_1 = 7_000_000
+        default_second_2 = 3_000_000
+    elif capital_preset == "7천만원":
+        default_total_cash = 70_000_000
+        default_defense_cash = 35_000_000
+        default_leader_1 = 9_000_000
+        default_leader_2 = 3_500_000
+        default_leader_3 = 2_000_000
+        default_second_1 = 5_000_000
+        default_second_2 = 2_000_000
+    else:
+        default_total_cash = 70_000_000
+        default_defense_cash = 35_000_000
+        default_leader_1 = 9_000_000
+        default_leader_2 = 3_500_000
+        default_leader_3 = 2_000_000
+        default_second_1 = 5_000_000
+        default_second_2 = 2_000_000
+
+    cap_c1, cap_c2 = st.columns(2)
+    with cap_c1:
+        live_total_cash = st.number_input("총자본", min_value=10_000_000, max_value=1_000_000_000, value=default_total_cash, step=1_000_000, format="%d", key="live_total_cash")
+    with cap_c2:
+        live_defense_cash = st.number_input("최저현금/방어예수금", min_value=0, max_value=int(live_total_cash), value=min(default_defense_cash, int(live_total_cash)), step=1_000_000, format="%d", key="live_defense_cash")
+
+    st.markdown("##### 차수별 매수금액")
+    buy_c1, buy_c2, buy_c3 = st.columns(3)
+    with buy_c1:
+        live_leader_1 = st.number_input("대장주 1차", min_value=0, max_value=200_000_000, value=default_leader_1, step=500_000, format="%d", key="live_leader_1")
+        live_second_1 = st.number_input("2등대표주 1차", min_value=0, max_value=200_000_000, value=default_second_1, step=500_000, format="%d", key="live_second_1")
+    with buy_c2:
+        live_leader_2 = st.number_input("대장주 2차", min_value=0, max_value=200_000_000, value=default_leader_2, step=500_000, format="%d", key="live_leader_2")
+        live_second_2 = st.number_input("2등대표주 2차", min_value=0, max_value=200_000_000, value=default_second_2, step=500_000, format="%d", key="live_second_2")
+    with buy_c3:
+        live_leader_3 = st.number_input("대장주 3차", min_value=0, max_value=200_000_000, value=default_leader_3, step=500_000, format="%d", key="live_leader_3")
+        live_available_cash = int(live_total_cash) - int(live_defense_cash)
+        st.metric("실제 운용 가능금", f"{live_available_cash:,.0f}원")
+
+    st.info(f"현재 입력값: 총자본 {int(live_total_cash):,}원 / 최저현금 {int(live_defense_cash):,}원 / 운용가능 {int(live_available_cash):,}원")
+
     st.subheader("1) 최종 후보 세팅")
     profile = st.radio(
         "운영 프로필",
@@ -10304,8 +10360,11 @@ elif menu == "7. 실전 운영판":
         {"항목": "섹터자동가중", "값": "표준형", "실전 의미": "좋은 섹터 1.2배, 보통 1.0배, 약한 섹터 0.5배, D급 0배"},
         {"항목": "MDD브레이크", "값": live_brake, "실전 의미": "계좌가 흔들릴 때만 신규/추가매수 축소"},
         {"항목": "손실쿨다운", "값": "완만쿨다운", "실전 의미": "전량회수 손실 섹터/종목은 잠깐 축소"},
-        {"항목": "대장주", "값": "1차 1,300만 / 2차 500만 / 3차 300만", "실전 의미": "맞는 자리 1차를 크게, 물타기 3차는 키우지 않음"},
-        {"항목": "2등대표주", "값": "1차 700만 / 2차 300만", "실전 의미": "보조 수익 담당, 오래 끌지 않음"},
+        {"항목": "총자본", "값": f"{int(live_total_cash):,}원", "실전 의미": "실전 운영 기준 자본"},
+        {"항목": "최저현금", "값": f"{int(live_defense_cash):,}원", "실전 의미": "이 금액 아래로 내려가면 신규/추가매수 제한"},
+        {"항목": "운용가능금", "값": f"{int(live_available_cash):,}원", "실전 의미": "총자본 - 최저현금"},
+        {"항목": "대장주", "값": f"1차 {int(live_leader_1):,}원 / 2차 {int(live_leader_2):,}원 / 3차 {int(live_leader_3):,}원", "실전 의미": "맞는 자리 1차를 크게, 물타기 3차는 키우지 않음"},
+        {"항목": "2등대표주", "값": f"1차 {int(live_second_1):,}원 / 2차 {int(live_second_2):,}원", "실전 의미": "보조 수익 담당, 오래 끌지 않음"},
         {"항목": "익절", "값": "대장주 +10% / +18%, 2등 +5%", "실전 의미": "대장주는 더 보유, 2등은 짧게 회전"},
         {"항목": "증액투자", "값": "ON", "실전 의미": "총자산이 커지면 차수금액 자동 확대"},
     ])
@@ -10364,10 +10423,32 @@ elif menu == "7. 실전 운영판":
                 show_pinned_dataframe(stock_view[stock_cols].head(80), height=520)
 
                 export_buffer = io.BytesIO()
+                live_capital_df = pd.DataFrame([{
+                    "APP_VERSION": APP_VERSION,
+                    "운영프로필": profile,
+                    "총자본": int(live_total_cash),
+                    "최저현금": int(live_defense_cash),
+                    "운용가능금": int(live_available_cash),
+                    "수익확대프리셋": "C 조합공격",
+                    "장세매수필터": "MDD10 상승강화 + 횡보차단",
+                    "섹터자동가중": "표준형",
+                    "MDD브레이크": live_brake,
+                    "손실쿨다운": "완만쿨다운",
+                    "대장주1차": int(live_leader_1),
+                    "대장주2차": int(live_leader_2),
+                    "대장주3차": int(live_leader_3),
+                    "2등대표주1차": int(live_second_1),
+                    "2등대표주2차": int(live_second_2),
+                    "대장주익절": "+10% / +18%",
+                    "2등대표주익절": "+5%",
+                    "증액투자": "ON",
+                    "회전형": "OFF",
+                }])
                 with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     zf.writestr(f"magic_split_live_sector_action_{today_str()}.csv", result_df.to_csv(index=False).encode("utf-8-sig"))
                     zf.writestr(f"magic_split_live_stock_action_{today_str()}.csv", stock_df.to_csv(index=False).encode("utf-8-sig"))
                     zf.writestr(f"magic_split_live_settings_{today_str()}.csv", live_settings.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_capital_settings_{today_str()}.csv", live_capital_df.to_csv(index=False).encode("utf-8-sig"))
                 export_buffer.seek(0)
                 st.download_button(
                     "실전 운영판 CSV 묶음 다운로드",
