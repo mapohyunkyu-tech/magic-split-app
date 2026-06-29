@@ -5640,10 +5640,32 @@ def _bt_sector_auto_weight(sector_row, trade_rows, signal_date, mode="OFF", init
         grade = "C"
         reason_bits.append("신호약화")
 
+    # 강한차단 계열은 "좋은 섹터에 더 싣기"보다 "최근 손실 섹터 신규/추가매수 축소"를 우선한다.
+    # 단, 현재 자금유입이 살아나면 B등급으로 복귀시켜 영구 차단을 피한다.
+    if mode in {"강한차단형", "초강한차단형"}:
+        loss_ratio = (neg60 / sell60) if sell60 > 0 else 0.0
+        recovery_ok = flow_strong and (score >= 5.0 or amount_vs5 > 0 or flow_delta > 0)
+        if recovery_ok and grade in {"C", "D"}:
+            grade = "B"
+            reason_bits.append("복귀유입")
+        elif not recovery_ok:
+            if (pnl60 < 0 and sell60 >= 1) or (pnl120 < 0 and sell60 >= 1):
+                if grade not in {"D"}:
+                    grade = "C"
+                reason_bits.append("강한차단:손실섹터축소")
+            if (pnl60 <= loss_threshold * 0.6 and neg60 >= 2) or (sell60 >= 3 and loss_ratio >= 0.50 and pnl60 < 0):
+                grade = "D"
+                reason_bits.append("강한차단:D급신규금지")
+            if flow_weak and pnl60 < 0:
+                grade = "D" if mode == "초강한차단형" else "C"
+                reason_bits.append("강한차단:유입약화")
+
     weights_by_mode = {
         "보수형": {"A": 1.0, "B": 1.0, "C": 0.5, "D": 0.0},
         "표준형": {"A": 1.2, "B": 1.0, "C": 0.5, "D": 0.0},
         "공격형": {"A": 1.3, "B": 1.0, "C": 0.6, "D": 0.0},
+        "강한차단형": {"A": 1.2, "B": 1.0, "C": 0.3, "D": 0.0},
+        "초강한차단형": {"A": 1.2, "B": 1.0, "C": 0.0, "D": 0.0},
     }
     table = weights_by_mode.get(mode, weights_by_mode.get("표준형"))
     weight = float(table.get(grade, 1.0))
@@ -9645,7 +9667,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호+속도개선판에 섹터신뢰도 자동가중을 추가했습니다. 섹터를 영구 제외하지 않고 최근 성과/자금유입에 따라 예산을 자동 조절합니다.")
+    st.caption("수익확대+역할보호+속도개선판에 섹터신뢰도 자동가중을 추가했습니다. 이번 버전은 강한차단형/초강한차단형을 포함해 손실 섹터 축소 테스트가 가능합니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9793,12 +9815,13 @@ elif menu == "6. 섹터전략 백테스트":
         with wg1:
             sector_weight_mode = st.selectbox(
                 "섹터 자동가중",
-                options=["OFF", "보수형", "표준형", "공격형"],
+                options=["OFF", "보수형", "표준형", "공격형", "강한차단형", "초강한차단형"],
                 index=0,
                 key="bt_sector_weight_mode",
             )
         with wg2:
             st.caption("영구 제외가 아니라 최근 실현손익+현재 섹터 유입으로 예산만 조절합니다. 보수형=A 1.0/B 1.0/C 0.5/D 0, 표준형=A 1.2/B 1.0/C 0.5/D 0, 공격형=A 1.3/B 1.0/C 0.6/D 0")
+            st.caption("강한차단형=A 1.2/B 1.0/C 0.3/D 0, 초강한차단형=A 1.2/B 1.0/C 0/D 0입니다. 손실+유입약화 섹터는 더 빨리 C/D로 강등하고, 재유입 시 B로 복귀합니다.")
             st.caption("손실 섹터도 현재 거래대금·쏠림이 다시 살아나면 B등급으로 복귀해 재매수 허용됩니다.")
 
         st.subheader("5) 역할보호 손실축소 설정")
