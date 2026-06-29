@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_COMPOUND_REGIME_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_REGIME_BUY_FILTER_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -197,7 +197,7 @@ def _ensure_sector_flow_text_columns(df):
 # 섹터전략 백테스트 전용 컬럼.
 # 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
 SECTOR_BACKTEST_DAILY_COLUMNS = [
-    "기준일", "다음매매일", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
+    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
     "누적실현손익", "일일손익", "최대낙폭", "보유종목수", "매수건수", "매도건수", "메모"
 ]
 
@@ -4743,6 +4743,8 @@ def run_sector_strategy_backtest(
     max_signal_days=40,
     fast_mode=True,
     universe_mode="핵심만",
+    regime_filter_mode="OFF",
+    regime_custom_multipliers=None,
     progress_callback=None,
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
@@ -4755,6 +4757,7 @@ def run_sector_strategy_backtest(
     - 대장주 발빼기 후 신호가 다시 사기로 회복되면 재진입대기 → 재진입허용으로 1차의 50%만 복원한다.
     - 전량회수까지 기다리기 전에 대장주/2등대표주 손실축소 규칙을 적용한다.
     - 증액투자 모드가 켜지면 차수 금액과 섹터 한도가 현재 총자산/초기자금 비율만큼 자동 확대·축소된다.
+    - 장세별 매수필터가 켜지면 매도는 그대로 두고 신규/추가매수 예산만 장세배율로 줄이거나 차단한다.
     """
     leader_df = normalize_sector_leader_df(leader_df)
     active = leader_df[leader_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
@@ -4775,6 +4778,11 @@ def run_sector_strategy_backtest(
         if progress_callback:
             progress_callback(0, max(1, len(dates) - 1), "가격데이터 1회 로딩")
         price_map = _bt_preload_price_map(active, start_date, end_date, lookback_days=lookback_days)
+
+    benchmark_regime_df = _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=lookback_days)
+    regime_custom_multipliers = dict(regime_custom_multipliers or {})
+    current_market_regime = "장세불명"
+    current_buy_multiplier = 1.0
 
     def _price_on_or_after_local(code, trade_date, field="open"):
         if bool(fast_mode):
@@ -4862,6 +4870,9 @@ def run_sector_strategy_backtest(
         if sector_invested(sector) >= sector_budget_limit:
             return 0
         budget = _bt_scaled_budget(float(budget), signal_date)
+        budget = float(budget) * float(current_buy_multiplier)
+        if budget <= 0:
+            return 0
         budget = min(float(budget), max(0.0, sector_budget_limit - sector_invested(sector)))
         price, actual_date = _price_on_or_after_local(code, trade_date, field="open")
         if price is None or price <= 0:
@@ -4940,6 +4951,8 @@ def run_sector_strategy_backtest(
 
     for i, signal_date in enumerate(dates[:-1]):
         next_trade_date = dates[i + 1]
+        current_market_regime = _bt_regime_on_date(benchmark_regime_df, signal_date)
+        current_buy_multiplier = _bt_regime_multiplier(current_market_regime, regime_filter_mode, regime_custom_multipliers)
         if progress_callback:
             progress_callback(i + 1, len(dates) - 1, signal_date)
 
@@ -4950,7 +4963,7 @@ def run_sector_strategy_backtest(
                 sector_df, stock_df, _diag = build_sector_rotation_flow(active, save_to_sheet=False, asof_date=signal_date, lookback_days=lookback_days, dynamic_roles=True)
         except Exception as e:
             daily_rows.append({
-                "기준일": signal_date, "다음매매일": next_trade_date, "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
+                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
                 "현금": round(cash, 0), "평가금액": 0, "총자산": round(cash, 0), "누적실현손익": round(realized, 0),
                 "일일손익": 0, "최대낙폭": round(max_drawdown, 2), "보유종목수": len([p for p in positions.values() if p.get("qty", 0) > 0]),
                 "매수건수": 0, "매도건수": 0, "메모": f"신호 계산 실패: {e}"
@@ -5099,6 +5112,8 @@ def run_sector_strategy_backtest(
                 role = row.get("_role_bucket", "감시")
                 if role == "감시":
                     continue
+                if not _bt_regime_role_allowed(current_market_regime, regime_filter_mode, role):
+                    continue
                 if role == "회전형" and not include_rotation:
                     continue
                 code = _bt_position_key(row.get("코드", ""))
@@ -5165,7 +5180,7 @@ def run_sector_strategy_backtest(
         sells_today = len([t for t in trade_rows if t["구분"] == "매도"]) - sell_count_before
         signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
         daily_rows.append({
-            "기준일": signal_date, "다음매매일": next_trade_date, "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
+            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
             "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": ""
@@ -5219,7 +5234,8 @@ def run_sector_strategy_backtest(
         "최종보유종목수": len(pos_df),
         "검증거래일": len(daily_df),
         "증액투자모드": "ON" if compound_mode else "OFF",
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
+        "장세매수필터": str(regime_filter_mode),
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -5328,6 +5344,71 @@ def _bt_classify_market_regime(ret20, day_ret):
         return "조정장"
     return "횡보장"
 
+
+
+
+def _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=120):
+    """백테스트 매수필터용 KODEX200(069500) 장세 데이터를 1회 로딩한다."""
+    try:
+        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 60) + 30)).strftime("%Y%m%d")
+        end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
+        raw = get_ohlcv_fdr_cached("069500", start_pad, end_pad)
+        df = _bt_prepare_single_price_df(raw)
+        if df is None or len(df) == 0:
+            return pd.DataFrame()
+        df = df.copy().sort_index()
+        df["day_ret"] = pd.to_numeric(df.get("close", 0), errors="coerce").pct_change() * 100
+        if "ret20" not in df.columns:
+            df["ret20"] = pd.to_numeric(df.get("close", 0), errors="coerce").pct_change(20) * 100
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _bt_regime_on_date(benchmark_df, asof_date):
+    """KODEX200 기준 해당일 장세를 반환한다. 데이터가 없으면 장세불명."""
+    try:
+        if benchmark_df is None or len(benchmark_df) == 0:
+            return "장세불명"
+        target = pd.to_datetime(asof_date)
+        part = benchmark_df[benchmark_df.index <= target].copy()
+        if len(part) == 0:
+            return "장세불명"
+        row = part.iloc[-1]
+        return _bt_classify_market_regime(row.get("ret20", np.nan), row.get("day_ret", 0))
+    except Exception:
+        return "장세불명"
+
+
+def _bt_regime_multiplier(regime, mode="OFF", custom_multipliers=None):
+    """장세별 매수차단/축소 배율. 매도에는 영향을 주지 않고 신규/추가매수 예산에만 적용한다."""
+    regime = str(regime or "장세불명")
+    mode = str(mode or "OFF")
+    if custom_multipliers is None:
+        custom_multipliers = {}
+    if mode in {"OFF", "사용안함", "없음"}:
+        return 1.0
+    if mode == "하락/급락 차단":
+        return 0.0 if regime in {"하락장", "급락일"} else 1.0
+    if mode == "횡보축소 + 하락차단":
+        table = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
+        return float(table.get(regime, 0.5))
+    if mode == "상승장만 매수":
+        return 1.0 if regime in {"강한상승장", "상승장"} else 0.0
+    if mode == "사용자지정":
+        return float(custom_multipliers.get(regime, custom_multipliers.get("장세불명", 1.0)))
+    return 1.0
+
+
+def _bt_regime_role_allowed(regime, mode, role):
+    """장세 필터에서 역할별 매수 허용 여부를 판단한다."""
+    regime = str(regime or "장세불명")
+    mode = str(mode or "OFF")
+    role = str(role or "")
+    if mode == "횡보축소 + 하락차단" and regime in {"횡보장", "조정장", "장세불명"}:
+        # 횡보/조정에서는 대장주만 축소 스플릿한다. 2등/회전형은 신규·추가매수를 막는다.
+        return role == "대장주"
+    return True
 
 def build_backtest_regime_result(daily_df, start_date, end_date):
     """일별 자금흐름 + KODEX200 기준으로 장세별 성과표를 만든다."""
@@ -9300,7 +9381,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호 기본값: 동시 2섹터, 대장주 1차 1,000만, 2등 1차 500만, 재진입 50%, 회전형 OFF. 증액투자 모드를 켜면 총자산 비율로 차수 금액이 자동 확대됩니다.")
+    st.caption("수익확대+역할보호 기본값에 증액투자/장세검증을 더했습니다. 장세별 매수필터를 켜면 상승장에는 크게, 횡보·조정장에는 축소, 하락·급락일에는 매수차단을 테스트할 수 있습니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9319,6 +9400,7 @@ elif menu == "6. 섹터전략 백테스트":
             "기본검증 120거래일": 120,
             "실전검증 240거래일": 240,
             "장세검증 480거래일": 480,
+            "스트레스검증 720거래일": 720,
         }
         default_signal_days = preset_days_map.get(period_preset, 240)
         with c1:
@@ -9384,7 +9466,44 @@ elif menu == "6. 섹터전략 백테스트":
             fast_mode = st.checkbox("빠른 백테스트", value=True, key="bt_fast_mode")
             universe_mode = st.selectbox("검증 종목 범위", options=["핵심만", "전체"], index=0, key="bt_universe_mode")
 
-        st.subheader("4) 역할보호 손실축소 설정")
+        st.subheader("4) 장세별 매수차단/축소 설정")
+        mf1, mf2, mf3, mf4 = st.columns(4)
+        with mf1:
+            regime_filter_mode = st.selectbox(
+                "장세별 매수필터",
+                options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "상승장만 매수", "사용자지정"],
+                index=0,
+                key="bt_regime_filter_mode",
+            )
+        default_mult = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
+        if regime_filter_mode == "사용자지정":
+            with mf2:
+                mult_strong = st.number_input("강한상승장 배율", min_value=0.0, max_value=2.0, value=1.2, step=0.1, key="bt_mult_strong")
+                mult_up = st.number_input("상승장 배율", min_value=0.0, max_value=2.0, value=1.0, step=0.1, key="bt_mult_up")
+            with mf3:
+                mult_side = st.number_input("횡보장 배율", min_value=0.0, max_value=2.0, value=0.5, step=0.1, key="bt_mult_side")
+                mult_corr = st.number_input("조정장 배율", min_value=0.0, max_value=2.0, value=0.5, step=0.1, key="bt_mult_corr")
+            with mf4:
+                mult_down = st.number_input("하락장 배율", min_value=0.0, max_value=2.0, value=0.0, step=0.1, key="bt_mult_down")
+                mult_crash = st.number_input("급락일 배율", min_value=0.0, max_value=2.0, value=0.0, step=0.1, key="bt_mult_crash")
+            regime_custom_multipliers = {
+                "강한상승장": mult_strong, "상승장": mult_up, "횡보장": mult_side,
+                "조정장": mult_corr, "하락장": mult_down, "급락일": mult_crash, "장세불명": mult_side,
+            }
+        else:
+            regime_custom_multipliers = default_mult
+        if regime_filter_mode == "횡보축소 + 하락차단":
+            st.caption("횡보장/조정장에서는 대장주만 50% 매수하고, 2등대표주·회전형 신규/추가매수는 차단합니다. 하락장/급락일은 신규·추가매수를 차단합니다.")
+        elif regime_filter_mode == "하락/급락 차단":
+            st.caption("하락장/급락일 신규·추가매수만 차단하고, 상승/횡보/조정장은 기존 금액대로 매수합니다.")
+        elif regime_filter_mode == "상승장만 매수":
+            st.caption("강한상승장/상승장에서만 신규·추가매수합니다. 매우 보수적인 비교용입니다.")
+        elif regime_filter_mode == "사용자지정":
+            st.caption("입력한 장세배율을 신규·추가매수 예산에 곱합니다. 0이면 매수 차단입니다.")
+        else:
+            st.caption("장세별 매수필터 OFF: 기존 섹터 신호만으로 매수합니다.")
+
+        st.subheader("5) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
             leader_loss_warn = st.number_input("대장주 추가매수금지 손실률(%)", min_value=-30.0, max_value=-1.0, value=-6.0, step=0.5, key="bt_leader_loss_warn")
@@ -9408,6 +9527,8 @@ elif menu == "6. 섹터전략 백테스트":
 - `전량회수`: 해당 신호 종목/섹터는 전량 정리합니다.
 - 방어예수금 아래로 내려가는 매수는 수량을 줄이거나 막습니다.
 - 증액투자 모드 ON이면 차수 금액과 한 섹터 최대금액이 현재 총자산/초기자금 비율만큼 자동 확대·축소됩니다.
+- 장세별 매수필터 ON이면 매도는 그대로 두고, 신규/추가매수 예산만 장세배율로 줄이거나 0으로 차단합니다.
+- `횡보축소 + 하락차단`은 횡보/조정장에서 대장주만 축소 매수하고 2등/회전형 신규·추가매수는 막습니다.
 """)
 
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
@@ -9452,6 +9573,8 @@ elif menu == "6. 섹터전략 백테스트":
                         max_signal_days=max_signal_days,
                         fast_mode=fast_mode,
                         universe_mode=universe_mode,
+                        regime_filter_mode=regime_filter_mode,
+                        regime_custom_multipliers=regime_custom_multipliers,
                         progress_callback=_progress,
                     )
                     prog.empty()
@@ -9489,6 +9612,13 @@ elif menu == "6. 섹터전략 백테스트":
                             "방어예수금": defense_cash,
                             "최저현금기준": defense_preset,
                             "증액투자모드": compound_mode,
+                            "장세매수필터": regime_filter_mode,
+                            "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
+                            "장세배율_상승장": regime_custom_multipliers.get("상승장", ""),
+                            "장세배율_횡보장": regime_custom_multipliers.get("횡보장", ""),
+                            "장세배율_조정장": regime_custom_multipliers.get("조정장", ""),
+                            "장세배율_하락장": regime_custom_multipliers.get("하락장", ""),
+                            "장세배율_급락일": regime_custom_multipliers.get("급락일", ""),
                             "한섹터최대금액": max_sector_budget,
                             "동시진입섹터수": max_active_sectors,
                             "대장주1차": leader_1,
@@ -9562,7 +9692,7 @@ elif menu == "6. 섹터전략 백테스트":
                             show_pinned_dataframe(monthly_df, height=420)
                             st.download_button("월별결과 CSV 다운로드", data=monthly_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_monthly_{today_str()}.csv", mime="text/csv")
                         with tab_regime:
-                            st.caption("장세는 KODEX200(069500) 20거래일 수익률 기준으로 단순 분류합니다. 코스피 대비 확인용이며, 매매 신호 자체에는 영향을 주지 않습니다.")
+                            st.caption("장세는 KODEX200(069500) 20거래일 수익률 기준으로 단순 분류합니다. 장세별 매수필터를 켠 경우 신규/추가매수 예산에 영향을 줍니다.")
                             show_pinned_dataframe(regime_df, height=300)
                             st.download_button("장세별결과 CSV 다운로드", data=regime_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_regime_{today_str()}.csv", mime="text/csv")
                             with st.expander("일별 장세 상세", expanded=False):
