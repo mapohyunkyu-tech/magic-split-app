@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_MDD10_PROFIT_EXPAND_SPEED_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_AUTO_SECTOR_WEIGHT_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4788,6 +4788,7 @@ def run_sector_strategy_backtest(
     regime_filter_mode="OFF",
     regime_custom_multipliers=None,
     progress_callback=None,
+    sector_weight_mode="OFF",
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
 
@@ -4825,6 +4826,10 @@ def run_sector_strategy_backtest(
     regime_custom_multipliers = dict(regime_custom_multipliers or {})
     current_market_regime = "장세불명"
     current_buy_multiplier = 1.0
+    sector_weight_mode = str(sector_weight_mode or "OFF")
+    sector_weight_map = {}
+    sector_grade_map = {}
+    sector_weight_reason_map = {}
 
     # 같은 날짜/종목 가격조회가 매수·매도·평가에서 반복되므로 실행 중 메모리 캐시를 둔다.
     _open_lookup_cache = {}
@@ -4928,11 +4933,12 @@ def run_sector_strategy_backtest(
         nonlocal cash
         code = _bt_position_key(row.get("코드", ""))
         sector = str(row.get("섹터", ""))
-        sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date)
+        sector_auto_weight = float(sector_weight_map.get(sector, 1.0))
+        sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date) * max(0.0, sector_auto_weight)
         if sector_invested(sector) >= sector_budget_limit:
             return 0
         budget = _bt_scaled_budget(float(budget), signal_date)
-        budget = float(budget) * float(current_buy_multiplier)
+        budget = float(budget) * float(current_buy_multiplier) * max(0.0, sector_auto_weight)
         if budget <= 0:
             return 0
         budget = min(float(budget), max(0.0, sector_budget_limit - sector_invested(sector)))
@@ -4971,7 +4977,10 @@ def run_sector_strategy_backtest(
         p["step"] = max(int(p.get("step", 0)), int(step))
         p["current_role"] = str(row.get("현재역할", p.get("current_role", "")))
         p["last_trade_date"] = actual_date or trade_date
-        record_trade(actual_date or trade_date, signal_date, "매수", reason, row, role, step, qty, price, fee, 0.0, "다음거래일 시가")
+        sw = float(sector_weight_map.get(sector, 1.0))
+        sg = str(sector_grade_map.get(sector, "B"))
+        smemo = "다음거래일 시가" if sector_weight_mode in {"OFF", "사용안함", "없음"} else f"다음거래일 시가 / 섹터가중 {sg} {sw:.1f}"
+        record_trade(actual_date or trade_date, signal_date, "매수", reason, row, role, step, qty, price, fee, 0.0, smemo)
         return qty
 
     def sell(row, qty_ratio, signal_date, trade_date, reason):
@@ -5041,6 +5050,9 @@ def run_sector_strategy_backtest(
         sector_action_map = {}
         if len(sector_df) > 0 and "섹터" in sector_df.columns:
             sector_action_map = dict(zip(sector_df["섹터"].astype(str), sector_df["오늘행동"].astype(str)))
+        sector_weight_map, sector_grade_map, sector_weight_reason_map = _bt_build_sector_auto_weight_maps(
+            sector_df, trade_rows, signal_date, mode=sector_weight_mode, initial_cash=initial_cash
+        )
         stock_by_code = {str(r.get("코드", "")).zfill(6): r for _, r in stock_df.iterrows()} if len(stock_df) else {}
         buy_count_before = len([t for t in trade_rows if t["구분"] == "매수"])
         sell_count_before = len([t for t in trade_rows if t["구분"] == "매도"])
@@ -5134,10 +5146,16 @@ def run_sector_strategy_backtest(
         buy_candidates = pd.DataFrame()
         if len(sector_df) > 0:
             buy_candidates = sector_df[sector_df["오늘행동"].astype(str).eq("사기")].copy()
-            for c in ["쏠림변화", "5일대비거래대금증감률", "쏠림점수"]:
+            if len(buy_candidates) > 0:
+                buy_candidates["섹터자동가중"] = buy_candidates["섹터"].astype(str).map(lambda x: float(sector_weight_map.get(x, 1.0)))
+                buy_candidates["섹터자동등급"] = buy_candidates["섹터"].astype(str).map(lambda x: str(sector_grade_map.get(x, "B")))
+                if sector_weight_mode not in {"OFF", "사용안함", "없음"}:
+                    buy_candidates = buy_candidates[pd.to_numeric(buy_candidates["섹터자동가중"], errors="coerce").fillna(1.0) > 0].copy()
+            for c in ["쏠림변화", "5일대비거래대금증감률", "쏠림점수", "섹터자동가중"]:
                 if c in buy_candidates.columns:
                     buy_candidates[c] = pd.to_numeric(buy_candidates[c], errors="coerce").fillna(0)
-            buy_candidates = buy_candidates.sort_values(["쏠림변화", "5일대비거래대금증감률", "쏠림점수"], ascending=[False, False, False])
+            sort_cols = [c for c in ["섹터자동가중", "쏠림변화", "5일대비거래대금증감률", "쏠림점수"] if c in buy_candidates.columns]
+            buy_candidates = buy_candidates.sort_values(sort_cols, ascending=[False] * len(sort_cols)) if sort_cols else buy_candidates
 
         allowed_sectors = list(active_secs)
         for _, sr in buy_candidates.iterrows():
@@ -5259,7 +5277,7 @@ def run_sector_strategy_backtest(
             "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
-            "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": ""
+            "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else ""
         })
 
     # 최종 보유표.
@@ -5311,7 +5329,8 @@ def run_sector_strategy_backtest(
         "검증거래일": len(daily_df),
         "증액투자모드": "ON" if compound_mode else "OFF",
         "장세매수필터": str(regime_filter_mode),
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode}"
+        "섹터자동가중": str(sector_weight_mode),
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -5511,6 +5530,149 @@ def _bt_regime_role_allowed(regime, mode, role):
         if regime == "조정장":
             return role == "대장주"
     return True
+
+
+def _bt_numeric_from_row(row, key, default=0.0):
+    try:
+        if row is None:
+            return float(default)
+        if isinstance(row, dict):
+            v = row.get(key, default)
+        else:
+            v = row.get(key, default)
+        return float(pd.to_numeric(v, errors="coerce")) if not pd.isna(pd.to_numeric(v, errors="coerce")) else float(default)
+    except Exception:
+        return float(default)
+
+
+def _bt_sector_trade_stats_for_weight(trade_rows, sector, asof_date, initial_cash=100_000_000):
+    """섹터 자동가중용 과거 실현손익 통계. 현재 신호일 이전에 확정된 매도만 사용한다."""
+    try:
+        target = pd.to_datetime(asof_date)
+    except Exception:
+        target = pd.Timestamp.today()
+    stats = {
+        "pnl60": 0.0, "pnl120": 0.0, "neg60": 0, "sell60": 0, "sell120": 0,
+        "loss_threshold": -max(500_000.0, float(initial_cash or 0) * 0.01),
+    }
+    sector = str(sector or "")
+    if not trade_rows:
+        return stats
+    for t in trade_rows:
+        try:
+            if str(t.get("구분", "")) != "매도":
+                continue
+            if str(t.get("섹터", "")) != sector:
+                continue
+            td = pd.to_datetime(t.get("매매일", ""), errors="coerce")
+            if pd.isna(td) or td > target:
+                continue
+            pnl = float(pd.to_numeric(t.get("실현손익", 0), errors="coerce") or 0)
+            days = (target - td).days
+            if 0 <= days <= 180:
+                stats["pnl120"] += pnl
+                stats["sell120"] += 1
+            if 0 <= days <= 90:
+                stats["pnl60"] += pnl
+                stats["sell60"] += 1
+                if pnl < 0:
+                    stats["neg60"] += 1
+        except Exception:
+            continue
+    return stats
+
+
+def _bt_sector_auto_weight(sector_row, trade_rows, signal_date, mode="OFF", initial_cash=100_000_000):
+    """섹터를 영구 제외하지 않고, 최근 성과+현재 자금유입으로 매수 예산만 자동 가중한다.
+
+    반환: (weight, grade, reason)
+    - A: 강함. 예산 1.2~1.3배
+    - B: 정상. 예산 1.0배
+    - C: 약함. 예산 0.5~0.6배
+    - D: 최근도 약하고 현재 유입도 없으면 신규/추가매수 0배
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return 1.0, "B", "자동가중 OFF"
+
+    sector = str(sector_row.get("섹터", "") if hasattr(sector_row, "get") else "")
+    stats = _bt_sector_trade_stats_for_weight(trade_rows, sector, signal_date, initial_cash=initial_cash)
+    pnl60 = float(stats.get("pnl60", 0.0))
+    pnl120 = float(stats.get("pnl120", 0.0))
+    neg60 = int(stats.get("neg60", 0) or 0)
+    sell60 = int(stats.get("sell60", 0) or 0)
+    loss_threshold = float(stats.get("loss_threshold", -1_000_000.0))
+
+    action = str(sector_row.get("오늘행동", "대기") if hasattr(sector_row, "get") else "대기")
+    flow_delta = _bt_numeric_from_row(sector_row, "쏠림변화", 0.0)
+    amount_vs5 = _bt_numeric_from_row(sector_row, "5일대비거래대금증감률", 0.0)
+    score = _bt_numeric_from_row(sector_row, "쏠림점수", 0.0)
+    hot = action == "사기"
+    flow_strong = hot and (flow_delta > 0 or amount_vs5 > 0 or score >= 5.0)
+    flow_weak = action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"} or (flow_delta < 0 and amount_vs5 < 0)
+
+    # 기본 등급 판단. 과거 손익이 나빠도 현재 자금이 다시 들어오면 영구 차단하지 않고 B로 복귀시킨다.
+    grade = "B"
+    reason_bits = []
+    if sell60 == 0 and abs(pnl120) < 1:
+        grade = "B"
+        reason_bits.append("성과부족")
+    if pnl60 > 0 and pnl120 >= 0 and flow_strong:
+        grade = "A"
+        reason_bits.append("최근수익+유입")
+    elif pnl60 > 0 and flow_strong:
+        grade = "A"
+        reason_bits.append("60일수익+유입")
+    elif pnl60 < 0 and pnl120 < 0 and not flow_strong:
+        grade = "C"
+        reason_bits.append("60/120일 손실")
+    elif pnl60 < 0 and flow_strong:
+        grade = "B"
+        reason_bits.append("손실후 재유입")
+    elif pnl60 >= 0 and flow_strong:
+        grade = "A"
+        reason_bits.append("유입강함")
+
+    if pnl60 <= loss_threshold and neg60 >= 2 and not flow_strong:
+        grade = "D"
+        reason_bits.append("최근손실누적")
+    if flow_weak and pnl60 < 0 and not flow_strong and grade != "D":
+        grade = "C"
+        reason_bits.append("신호약화")
+
+    weights_by_mode = {
+        "보수형": {"A": 1.0, "B": 1.0, "C": 0.5, "D": 0.0},
+        "표준형": {"A": 1.2, "B": 1.0, "C": 0.5, "D": 0.0},
+        "공격형": {"A": 1.3, "B": 1.0, "C": 0.6, "D": 0.0},
+    }
+    table = weights_by_mode.get(mode, weights_by_mode.get("표준형"))
+    weight = float(table.get(grade, 1.0))
+    reason = "/".join(dict.fromkeys([x for x in reason_bits if x])) or "중립"
+    reason += f" | 60일 {pnl60:,.0f} / 120일 {pnl120:,.0f} / 유입:{'Y' if flow_strong else 'N'}"
+    return weight, grade, reason
+
+
+def _bt_build_sector_auto_weight_maps(sector_df, trade_rows, signal_date, mode="OFF", initial_cash=100_000_000):
+    weight_map, grade_map, reason_map = {}, {}, {}
+    if sector_df is None or len(sector_df) == 0:
+        return weight_map, grade_map, reason_map
+    for _, sr in sector_df.iterrows():
+        sector = str(sr.get("섹터", ""))
+        w, g, r = _bt_sector_auto_weight(sr, trade_rows, signal_date, mode=mode, initial_cash=initial_cash)
+        weight_map[sector] = float(w)
+        grade_map[sector] = str(g)
+        reason_map[sector] = str(r)
+    return weight_map, grade_map, reason_map
+
+
+def _bt_format_sector_weight_memo(weight_map, grade_map, limit=6):
+    if not weight_map:
+        return ""
+    try:
+        items = sorted(weight_map.items(), key=lambda x: (-float(x[1]), str(x[0])))[:int(limit)]
+        return "섹터자동가중 " + ", ".join([f"{sec}:{grade_map.get(sec, 'B')}/{float(w):.1f}" for sec, w in items])
+    except Exception:
+        return ""
 
 def build_backtest_regime_result(daily_df, start_date, end_date):
     """일별 자금흐름 + KODEX200 기준으로 장세별 성과표를 만든다."""
@@ -9483,7 +9645,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호 기본값에 MDD -10% 허용 수익확대 프리셋을 더했습니다. 상승장 배율 강화, 대장주 1차 확대, 대장주 25% 추세익절을 선택식으로 테스트합니다.")
+    st.caption("수익확대+역할보호+속도개선판에 섹터신뢰도 자동가중을 추가했습니다. 섹터를 영구 제외하지 않고 최근 성과/자금유입에 따라 예산을 자동 조절합니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9626,6 +9788,19 @@ elif menu == "6. 섹터전략 백테스트":
         else:
             st.caption("장세별 매수필터 OFF: 기존 섹터 신호만으로 매수합니다.")
 
+        st.subheader("4-1) 섹터신뢰도 자동가중")
+        wg1, wg2 = st.columns([1, 3])
+        with wg1:
+            sector_weight_mode = st.selectbox(
+                "섹터 자동가중",
+                options=["OFF", "보수형", "표준형", "공격형"],
+                index=0,
+                key="bt_sector_weight_mode",
+            )
+        with wg2:
+            st.caption("영구 제외가 아니라 최근 실현손익+현재 섹터 유입으로 예산만 조절합니다. 보수형=A 1.0/B 1.0/C 0.5/D 0, 표준형=A 1.2/B 1.0/C 0.5/D 0, 공격형=A 1.3/B 1.0/C 0.6/D 0")
+            st.caption("손실 섹터도 현재 거래대금·쏠림이 다시 살아나면 B등급으로 복귀해 재매수 허용됩니다.")
+
         st.subheader("5) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -9694,6 +9869,7 @@ elif menu == "6. 섹터전략 백테스트":
                 "대장주TP3": eff_leader_tp3 if eff_leader_tp_mode == "3단계추세익절" else "미사용",
                 "TP1비율": eff_leader_tp1_ratio,
                 "TP2비율": eff_leader_tp2_ratio if eff_leader_tp_mode == "3단계추세익절" else "미사용",
+                "섹터자동가중": sector_weight_mode,
             }
         ]), use_container_width=True, hide_index=True)
 
@@ -9746,6 +9922,7 @@ elif menu == "6. 섹터전략 백테스트":
                         regime_filter_mode=regime_filter_mode,
                         regime_custom_multipliers=regime_custom_multipliers,
                         progress_callback=_progress,
+                        sector_weight_mode=sector_weight_mode,
                     )
                     prog.empty()
                     status.empty()
@@ -9788,6 +9965,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "최저현금기준": defense_preset,
                             "증액투자모드": compound_mode,
                             "장세매수필터": regime_filter_mode,
+                            "섹터자동가중": sector_weight_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
                             "장세배율_상승장": regime_custom_multipliers.get("상승장", ""),
                             "장세배율_횡보장": regime_custom_multipliers.get("횡보장", ""),
