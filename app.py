@@ -173,6 +173,26 @@ SECTOR_FLOW_RESULT_COLUMNS = [
 ]
 
 
+# pandas 3.x 계열에서는 float 컬럼에 문자열을 넣으면 예외가 발생한다.
+# 섹터 흐름표의 판정/행동 컬럼은 처음에는 NaN으로 만들어져 float64가 될 수 있으므로
+# 문자열 판정을 넣기 전에 object/string 컬럼으로 고정한다.
+SECTOR_FLOW_TEXT_COLUMNS = [
+    "섹터", "기준역할", "현재역할", "역할변경신호", "섹터역할", "코드", "종목",
+    "오늘행동", "행동사유", "대장주예외허용", "고점위험", "대표주판정", "발빼기신호", "데이터기준일", "메모",
+    "섹터판정", "순환상태", "기준대장주", "기준2등대표주", "기준회전형대표주",
+    "현재대장주", "현재2등대표주", "현재회전형대표주", "역할변화요약", "대표주요약", "매수허용", "판정사유"
+]
+
+def _ensure_sector_flow_text_columns(df):
+    if df is None:
+        return df
+    out = df.copy()
+    for c in SECTOR_FLOW_TEXT_COLUMNS:
+        if c in out.columns:
+            out[c] = out[c].astype("object").where(~pd.isna(out[c]), "")
+    return out
+
+
 # 섹터전략 백테스트 전용 컬럼.
 # 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
 SECTOR_BACKTEST_DAILY_COLUMNS = [
@@ -4179,13 +4199,16 @@ def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, l
     for _, r in active.iterrows():
         rows.append(calc_sector_stock_flow_row(r, asof_date=asof_date, lookback_days=lookback_days))
     stock_df = pd.DataFrame(rows, columns=SECTOR_STOCK_FLOW_COLUMNS)
+    stock_df = _ensure_sector_flow_text_columns(stock_df)
     for c in ["오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억", "전일대비거래대금증감률", "5일대비거래대금증감률", "5일수익률", "20일수익률", "60일수익률", "120일고점대비눌림률"]:
         if c in stock_df.columns:
             stock_df[c] = pd.to_numeric(stock_df[c], errors="coerce").fillna(0)
 
     stock_df = assign_dynamic_sector_roles(stock_df, dynamic_roles=dynamic_roles)
+    stock_df = _ensure_sector_flow_text_columns(stock_df)
 
     valid = stock_df[stock_df["오늘거래대금억"] > 0].copy()
+    valid = _ensure_sector_flow_text_columns(valid)
     if len(valid) == 0:
         return (
             pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS),
@@ -4273,6 +4296,7 @@ def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, l
         })
 
     result_df = pd.DataFrame(result_rows)
+    result_df = _ensure_sector_flow_text_columns(result_df)
     if len(result_df) > 0:
         result_df = result_df.sort_values(["쏠림점수", "5일대비거래대금증감률", "오늘거래대금억"], ascending=[False, False, False]).reset_index(drop=True)
         result_df.insert(0, "순위", np.arange(1, len(result_df) + 1))
@@ -4614,11 +4638,14 @@ def _bt_stock_flow_row_from_map(row, price_map, asof_date):
 def _build_sector_rotation_flow_from_map(active, price_map, asof_date, dynamic_roles=True):
     rows = [_bt_stock_flow_row_from_map(r, price_map, asof_date) for _, r in active.iterrows()]
     stock_df = pd.DataFrame(rows, columns=SECTOR_STOCK_FLOW_COLUMNS)
+    stock_df = _ensure_sector_flow_text_columns(stock_df)
     for c in ["오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억", "전일대비거래대금증감률", "5일대비거래대금증감률", "5일수익률", "20일수익률", "60일수익률", "120일고점대비눌림률"]:
         if c in stock_df.columns:
             stock_df[c] = pd.to_numeric(stock_df[c], errors="coerce").fillna(0)
     stock_df = assign_dynamic_sector_roles(stock_df, dynamic_roles=dynamic_roles)
+    stock_df = _ensure_sector_flow_text_columns(stock_df)
     valid = stock_df[stock_df["오늘거래대금억"] > 0].copy()
+    valid = _ensure_sector_flow_text_columns(valid)
     if len(valid) == 0:
         return pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS), stock_df, {"대표주": int(len(stock_df)), "섹터": 0, "메모": "거래대금 계산 실패"}
     total_amount = float(valid["오늘거래대금억"].sum())
@@ -4675,6 +4702,7 @@ def _build_sector_rotation_flow_from_map(active, price_map, asof_date, dynamic_r
             "매수허용": buy_allow, "발빼기신호": exit_signal, "판정사유": reason, "데이터기준일": str(asof_date)
         })
     result_df = pd.DataFrame(result_rows)
+    result_df = _ensure_sector_flow_text_columns(result_df)
     if len(result_df) > 0:
         result_df = result_df.sort_values(["쏠림점수", "5일대비거래대금증감률", "오늘거래대금억"], ascending=[False, False, False]).reset_index(drop=True)
         result_df.insert(0, "순위", np.arange(1, len(result_df) + 1))
