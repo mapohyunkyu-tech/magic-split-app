@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_REGIME_PRESET_FILTER_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_MDD10_PROFIT_EXPAND_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4730,6 +4730,10 @@ def run_sector_strategy_backtest(
     second_drop2=5.0,
     leader_tp1=8.0,
     leader_tp2=12.0,
+    leader_tp3=25.0,
+    leader_tp_mode="2단계",
+    leader_tp1_ratio=0.5,
+    leader_tp2_ratio=0.3,
     second_tp=5.0,
     rotation_tp=3.0,
     enable_reentry=True,
@@ -4808,6 +4812,10 @@ def run_sector_strategy_backtest(
     fee_tax_rate = float(fee_tax_rate)
     leader_tp1 = float(leader_tp1)
     leader_tp2 = float(leader_tp2)
+    leader_tp3 = float(leader_tp3)
+    leader_tp_mode = str(leader_tp_mode or "2단계")
+    leader_tp1_ratio = float(leader_tp1_ratio or 0.5)
+    leader_tp2_ratio = float(leader_tp2_ratio or 0.3)
     second_tp = float(second_tp)
     rotation_tp = float(rotation_tp)
     reentry_budget_ratio = float(reentry_budget_ratio)
@@ -4896,7 +4904,7 @@ def run_sector_strategy_backtest(
                 "sector": sector, "role": role, "current_role": str(row.get("현재역할", "")), "code": code, "name": str(row.get("종목", "")),
                 "qty": 0, "cost": 0.0, "avg": 0.0, "step": 0, "first_price": float(price),
                 "first_date": actual_date or trade_date, "last_trade_date": actual_date or trade_date, "status": "보유",
-                "tp1_done": False, "last_exit_price": 0.0, "last_exit_reason": ""
+                "tp1_done": False, "tp2_done": False, "last_exit_price": 0.0, "last_exit_reason": ""
             }
         p = positions[code]
         p["status"] = "보유"
@@ -4996,13 +5004,27 @@ def run_sector_strategy_backtest(
             ret_now = (close_now / avg - 1) * 100
             role_now = p.get("role", "")
             if role_now == "대장주":
-                if ret_now >= leader_tp2:
-                    sell(row, 1.0, signal_date, next_trade_date, f"대장주 +{leader_tp2:g}% 전량익절")
-                elif (not bool(p.get("tp1_done", False))) and ret_now >= leader_tp1:
-                    sold_qty = sell(row, 0.5, signal_date, next_trade_date, f"대장주 +{leader_tp1:g}% 1차익절")
-                    if sold_qty > 0 and code in positions:
-                        positions[code]["tp1_done"] = True
-                        positions[code]["status"] = "코어보유"
+                if leader_tp_mode == "3단계추세익절":
+                    if ret_now >= leader_tp3:
+                        sell(row, 1.0, signal_date, next_trade_date, f"대장주 +{leader_tp3:g}% 잔여전량익절")
+                    elif (not bool(p.get("tp2_done", False))) and ret_now >= leader_tp2:
+                        sold_qty = sell(row, leader_tp2_ratio, signal_date, next_trade_date, f"대장주 +{leader_tp2:g}% 2차익절")
+                        if sold_qty > 0 and code in positions:
+                            positions[code]["tp2_done"] = True
+                            positions[code]["status"] = "추세보유"
+                    elif (not bool(p.get("tp1_done", False))) and ret_now >= leader_tp1:
+                        sold_qty = sell(row, leader_tp1_ratio, signal_date, next_trade_date, f"대장주 +{leader_tp1:g}% 1차익절")
+                        if sold_qty > 0 and code in positions:
+                            positions[code]["tp1_done"] = True
+                            positions[code]["status"] = "코어보유"
+                else:
+                    if ret_now >= leader_tp2:
+                        sell(row, 1.0, signal_date, next_trade_date, f"대장주 +{leader_tp2:g}% 전량익절")
+                    elif (not bool(p.get("tp1_done", False))) and ret_now >= leader_tp1:
+                        sold_qty = sell(row, leader_tp1_ratio, signal_date, next_trade_date, f"대장주 +{leader_tp1:g}% 1차익절")
+                        if sold_qty > 0 and code in positions:
+                            positions[code]["tp1_done"] = True
+                            positions[code]["status"] = "코어보유"
             elif role_now == "2등대표주" and ret_now >= second_tp:
                 sell(row, 1.0, signal_date, next_trade_date, f"2등대표주 +{second_tp:g}% 익절")
             elif role_now == "회전형" and ret_now >= rotation_tp:
@@ -5380,30 +5402,40 @@ def _bt_regime_on_date(benchmark_df, asof_date):
         return "장세불명"
 
 
-def _bt_regime_multiplier(regime, mode="OFF", custom_multipliers=None):
-    """장세별 매수차단/축소 배율. 매도에는 영향을 주지 않고 신규/추가매수 예산에만 적용한다."""
-    regime = str(regime or "장세불명")
+def _bt_regime_preset_table(mode="OFF", custom_multipliers=None):
+    """장세 필터 프리셋별 실제 배율표. settings CSV 표시와 실제 계산을 일치시킨다."""
     mode = str(mode or "OFF")
     if custom_multipliers is None:
         custom_multipliers = {}
     if mode in {"OFF", "사용안함", "없음"}:
-        return 1.0
+        return {"강한상승장": 1.0, "상승장": 1.0, "횡보장": 1.0, "조정장": 1.0, "하락장": 1.0, "급락일": 1.0, "장세불명": 1.0}
     if mode == "하락/급락 차단":
-        return 0.0 if regime in {"하락장", "급락일"} else 1.0
+        return {"강한상승장": 1.0, "상승장": 1.0, "횡보장": 1.0, "조정장": 1.0, "하락장": 0.0, "급락일": 0.0, "장세불명": 1.0}
     if mode == "횡보축소 + 하락차단":
-        table = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
-        return float(table.get(regime, 0.5))
+        return {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
     if mode == "횡보완전차단 + 조정축소":
-        table = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
-        return float(table.get(regime, 0.0))
+        return {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
     if mode == "상승공격 + 횡보차단":
-        table = {"강한상승장": 1.4, "상승장": 1.2, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
-        return float(table.get(regime, 0.0))
+        return {"강한상승장": 1.4, "상승장": 1.2, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
+    if mode == "MDD10 상승강화 + 횡보차단":
+        return {"강한상승장": 1.6, "상승장": 1.3, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
+    if mode == "MDD10 초공격 + 횡보차단":
+        return {"강한상승장": 1.7, "상승장": 1.35, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
     if mode == "상승장만 매수":
-        return 1.0 if regime in {"강한상승장", "상승장"} else 0.0
+        return {"강한상승장": 1.0, "상승장": 1.0, "횡보장": 0.0, "조정장": 0.0, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
     if mode == "사용자지정":
-        return float(custom_multipliers.get(regime, custom_multipliers.get("장세불명", 1.0)))
-    return 1.0
+        base = {"강한상승장": 1.0, "상승장": 1.0, "횡보장": 1.0, "조정장": 1.0, "하락장": 1.0, "급락일": 1.0, "장세불명": 1.0}
+        base.update({k: float(v) for k, v in dict(custom_multipliers or {}).items() if k in base})
+        return base
+    return {"강한상승장": 1.0, "상승장": 1.0, "횡보장": 1.0, "조정장": 1.0, "하락장": 1.0, "급락일": 1.0, "장세불명": 1.0}
+
+
+def _bt_regime_multiplier(regime, mode="OFF", custom_multipliers=None):
+    """장세별 매수차단/축소 배율. 매도에는 영향을 주지 않고 신규/추가매수 예산에만 적용한다."""
+    regime = str(regime or "장세불명")
+    mode = str(mode or "OFF")
+    table = _bt_regime_preset_table(mode, custom_multipliers)
+    return float(table.get(regime, table.get("장세불명", 1.0)))
 
 
 def _bt_regime_role_allowed(regime, mode, role):
@@ -5419,7 +5451,7 @@ def _bt_regime_role_allowed(regime, mode, role):
             return False
         if regime == "조정장":
             return role == "대장주"
-    if mode == "상승공격 + 횡보차단":
+    if mode in {"상승공격 + 횡보차단", "MDD10 상승강화 + 횡보차단", "MDD10 초공격 + 횡보차단"}:
         if regime in {"횡보장", "하락장", "급락일", "장세불명"}:
             return False
         if regime == "조정장":
@@ -9397,7 +9429,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호 기본값에 증액투자/장세검증을 더했습니다. 장세별 매수필터를 프리셋으로 선택해 테스트합니다. 숫자 조절 없이 횡보차단/조정축소/상승공격 모드를 비교할 수 있습니다.")
+    st.caption("수익확대+역할보호 기본값에 MDD -10% 허용 수익확대 프리셋을 더했습니다. 상승장 배율 강화, 대장주 1차 확대, 대장주 25% 추세익절을 선택식으로 테스트합니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9446,6 +9478,15 @@ elif menu == "6. 섹터전략 백테스트":
         if compound_mode:
             st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
 
+        st.subheader("1-1) MDD -10% 수익확대 프리셋")
+        profit_expand_preset = st.selectbox(
+            "수익확대 프리셋",
+            options=["직접입력/현재값", "A 상승배율강화", "B 대장주1차확대", "C 조합공격", "D 대장주25%추세익절"],
+            index=0,
+            key="bt_profit_expand_preset",
+        )
+        st.caption("프리셋은 실행 시 실제 적용값만 덮어씁니다. 화면 숫자는 참고용이고, 아래 적용값 표와 settings CSV에 실제값이 저장됩니다.")
+
         st.subheader("2) 역할별 차수 설정")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -9470,8 +9511,12 @@ elif menu == "6. 섹터전략 백테스트":
         st.subheader("3) 익절/재진입 설정")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
+            leader_tp_mode = st.selectbox("대장주 익절방식", options=["2단계", "3단계추세익절"], index=0, key="bt_leader_tp_mode")
             leader_tp1 = st.number_input("대장주 1차익절(%)", min_value=1.0, max_value=50.0, value=8.0, step=0.5, key="bt_leader_tp1")
-            leader_tp2 = st.number_input("대장주 전량익절(%)", min_value=1.0, max_value=80.0, value=12.0, step=0.5, key="bt_leader_tp2")
+            leader_tp2 = st.number_input("대장주 2차/전량익절(%)", min_value=1.0, max_value=80.0, value=12.0, step=0.5, key="bt_leader_tp2")
+            leader_tp3 = st.number_input("대장주 3차 잔여익절(%)", min_value=1.0, max_value=120.0, value=25.0, step=0.5, key="bt_leader_tp3")
+            leader_tp1_ratio = st.number_input("대장주 1차 익절비율", min_value=0.1, max_value=1.0, value=0.5, step=0.1, key="bt_leader_tp1_ratio")
+            leader_tp2_ratio = st.number_input("대장주 2차 익절비율", min_value=0.1, max_value=1.0, value=0.3, step=0.1, key="bt_leader_tp2_ratio")
         with c2:
             second_tp = st.number_input("2등대표주 익절(%)", min_value=1.0, max_value=50.0, value=5.0, step=0.5, key="bt_second_tp")
             rotation_tp = st.number_input("회전형 익절(%)", min_value=1.0, max_value=30.0, value=3.0, step=0.5, key="bt_rotation_tp")
@@ -9487,7 +9532,7 @@ elif menu == "6. 섹터전략 백테스트":
         with mf1:
             regime_filter_mode = st.selectbox(
                 "장세별 매수필터",
-                options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "횡보완전차단 + 조정축소", "상승공격 + 횡보차단", "상승장만 매수", "사용자지정"],
+                options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "횡보완전차단 + 조정축소", "상승공격 + 횡보차단", "MDD10 상승강화 + 횡보차단", "MDD10 초공격 + 횡보차단", "상승장만 매수", "사용자지정"],
                 index=3,
                 key="bt_regime_filter_mode",
             )
@@ -9507,13 +9552,17 @@ elif menu == "6. 섹터전략 백테스트":
                 "조정장": mult_corr, "하락장": mult_down, "급락일": mult_crash, "장세불명": mult_side,
             }
         else:
-            regime_custom_multipliers = default_mult
+            regime_custom_multipliers = _bt_regime_preset_table(regime_filter_mode)
         if regime_filter_mode == "횡보축소 + 하락차단":
             st.caption("횡보장/조정장에서는 대장주만 50% 매수하고, 2등대표주·회전형 신규/추가매수는 차단합니다. 하락장/급락일은 신규·추가매수를 차단합니다.")
         elif regime_filter_mode == "횡보완전차단 + 조정축소":
             st.caption("추천 비교값: 횡보장은 완전 차단, 조정장은 대장주만 50% 매수, 하락장/급락일은 신규·추가매수 차단입니다.")
         elif regime_filter_mode == "상승공격 + 횡보차단":
             st.caption("수익확대 테스트: 강한상승장 1.4배, 상승장 1.2배, 조정장은 대장주만 50%, 횡보/하락/급락은 차단합니다.")
+        elif regime_filter_mode == "MDD10 상승강화 + 횡보차단":
+            st.caption("MDD -10% 허용 테스트: 강한상승장 1.6배, 상승장 1.3배, 조정장은 대장주만 50%, 횡보/하락/급락은 차단합니다.")
+        elif regime_filter_mode == "MDD10 초공격 + 횡보차단":
+            st.caption("더 공격적인 참고값: 강한상승장 1.7배, 상승장 1.35배, 조정장은 대장주만 50%, 횡보/하락/급락은 차단합니다.")
         elif regime_filter_mode == "하락/급락 차단":
             st.caption("하락장/급락일 신규·추가매수만 차단하고, 상승/횡보/조정장은 기존 금액대로 매수합니다.")
         elif regime_filter_mode == "상승장만 매수":
@@ -9551,6 +9600,49 @@ elif menu == "6. 섹터전략 백테스트":
 - `횡보축소 + 하락차단`은 횡보/조정장에서 대장주만 축소 매수하고 2등/회전형 신규·추가매수는 막습니다.
 """)
 
+        # 수익확대 프리셋 실제 적용값 계산
+        eff_leader_1, eff_leader_2, eff_leader_3 = leader_1, leader_2, leader_3
+        eff_second_1, eff_second_2 = second_1, second_2
+        eff_leader_tp1, eff_leader_tp2, eff_leader_tp3 = leader_tp1, leader_tp2, leader_tp3
+        eff_leader_tp_mode = leader_tp_mode
+        eff_leader_tp1_ratio, eff_leader_tp2_ratio = leader_tp1_ratio, leader_tp2_ratio
+        eff_profit_preset_note = str(profit_expand_preset)
+        if profit_expand_preset == "A 상승배율강화":
+            # 금액/익절은 현재값 유지, 장세필터에서 MDD10 상승강화 프리셋 선택을 권장
+            pass
+        elif profit_expand_preset == "B 대장주1차확대":
+            eff_leader_1, eff_leader_2, eff_leader_3 = 13_000_000, 5_000_000, 3_000_000
+            eff_second_1, eff_second_2 = 5_000_000, 3_000_000
+        elif profit_expand_preset == "C 조합공격":
+            eff_leader_1, eff_leader_2, eff_leader_3 = 13_000_000, 5_000_000, 3_000_000
+            eff_second_1, eff_second_2 = 7_000_000, 3_000_000
+            eff_leader_tp1, eff_leader_tp2 = 10.0, 18.0
+            eff_leader_tp_mode = "2단계"
+            eff_leader_tp1_ratio = 0.5
+        elif profit_expand_preset == "D 대장주25%추세익절":
+            eff_leader_tp_mode = "3단계추세익절"
+            eff_leader_tp1, eff_leader_tp2, eff_leader_tp3 = 10.0, 18.0, 25.0
+            eff_leader_tp1_ratio, eff_leader_tp2_ratio = 0.3, 0.3
+
+        st.markdown("##### 실제 적용값 미리보기")
+        st.dataframe(pd.DataFrame([
+            {
+                "수익확대프리셋": eff_profit_preset_note,
+                "장세필터": regime_filter_mode,
+                "대장주1차": int(eff_leader_1),
+                "대장주2차": int(eff_leader_2),
+                "대장주3차": int(eff_leader_3),
+                "2등1차": int(eff_second_1),
+                "2등2차": int(eff_second_2),
+                "대장주익절방식": eff_leader_tp_mode,
+                "대장주TP1": eff_leader_tp1,
+                "대장주TP2": eff_leader_tp2,
+                "대장주TP3": eff_leader_tp3 if eff_leader_tp_mode == "3단계추세익절" else "미사용",
+                "TP1비율": eff_leader_tp1_ratio,
+                "TP2비율": eff_leader_tp2_ratio if eff_leader_tp_mode == "3단계추세익절" else "미사용",
+            }
+        ]), use_container_width=True, hide_index=True)
+
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
             if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
                 st.error("시작일은 종료일보다 앞서야 합니다.")
@@ -9572,14 +9664,18 @@ elif menu == "6. 섹터전략 백테스트":
                         max_sector_budget=max_sector_budget,
                         compound_mode=compound_mode,
                         max_active_sectors=max_active_sectors,
-                        leader_steps=(leader_1, leader_2, leader_3),
-                        second_steps=(second_1, second_2),
+                        leader_steps=(eff_leader_1, eff_leader_2, eff_leader_3),
+                        second_steps=(eff_second_1, eff_second_2),
                         rotation_step=rotation_1,
                         leader_drop2=leader_drop2,
                         leader_drop3=leader_drop3,
                         second_drop2=second_drop2,
-                        leader_tp1=leader_tp1,
-                        leader_tp2=leader_tp2,
+                        leader_tp1=eff_leader_tp1,
+                        leader_tp2=eff_leader_tp2,
+                        leader_tp3=eff_leader_tp3,
+                        leader_tp_mode=eff_leader_tp_mode,
+                        leader_tp1_ratio=eff_leader_tp1_ratio,
+                        leader_tp2_ratio=eff_leader_tp2_ratio,
                         second_tp=second_tp,
                         rotation_tp=rotation_tp,
                         enable_reentry=enable_reentry,
@@ -9621,6 +9717,11 @@ elif menu == "6. 섹터전략 백테스트":
                         m6.metric("단순 연환산", f"{summary.get('단순연환산수익률', 0)}%")
                         m7.metric("복리 연환산", f"{summary.get('복리연환산수익률', 0)}%")
 
+                        summary["수익확대프리셋"] = eff_profit_preset_note
+                        summary["대장주익절방식"] = eff_leader_tp_mode
+                        summary["대장주TP1"] = eff_leader_tp1
+                        summary["대장주TP2"] = eff_leader_tp2
+                        summary["대장주TP3"] = eff_leader_tp3 if eff_leader_tp_mode == "3단계추세익절" else "미사용"
                         summary_df = pd.DataFrame([summary])
                         settings_df = pd.DataFrame([{
                             "APP_VERSION": APP_VERSION,
@@ -9641,15 +9742,20 @@ elif menu == "6. 섹터전략 백테스트":
                             "장세배율_급락일": regime_custom_multipliers.get("급락일", ""),
                             "한섹터최대금액": max_sector_budget,
                             "동시진입섹터수": max_active_sectors,
-                            "대장주1차": leader_1,
-                            "대장주2차": leader_2,
-                            "대장주3차": leader_3,
-                            "2등대표주1차": second_1,
-                            "2등대표주2차": second_2,
+                            "수익확대프리셋": eff_profit_preset_note,
+                            "대장주1차": eff_leader_1,
+                            "대장주2차": eff_leader_2,
+                            "대장주3차": eff_leader_3,
+                            "2등대표주1차": eff_second_1,
+                            "2등대표주2차": eff_second_2,
                             "회전형포함": include_rotation,
                             "회전형1차": rotation_1,
-                            "대장주1차익절률": leader_tp1,
-                            "대장주전량익절률": leader_tp2,
+                            "대장주익절방식": eff_leader_tp_mode,
+                            "대장주1차익절률": eff_leader_tp1,
+                            "대장주2차익절률": eff_leader_tp2,
+                            "대장주3차익절률": eff_leader_tp3,
+                            "대장주1차익절비율": eff_leader_tp1_ratio,
+                            "대장주2차익절비율": eff_leader_tp2_ratio,
                             "2등대표주익절률": second_tp,
                             "회전형익절률": rotation_tp,
                             "대장주재진입허용": enable_reentry,
