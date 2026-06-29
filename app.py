@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_REGIME_BUY_FILTER_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_REGIME_PRESET_FILTER_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5393,6 +5393,12 @@ def _bt_regime_multiplier(regime, mode="OFF", custom_multipliers=None):
     if mode == "횡보축소 + 하락차단":
         table = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
         return float(table.get(regime, 0.5))
+    if mode == "횡보완전차단 + 조정축소":
+        table = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
+        return float(table.get(regime, 0.0))
+    if mode == "상승공격 + 횡보차단":
+        table = {"강한상승장": 1.4, "상승장": 1.2, "횡보장": 0.0, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.0}
+        return float(table.get(regime, 0.0))
     if mode == "상승장만 매수":
         return 1.0 if regime in {"강한상승장", "상승장"} else 0.0
     if mode == "사용자지정":
@@ -5408,6 +5414,16 @@ def _bt_regime_role_allowed(regime, mode, role):
     if mode == "횡보축소 + 하락차단" and regime in {"횡보장", "조정장", "장세불명"}:
         # 횡보/조정에서는 대장주만 축소 스플릿한다. 2등/회전형은 신규·추가매수를 막는다.
         return role == "대장주"
+    if mode == "횡보완전차단 + 조정축소":
+        if regime in {"횡보장", "하락장", "급락일", "장세불명"}:
+            return False
+        if regime == "조정장":
+            return role == "대장주"
+    if mode == "상승공격 + 횡보차단":
+        if regime in {"횡보장", "하락장", "급락일", "장세불명"}:
+            return False
+        if regime == "조정장":
+            return role == "대장주"
     return True
 
 def build_backtest_regime_result(daily_df, start_date, end_date):
@@ -9381,7 +9397,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호 기본값에 증액투자/장세검증을 더했습니다. 장세별 매수필터를 켜면 상승장에는 크게, 횡보·조정장에는 축소, 하락·급락일에는 매수차단을 테스트할 수 있습니다.")
+    st.caption("수익확대+역할보호 기본값에 증액투자/장세검증을 더했습니다. 장세별 매수필터를 프리셋으로 선택해 테스트합니다. 숫자 조절 없이 횡보차단/조정축소/상승공격 모드를 비교할 수 있습니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9471,8 +9487,8 @@ elif menu == "6. 섹터전략 백테스트":
         with mf1:
             regime_filter_mode = st.selectbox(
                 "장세별 매수필터",
-                options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "상승장만 매수", "사용자지정"],
-                index=0,
+                options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "횡보완전차단 + 조정축소", "상승공격 + 횡보차단", "상승장만 매수", "사용자지정"],
+                index=3,
                 key="bt_regime_filter_mode",
             )
         default_mult = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
@@ -9494,6 +9510,10 @@ elif menu == "6. 섹터전략 백테스트":
             regime_custom_multipliers = default_mult
         if regime_filter_mode == "횡보축소 + 하락차단":
             st.caption("횡보장/조정장에서는 대장주만 50% 매수하고, 2등대표주·회전형 신규/추가매수는 차단합니다. 하락장/급락일은 신규·추가매수를 차단합니다.")
+        elif regime_filter_mode == "횡보완전차단 + 조정축소":
+            st.caption("추천 비교값: 횡보장은 완전 차단, 조정장은 대장주만 50% 매수, 하락장/급락일은 신규·추가매수 차단입니다.")
+        elif regime_filter_mode == "상승공격 + 횡보차단":
+            st.caption("수익확대 테스트: 강한상승장 1.4배, 상승장 1.2배, 조정장은 대장주만 50%, 횡보/하락/급락은 차단합니다.")
         elif regime_filter_mode == "하락/급락 차단":
             st.caption("하락장/급락일 신규·추가매수만 차단하고, 상승/횡보/조정장은 기존 금액대로 매수합니다.")
         elif regime_filter_mode == "상승장만 매수":
