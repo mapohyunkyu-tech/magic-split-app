@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_FLOW_TABLES_20260629"
+APP_VERSION = "v27_SECTOR_STRATEGY_BACKTEST_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -155,6 +155,7 @@ SECTOR_SETUP_RESULT_COLUMNS = [
 SECTOR_STOCK_FLOW_COLUMNS = [
     "섹터", "기준역할", "현재역할", "역할변경신호", "섹터역할", "대표순위", "코드", "종목",
     "섹터내거래대금순위", "섹터내상승률순위", "역할점수",
+    "오늘행동", "행동사유", "대장주예외허용",
     "현재가", "오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억",
     "전일대비거래대금증감률", "5일대비거래대금증감률",
     "5일수익률", "20일수익률", "60일수익률", "120일고점대비눌림률",
@@ -162,13 +163,31 @@ SECTOR_STOCK_FLOW_COLUMNS = [
 ]
 
 SECTOR_FLOW_RESULT_COLUMNS = [
-    "순위", "섹터", "섹터판정", "순환상태", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화",
+    "순위", "섹터", "오늘행동", "행동사유", "대장주예외허용", "섹터판정", "순환상태", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화",
     "오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억",
     "시장내비중", "전일시장내비중", "5일평균시장내비중", "균등기준비중",
     "전일대비거래대금증감률", "5일대비거래대금증감률",
     "기준대장주", "기준2등대표주", "기준회전형대표주",
     "현재대장주", "현재2등대표주", "현재회전형대표주", "역할변화요약", "대표주요약",
     "과열대표주수", "이탈주의대표주수", "매수허용", "발빼기신호", "판정사유", "데이터기준일"
+]
+
+
+# 섹터전략 백테스트 전용 컬럼.
+# 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
+SECTOR_BACKTEST_DAILY_COLUMNS = [
+    "기준일", "다음매매일", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
+    "누적실현손익", "일일손익", "최대낙폭", "보유종목수", "매수건수", "매도건수", "메모"
+]
+
+SECTOR_BACKTEST_TRADE_COLUMNS = [
+    "매매일", "신호일", "구분", "사유", "섹터", "역할", "현재역할", "코드", "종목",
+    "차수", "수량", "가격", "매매금액", "수수료세금", "실현손익", "현금", "메모"
+]
+
+SECTOR_BACKTEST_POSITION_COLUMNS = [
+    "섹터", "역할", "현재역할", "코드", "종목", "차수", "수량", "평균단가", "현재가",
+    "매입금액", "평가금액", "평가손익", "수익률", "첫진입일", "마지막매매일", "상태"
 ]
 
 SECTOR_CORE_ROLES = {"대장주", "2등대표주", "ETF대체", "핵심대표주", "핵심보유"}
@@ -4062,6 +4081,82 @@ def _sector_decision(concentration_score, amount_vs5, hot_count, exit_count):
     return "중립", "관찰", "대기", "관찰", "뚜렷한 유입/이탈 신호는 약함"
 
 
+
+def _sector_beginner_action(concentration_score, concentration_delta, amount_vs5, hot_count, exit_count):
+    """초보 모드 섹터 행동판정.
+
+    복잡한 판정명을 사용자가 직접 해석하지 않도록 사기/대기/신규금지/추가매수금지/일부팔기/전량회수로 압축한다.
+    "사기"는 추천 강제가 아니라 매직스플릿 1차 후보라는 뜻이다.
+    """
+    score = _safe_float_value(concentration_score, 0)
+    delta = _safe_float_value(concentration_delta, 0)
+    vs5 = _safe_float_value(amount_vs5, 0)
+    hot = _safe_int_value(hot_count, 0)
+    exit_cnt = _safe_int_value(exit_count, 0)
+
+    # 너무 몰린 뒤 거래대금이 강하게 꺾이면 새로 살 자리가 아니라 회수 구간.
+    if score >= 9.5 and vs5 <= -40:
+        return "전량회수", "쏠림 9.5 이상에서 거래대금이 5일평균 대비 40% 이상 감소", "N"
+    if score >= 8.5 and (vs5 <= -20 or delta <= -0.5 or exit_cnt >= 2):
+        return "일부팔기", "이미 강한 섹터에서 거래대금 둔화/대표주 이탈 발생", "N"
+    if score >= 8.0:
+        return "신규금지", "쏠림점수 8 이상이라 신규 추격 위험", "N"
+
+    # 돈이 들어오는 초입: 비싼 대장주도 예외 후보가 될 수 있는 구간.
+    if 2.0 <= score <= 6.5 and vs5 >= 10 and delta >= 0.3 and hot <= 1:
+        return "사기", "쏠림 2~6점대에서 거래대금이 증가하는 순환매 초입", "Y"
+
+    # 거래대금은 늘지만 아직 방향이 약하면 기다림.
+    if vs5 >= 5 or delta >= 0.2:
+        return "대기", "돈이 조금 들어오지만 아직 사기 신호는 약함", "조건부"
+
+    # 약한데 돈도 빠지면 추가 매수 금지.
+    if score <= 3.0 and vs5 <= -20:
+        return "추가매수금지", "시장 비중이 약하고 거래대금도 빠지는 섹터", "N"
+
+    if exit_cnt >= 1:
+        return "추가매수금지", "대표주 이탈 신호가 있어 추가매수는 막음", "N"
+
+    return "대기", "뚜렷한 사기/팔기 신호가 없음", "N"
+
+
+def _stock_beginner_action(row, sector_action="대기", sector_exception="N"):
+    """대표주 단위 초보 행동판정."""
+    cur_role = str(row.get("현재역할", ""))
+    exit_sig = str(row.get("발빼기신호", ""))
+    high = str(row.get("고점위험", ""))
+    judge = str(row.get("대표주판정", ""))
+    vs5 = _safe_float_value(row.get("5일대비거래대금증감률", 0), 0)
+    ret5 = _safe_float_value(row.get("5일수익률", 0), 0)
+    pullback = _safe_float_value(row.get("120일고점대비눌림률", 0), 0)
+    price = _safe_float_value(row.get("현재가", 0), 0)
+
+    if "발빼기" in exit_sig and vs5 <= -25:
+        return "일부팔기", "고점권/과열 뒤 거래대금 둔화", "N"
+    if "이탈" in exit_sig and ret5 <= -5:
+        return "전량회수", "가격과 거래대금이 같이 이탈", "N"
+    if any(x in high for x in ["고점", "과열"]):
+        return "신규금지", "고점권이라 새로 따라 사지 않음", "N"
+
+    if sector_action == "사기" and cur_role in {"현재대장", "현재2등대표"} and vs5 >= 5:
+        if price >= 150000:
+            return "사기", "비싼 대장주 예외 허용: 순환매 초입 + 현재 대표주", "Y"
+        return "사기", "순환매 초입의 현재 대표주", "Y"
+
+    if sector_action == "사기" and cur_role == "현재회전형" and vs5 >= 20 and ret5 >= 0 and pullback >= 3:
+        return "사기", "회전형 자금유입. 단, 1차 소액만", "조건부"
+
+    if sector_action in {"일부팔기", "전량회수", "신규금지"}:
+        return "신규금지", "섹터 자체가 추격/회수 구간", "N"
+
+    if sector_action == "추가매수금지":
+        return "추가매수금지", "섹터 약세 또는 대표주 이탈", "N"
+
+    if "자금유입" in judge and vs5 >= 20 and cur_role in {"현재대장", "현재2등대표", "현재회전형"}:
+        return "대기", "종목 유입은 있으나 섹터 확인 필요", "조건부"
+
+    return "대기", "아직 확실한 행동 신호 없음", "N"
+
 def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, lookback_days=190, dynamic_roles=True):
     """섹터 대표주 기반 거래대금 쏠림/순환매/발빼기 판단표 생성."""
     if leader_df is None or len(leader_df) == 0:
@@ -4122,6 +4217,17 @@ def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, l
         hot_count = int(part["고점위험"].isin(["고점추격주의", "과열분출"]).sum())
         exit_count = int(part["발빼기신호"].isin(["발빼기검토", "이탈주의"]).sum())
         sector_judge, rotation_state, buy_allow, exit_signal, reason = _sector_decision(concentration_score, vs5, hot_count, exit_count)
+        today_action, action_reason, leader_exception = _sector_beginner_action(concentration_score, concentration_delta, vs5, hot_count, exit_count)
+
+        # 섹터 행동을 대표주 상세에도 내려보내서, 사용자가 종목별로도 사기/대기/팔기를 바로 보게 한다.
+        for _idx in part.index:
+            stock_action, stock_reason, stock_exception = _stock_beginner_action(part.loc[_idx], today_action, leader_exception)
+            stock_df.loc[_idx, "오늘행동"] = stock_action
+            stock_df.loc[_idx, "행동사유"] = stock_reason
+            stock_df.loc[_idx, "대장주예외허용"] = stock_exception
+            part.loc[_idx, "오늘행동"] = stock_action
+            part.loc[_idx, "행동사유"] = stock_reason
+            part.loc[_idx, "대장주예외허용"] = stock_exception
 
         leader_summary_src = part.sort_values("오늘거래대금억", ascending=False).head(4)
         leader_summary = " / ".join([
@@ -4130,9 +4236,13 @@ def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, l
         ])
         result_rows.append({
             "섹터": sector,
+            "오늘행동": today_action,
+            "행동사유": action_reason,
+            "대장주예외허용": leader_exception,
             "섹터판정": sector_judge,
             "순환상태": rotation_state,
             "쏠림점수": concentration_score,
+            "쏠림배율": round(share_pct / equal_share, 2) if equal_share > 0 else 0,
             "전일쏠림점수": prev_concentration_score,
             "5일평균쏠림점수": ma5_concentration_score,
             "쏠림변화": concentration_delta,
@@ -4185,6 +4295,445 @@ def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, l
         save_sector_stock_flow_df(stock_df)
         save_sector_flow_result_df(result_df)
     return result_df, stock_df, diag
+
+
+
+def _bt_role_bucket(row):
+    """현재역할/기준역할을 백테스트용 대장주/2등대표주/회전형으로 압축한다."""
+    cur = str(row.get("현재역할", ""))
+    base = str(row.get("기준역할", row.get("섹터역할", "")))
+    if "현재대장" in cur or "대장" in base or "핵심" in base:
+        return "대장주"
+    if "현재2등" in cur or "2등" in base:
+        return "2등대표주"
+    if "회전" in cur or "회전" in base:
+        return "회전형"
+    return "감시"
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def _bt_price_frame(code, start_date, end_date):
+    """백테스트용 가격 프레임. Open/Close를 open/close로 표준화한다."""
+    try:
+        start = pd.to_datetime(start_date).strftime("%Y%m%d")
+        end = pd.to_datetime(end_date).strftime("%Y%m%d")
+        raw = get_ohlcv_fdr_cached(str(code).zfill(6), start, end)
+        if raw is None or len(raw) == 0:
+            return pd.DataFrame()
+        df = raw.copy()
+        df.columns = [str(c).lower() for c in df.columns]
+        if "close" not in df.columns and "종가" in df.columns:
+            df["close"] = df["종가"]
+        if "open" not in df.columns and "시가" in df.columns:
+            df["open"] = df["시가"]
+        if "open" not in df.columns and "close" in df.columns:
+            df["open"] = df["close"]
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _bt_trading_dates_from_universe(leader_df, start_date, end_date):
+    """대표주 중 데이터가 잡히는 첫 종목으로 거래일 배열을 만든다."""
+    try:
+        active = normalize_sector_leader_df(leader_df)
+        codes = active[active["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")]["코드"].astype(str).str.zfill(6).tolist()
+    except Exception:
+        codes = []
+    start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=20)).strftime("%Y-%m-%d")
+    end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=10)).strftime("%Y-%m-%d")
+    for code in codes[:20]:
+        df = _bt_price_frame(code, start_pad, end_pad)
+        if df is not None and len(df) > 0:
+            dates = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in df.index]
+            dates = [d for d in dates if pd.to_datetime(start_date) <= pd.to_datetime(d) <= pd.to_datetime(end_pad)]
+            if dates:
+                return dates
+    # 데이터가 없으면 평일 달력으로라도 화면이 죽지 않게 한다.
+    return [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
+
+
+def _bt_price_on_or_after(code, trade_date, field="open", start_pad_days=15, end_pad_days=15):
+    """매매일 당일 또는 이후 첫 거래일 가격을 가져온다."""
+    target = pd.to_datetime(trade_date)
+    start = (target - pd.DateOffset(days=start_pad_days)).strftime("%Y-%m-%d")
+    end = (target + pd.DateOffset(days=end_pad_days)).strftime("%Y-%m-%d")
+    df = _bt_price_frame(str(code).zfill(6), start, end)
+    if df is None or len(df) == 0:
+        return None, None
+    df = df[df.index >= target].copy()
+    if len(df) == 0:
+        return None, None
+    row = df.iloc[0]
+    price = _safe_float_value(row.get(field, row.get("close", 0)), 0)
+    if price <= 0:
+        price = _safe_float_value(row.get("close", 0), 0)
+    return float(price), pd.to_datetime(df.index[0]).strftime("%Y-%m-%d")
+
+
+def _bt_close_on_or_before(code, asof_date, start_pad_days=15):
+    """평가일 당일 또는 직전 거래일 종가를 가져온다."""
+    target = pd.to_datetime(asof_date)
+    start = (target - pd.DateOffset(days=start_pad_days)).strftime("%Y-%m-%d")
+    end = (target + pd.DateOffset(days=2)).strftime("%Y-%m-%d")
+    df = _bt_price_frame(str(code).zfill(6), start, end)
+    if df is None or len(df) == 0:
+        return 0.0
+    df = df[df.index <= target].copy()
+    if len(df) == 0:
+        return 0.0
+    return float(_safe_float_value(df.iloc[-1].get("close", 0), 0))
+
+
+def _bt_qty_for_budget(price, budget):
+    price = _safe_float_value(price, 0)
+    budget = _safe_float_value(budget, 0)
+    if price <= 0 or budget <= 0:
+        return 0
+    return int(budget // price)
+
+
+def _bt_position_key(code):
+    return str(code).zfill(6)
+
+
+def run_sector_strategy_backtest(
+    leader_df,
+    start_date,
+    end_date,
+    initial_cash=100_000_000,
+    defense_cash=50_000_000,
+    max_sector_budget=20_000_000,
+    max_active_sectors=1,
+    leader_steps=(5_000_000, 4_000_000, 3_000_000),
+    second_steps=(3_000_000, 3_000_000),
+    rotation_step=2_000_000,
+    leader_drop2=5.0,
+    leader_drop3=10.0,
+    second_drop2=5.0,
+    include_rotation=True,
+    fee_tax_rate=0.0023,
+    lookback_days=190,
+    max_signal_days=40,
+    progress_callback=None,
+):
+    """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
+
+    원칙:
+    - 신호는 기준일 장마감 자료로 계산한다.
+    - 실제 매수/매도는 다음 거래일 시가로 체결한 것으로 처리한다.
+    - 대장주 3차, 2등대표주 2차, 회전형 1차만 허용한다.
+    """
+    leader_df = normalize_sector_leader_df(leader_df)
+    active = leader_df[leader_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
+    if len(active) == 0:
+        return pd.DataFrame(columns=SECTOR_BACKTEST_DAILY_COLUMNS), pd.DataFrame(columns=SECTOR_BACKTEST_TRADE_COLUMNS), pd.DataFrame(columns=SECTOR_BACKTEST_POSITION_COLUMNS), {"오류": "대표주유니버스가 비어 있습니다."}
+
+    dates = _bt_trading_dates_from_universe(active, start_date, end_date)
+    dates = [d for d in dates if pd.to_datetime(start_date) <= pd.to_datetime(d) <= pd.to_datetime(end_date)]
+    if len(dates) < 3:
+        return pd.DataFrame(columns=SECTOR_BACKTEST_DAILY_COLUMNS), pd.DataFrame(columns=SECTOR_BACKTEST_TRADE_COLUMNS), pd.DataFrame(columns=SECTOR_BACKTEST_POSITION_COLUMNS), {"오류": "백테스트 거래일이 부족합니다."}
+    if max_signal_days and len(dates) > int(max_signal_days):
+        dates = dates[-int(max_signal_days):]
+
+    cash = float(initial_cash)
+    realized = 0.0
+    positions = {}
+    daily_rows = []
+    trade_rows = []
+    equity_peak = float(initial_cash)
+    max_drawdown = 0.0
+
+    leader_steps = tuple(float(x) for x in leader_steps)
+    second_steps = tuple(float(x) for x in second_steps)
+    rotation_step = float(rotation_step)
+    fee_tax_rate = float(fee_tax_rate)
+
+    def active_sectors():
+        return sorted({p["sector"] for p in positions.values() if p.get("qty", 0) > 0})
+
+    def sector_invested(sector):
+        total = 0.0
+        for p in positions.values():
+            if p.get("sector") == sector and p.get("qty", 0) > 0:
+                total += float(p.get("cost", 0))
+        return total
+
+    def record_trade(trade_date, signal_date, side, reason, row, role, step, qty, price, fee, pnl=0.0, memo=""):
+        nonlocal cash
+        trade_rows.append({
+            "매매일": trade_date, "신호일": signal_date, "구분": side, "사유": reason,
+            "섹터": str(row.get("섹터", "")), "역할": role, "현재역할": str(row.get("현재역할", "")),
+            "코드": str(row.get("코드", "")).zfill(6), "종목": str(row.get("종목", "")),
+            "차수": step, "수량": int(qty), "가격": round(float(price), 2),
+            "매매금액": round(float(price) * int(qty), 0), "수수료세금": round(float(fee), 0),
+            "실현손익": round(float(pnl), 0), "현금": round(float(cash), 0), "메모": memo
+        })
+
+    def buy(row, role, step, budget, signal_date, trade_date, reason):
+        nonlocal cash
+        code = _bt_position_key(row.get("코드", ""))
+        sector = str(row.get("섹터", ""))
+        if sector_invested(sector) >= max_sector_budget:
+            return 0
+        budget = min(float(budget), max(0.0, max_sector_budget - sector_invested(sector)))
+        price, actual_date = _bt_price_on_or_after(code, trade_date, field="open")
+        if price is None or price <= 0:
+            return 0
+        qty = _bt_qty_for_budget(price, budget)
+        if qty <= 0:
+            return 0
+        amount = price * qty
+        fee = amount * fee_tax_rate
+        if cash - amount - fee < defense_cash:
+            # 방어예수금 밑으로 내려가면 수량을 줄인다.
+            available = max(0.0, cash - defense_cash)
+            qty = _bt_qty_for_budget(price, available / (1 + fee_tax_rate))
+            if qty <= 0:
+                return 0
+            amount = price * qty
+            fee = amount * fee_tax_rate
+        cash -= (amount + fee)
+        if code not in positions:
+            positions[code] = {
+                "sector": sector, "role": role, "current_role": str(row.get("현재역할", "")), "code": code, "name": str(row.get("종목", "")),
+                "qty": 0, "cost": 0.0, "avg": 0.0, "step": 0, "first_price": float(price),
+                "first_date": actual_date or trade_date, "last_trade_date": actual_date or trade_date, "status": "보유"
+            }
+        p = positions[code]
+        p["qty"] += int(qty)
+        p["cost"] += amount + fee
+        p["avg"] = p["cost"] / max(p["qty"], 1)
+        p["step"] = max(int(p.get("step", 0)), int(step))
+        p["current_role"] = str(row.get("현재역할", p.get("current_role", "")))
+        p["last_trade_date"] = actual_date or trade_date
+        record_trade(actual_date or trade_date, signal_date, "매수", reason, row, role, step, qty, price, fee, 0.0, "다음거래일 시가")
+        return qty
+
+    def sell(row, qty_ratio, signal_date, trade_date, reason):
+        nonlocal cash, realized
+        code = _bt_position_key(row.get("코드", ""))
+        if code not in positions or positions[code].get("qty", 0) <= 0:
+            return 0
+        p = positions[code]
+        price, actual_date = _bt_price_on_or_after(code, trade_date, field="open")
+        if price is None or price <= 0:
+            return 0
+        qty = int(np.ceil(p["qty"] * float(qty_ratio))) if qty_ratio < 1 else int(p["qty"])
+        qty = min(qty, int(p["qty"]))
+        if qty <= 0:
+            return 0
+        sell_amount = price * qty
+        fee = sell_amount * fee_tax_rate
+        cost_part = p["cost"] * (qty / max(p["qty"], 1))
+        pnl = sell_amount - fee - cost_part
+        cash += sell_amount - fee
+        realized += pnl
+        p["qty"] -= qty
+        p["cost"] -= cost_part
+        if p["qty"] <= 0:
+            p["qty"] = 0
+            p["cost"] = 0.0
+            p["avg"] = 0.0
+            p["status"] = "정리"
+        else:
+            p["avg"] = p["cost"] / max(p["qty"], 1)
+        p["last_trade_date"] = actual_date or trade_date
+        record_trade(actual_date or trade_date, signal_date, "매도", reason, row, p.get("role", ""), p.get("step", 0), qty, price, fee, pnl, "다음거래일 시가")
+        return qty
+
+    for i, signal_date in enumerate(dates[:-1]):
+        next_trade_date = dates[i + 1]
+        if progress_callback:
+            progress_callback(i + 1, len(dates) - 1, signal_date)
+
+        try:
+            sector_df, stock_df, _diag = build_sector_rotation_flow(active, save_to_sheet=False, asof_date=signal_date, lookback_days=lookback_days, dynamic_roles=True)
+        except Exception as e:
+            daily_rows.append({
+                "기준일": signal_date, "다음매매일": next_trade_date, "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
+                "현금": round(cash, 0), "평가금액": 0, "총자산": round(cash, 0), "누적실현손익": round(realized, 0),
+                "일일손익": 0, "최대낙폭": round(max_drawdown, 2), "보유종목수": len([p for p in positions.values() if p.get("qty", 0) > 0]),
+                "매수건수": 0, "매도건수": 0, "메모": f"신호 계산 실패: {e}"
+            })
+            continue
+
+        if sector_df is None:
+            sector_df = pd.DataFrame()
+        if stock_df is None:
+            stock_df = pd.DataFrame()
+
+        # 1) 회수/매도 먼저 처리.
+        sector_action_map = {}
+        if len(sector_df) > 0 and "섹터" in sector_df.columns:
+            sector_action_map = dict(zip(sector_df["섹터"].astype(str), sector_df["오늘행동"].astype(str)))
+        stock_by_code = {str(r.get("코드", "")).zfill(6): r for _, r in stock_df.iterrows()} if len(stock_df) else {}
+        buy_count_before = len([t for t in trade_rows if t["구분"] == "매수"])
+        sell_count_before = len([t for t in trade_rows if t["구분"] == "매도"])
+
+        for code, p in list(positions.items()):
+            if p.get("qty", 0) <= 0:
+                continue
+            row = stock_by_code.get(code, {"코드": code, "종목": p.get("name", ""), "섹터": p.get("sector", ""), "현재역할": p.get("current_role", "")})
+            sec_action = sector_action_map.get(str(p.get("sector", "")), "대기")
+            st_action = str(row.get("오늘행동", "대기")) if isinstance(row, dict) else str(row.get("오늘행동", "대기"))
+            role = p.get("role", "")
+            if sec_action == "전량회수" or st_action == "전량회수":
+                sell(row, 1.0, signal_date, next_trade_date, "전량회수 신호")
+            elif sec_action == "일부팔기" or st_action == "일부팔기":
+                # 회전형/2등은 전량, 대장주는 절반만 줄인다.
+                ratio = 0.5 if role == "대장주" else 1.0
+                sell(row, ratio, signal_date, next_trade_date, "일부팔기/발빼기 신호")
+
+        # 2) 신규 진입 섹터 선정: 초보 기본값은 한 번에 1섹터.
+        active_secs = set(active_sectors())
+        buy_candidates = pd.DataFrame()
+        if len(sector_df) > 0:
+            buy_candidates = sector_df[sector_df["오늘행동"].astype(str).eq("사기")].copy()
+            for c in ["쏠림변화", "5일대비거래대금증감률", "쏠림점수"]:
+                if c in buy_candidates.columns:
+                    buy_candidates[c] = pd.to_numeric(buy_candidates[c], errors="coerce").fillna(0)
+            buy_candidates = buy_candidates.sort_values(["쏠림변화", "5일대비거래대금증감률", "쏠림점수"], ascending=[False, False, False])
+
+        allowed_sectors = list(active_secs)
+        for _, sr in buy_candidates.iterrows():
+            sec = str(sr.get("섹터", ""))
+            if sec in allowed_sectors:
+                continue
+            if len(allowed_sectors) < int(max_active_sectors):
+                allowed_sectors.append(sec)
+        allowed_sectors = allowed_sectors[:int(max_active_sectors)]
+
+        # 3) 해당 섹터의 대표주만 역할별 차수 규칙으로 매수/추가매수.
+        if len(stock_df) > 0 and allowed_sectors:
+            buy_stocks = stock_df[stock_df["섹터"].astype(str).isin(allowed_sectors)].copy()
+            buy_stocks["_role_bucket"] = buy_stocks.apply(_bt_role_bucket, axis=1)
+            # 같은 역할에 여러 종목이 있으면 현재 거래대금 순위 1개만 우선.
+            if "섹터내거래대금순위" in buy_stocks.columns:
+                buy_stocks["섹터내거래대금순위"] = pd.to_numeric(buy_stocks["섹터내거래대금순위"], errors="coerce").fillna(99)
+                buy_stocks = buy_stocks.sort_values(["섹터", "_role_bucket", "섹터내거래대금순위"])
+
+            for _, row in buy_stocks.iterrows():
+                sector = str(row.get("섹터", ""))
+                sec_action = sector_action_map.get(sector, "대기")
+                stock_action = str(row.get("오늘행동", "대기"))
+                if sec_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
+                    continue
+                role = row.get("_role_bucket", "감시")
+                if role == "감시":
+                    continue
+                if role == "회전형" and not include_rotation:
+                    continue
+                code = _bt_position_key(row.get("코드", ""))
+                pos = positions.get(code)
+                price, _actual = _bt_price_on_or_after(code, next_trade_date, field="open")
+                if price is None or price <= 0:
+                    continue
+
+                if pos is None or pos.get("qty", 0) <= 0:
+                    if stock_action != "사기":
+                        continue
+                    if role == "대장주":
+                        buy(row, role, 1, leader_steps[0], signal_date, next_trade_date, "대장주 1차")
+                    elif role == "2등대표주":
+                        buy(row, role, 1, second_steps[0], signal_date, next_trade_date, "2등대표주 1차")
+                    elif role == "회전형":
+                        buy(row, role, 1, rotation_step, signal_date, next_trade_date, "회전형 1차만")
+                    continue
+
+                # 추가매수: 기존 포지션만. 발빼기/신규금지 시에는 금지.
+                if stock_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
+                    continue
+                first_price = _safe_float_value(pos.get("first_price", pos.get("avg", price)), price)
+                step_now = int(pos.get("step", 1))
+                if role == "대장주":
+                    if step_now < 2 and price <= first_price * (1 - float(leader_drop2) / 100):
+                        buy(row, role, 2, leader_steps[1], signal_date, next_trade_date, "대장주 2차 눌림")
+                    elif step_now < 3 and price <= first_price * (1 - float(leader_drop3) / 100):
+                        buy(row, role, 3, leader_steps[2], signal_date, next_trade_date, "대장주 3차 눌림")
+                elif role == "2등대표주":
+                    if step_now < 2 and price <= first_price * (1 - float(second_drop2) / 100) and str(row.get("현재역할", "")) in {"현재대장", "현재2등대표"}:
+                        buy(row, role, 2, second_steps[1], signal_date, next_trade_date, "2등대표주 2차 눌림")
+                # 회전형은 2차 없음.
+
+        # 4) 일일 평가.
+        eval_value = 0.0
+        pos_count = 0
+        for code, p in positions.items():
+            if p.get("qty", 0) <= 0:
+                continue
+            close = _bt_close_on_or_before(code, signal_date)
+            if close <= 0:
+                close = p.get("avg", 0)
+            eval_value += close * p.get("qty", 0)
+            pos_count += 1
+        total_asset = cash + eval_value
+        equity_peak = max(equity_peak, total_asset)
+        dd = (total_asset / equity_peak - 1) * 100 if equity_peak > 0 else 0
+        max_drawdown = min(max_drawdown, dd)
+        prev_total = daily_rows[-1]["총자산"] if daily_rows else initial_cash
+        daily_pnl = total_asset - float(prev_total)
+        buys_today = len([t for t in trade_rows if t["구분"] == "매수"]) - buy_count_before
+        sells_today = len([t for t in trade_rows if t["구분"] == "매도"]) - sell_count_before
+        signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
+        daily_rows.append({
+            "기준일": signal_date, "다음매매일": next_trade_date, "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
+            "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
+            "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
+            "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": ""
+        })
+
+    # 최종 보유표.
+    pos_rows = []
+    last_date = dates[-1]
+    for code, p in positions.items():
+        if p.get("qty", 0) <= 0:
+            continue
+        close = _bt_close_on_or_before(code, last_date)
+        if close <= 0:
+            close = p.get("avg", 0)
+        eval_amount = close * p.get("qty", 0)
+        pnl = eval_amount - p.get("cost", 0)
+        ret = (pnl / p.get("cost", 1) * 100) if p.get("cost", 0) > 0 else 0
+        pos_rows.append({
+            "섹터": p.get("sector", ""), "역할": p.get("role", ""), "현재역할": p.get("current_role", ""), "코드": code, "종목": p.get("name", ""),
+            "차수": p.get("step", 0), "수량": p.get("qty", 0), "평균단가": round(p.get("avg", 0), 0), "현재가": round(close, 0),
+            "매입금액": round(p.get("cost", 0), 0), "평가금액": round(eval_amount, 0), "평가손익": round(pnl, 0), "수익률": round(ret, 2),
+            "첫진입일": p.get("first_date", ""), "마지막매매일": p.get("last_trade_date", ""), "상태": p.get("status", "보유")
+        })
+
+    daily_df = pd.DataFrame(daily_rows, columns=SECTOR_BACKTEST_DAILY_COLUMNS)
+    trade_df = pd.DataFrame(trade_rows, columns=SECTOR_BACKTEST_TRADE_COLUMNS)
+    pos_df = pd.DataFrame(pos_rows, columns=SECTOR_BACKTEST_POSITION_COLUMNS)
+    if len(daily_df) > 0:
+        final_asset = float(daily_df.iloc[-1]["총자산"])
+        total_return = (final_asset / float(initial_cash) - 1) * 100 if initial_cash else 0
+        lowest_cash = float(daily_df["현금"].min())
+        lowest_asset = float(daily_df["총자산"].min())
+    else:
+        final_asset = initial_cash
+        total_return = 0.0
+        lowest_cash = cash
+        lowest_asset = initial_cash
+    trade_count = len(trade_df)
+    wins = int((pd.to_numeric(trade_df.get("실현손익", pd.Series(dtype=float)), errors="coerce").fillna(0) > 0).sum()) if len(trade_df) else 0
+    sells = int((trade_df["구분"].eq("매도")).sum()) if len(trade_df) else 0
+    summary = {
+        "초기자금": round(float(initial_cash), 0),
+        "최종총자산": round(float(final_asset), 0),
+        "총수익률": round(float(total_return), 2),
+        "누적실현손익": round(float(realized), 0),
+        "최저현금": round(float(lowest_cash), 0),
+        "최저총자산": round(float(lowest_asset), 0),
+        "최대낙폭": round(float(max_drawdown), 2),
+        "매매건수": trade_count,
+        "매도승률": round((wins / sells * 100), 1) if sells else 0,
+        "최종보유종목수": len(pos_df),
+        "검증거래일": len(daily_df),
+        "메모": "신호일 다음 거래일 시가 체결 기준"
+    }
+    return daily_df, trade_df, pos_df, summary
 
 def parse_simple_holding_text(simple_text, krx):
     """
@@ -6887,7 +7436,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -7931,12 +8480,33 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
                     detail_view.get("매수주의", pd.Series([], dtype=str)).astype(str).str.contains("발빼기|추격금지", regex=True, na=False)
                 ].copy() if len(detail_view) > 0 else pd.DataFrame()
 
-                tab_summary, tab_move, tab_detail, tab_exit = st.tabs(["섹터요약", "순환매이동", "대표주상세", "발빼기후보"])
+                tab_action, tab_summary, tab_move, tab_detail, tab_exit = st.tabs(["오늘행동", "섹터요약", "순환매이동", "대표주상세", "발빼기후보"])
+
+                with tab_action:
+                    st.markdown("#### 초보용 오늘 행동표")
+                    st.caption("사기=1차 후보, 대기=건드리지 않기, 신규금지=새로 사지 않기, 추가매수금지=물려도 더 사지 않기, 일부팔기/전량회수=회수 우선입니다.")
+                    action_order = {"사기": 0, "일부팔기": 1, "전량회수": 2, "신규금지": 3, "추가매수금지": 4, "대기": 5}
+                    action_sector = sector_summary.copy()
+                    action_sector["_행동순서"] = action_sector["오늘행동"].map(action_order).fillna(9)
+                    action_sector = action_sector.sort_values(["_행동순서", "쏠림점수", "5일대비거래대금증감률"], ascending=[True, False, False])
+                    st.markdown("##### 섹터별 결론")
+                    cols = ["오늘행동", "섹터", "행동사유", "대장주예외허용", "쏠림점수", "쏠림배율", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "현재2등대표주", "발빼기신호"]
+                    show_pinned_dataframe(action_sector[[c for c in cols if c in action_sector.columns]].drop(columns=["_행동순서"], errors="ignore"), height=420)
+
+                    st.markdown("##### 종목별 결론")
+                    action_stock = detail_view.copy()
+                    if len(action_stock) > 0 and "오늘행동" in action_stock.columns:
+                        action_stock["_행동순서"] = action_stock["오늘행동"].map(action_order).fillna(9)
+                        action_stock = action_stock.sort_values(["_행동순서", "섹터", "섹터내거래대금순위"], ascending=[True, True, True])
+                        cols = ["오늘행동", "섹터", "종목", "현재역할", "행동사유", "대장주예외허용", "현재가", "오늘거래대금억", "5일대비거래대금증감률", "5일수익률", "고점위험", "발빼기신호"]
+                        show_pinned_dataframe(action_stock[[c for c in cols if c in action_stock.columns]].drop(columns=["_행동순서"], errors="ignore"), height=560)
+                    else:
+                        st.caption("종목별 행동표가 없습니다.")
 
                 with tab_summary:
                     st.markdown("#### 섹터 거래대금 요약표")
                     st.caption("쏠림점수 5는 균등, 8 이상은 자금쏠림, 3 이하는 자금 약화로 봅니다. 오늘 점수보다 5일평균 대비 변화가 더 중요합니다.")
-                    cols = ["순위", "섹터", "표시판정", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "시장내비중", "5일대비거래대금증감률", "현재대장주", "매수허용", "발빼기신호"]
+                    cols = ["순위", "섹터", "오늘행동", "행동사유", "대장주예외허용", "표시판정", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "시장내비중", "5일대비거래대금증감률", "현재대장주", "매수허용", "발빼기신호"]
                     show_cols = [c for c in cols if c in sector_summary.columns]
                     show_pinned_dataframe(sector_summary[show_cols].head(30), height=560, pin_rank=True)
 
@@ -7949,25 +8519,25 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
                     with c_mv1:
                         st.markdown("##### 유입 후보")
                         if len(inflow_view) > 0:
-                            cols = ["섹터", "섹터판정", "순환상태", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "현재회전형대표주", "매수허용"]
+                            cols = ["오늘행동", "섹터", "행동사유", "섹터판정", "순환상태", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "현재회전형대표주", "매수허용"]
                             show_pinned_dataframe(inflow_view[[c for c in cols if c in inflow_view.columns]].head(12), height=420)
                         else:
                             st.caption("유입 후보가 없습니다.")
                     with c_mv2:
                         st.markdown("##### 이탈/둔화 후보")
                         if len(outflow_view) > 0:
-                            cols = ["섹터", "섹터판정", "순환상태", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "발빼기신호"]
+                            cols = ["오늘행동", "섹터", "행동사유", "섹터판정", "순환상태", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "발빼기신호"]
                             show_pinned_dataframe(outflow_view[[c for c in cols if c in outflow_view.columns]].head(12), height=420)
                         else:
                             st.caption("이탈 후보가 없습니다.")
                     st.markdown("##### 전체 이동표")
-                    cols = ["이동구분", "섹터", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "오늘거래대금억", "5일대비거래대금증감률", "현재대장주", "현재2등대표주", "현재회전형대표주", "판정사유"]
+                    cols = ["이동구분", "오늘행동", "섹터", "행동사유", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "오늘거래대금억", "5일대비거래대금증감률", "현재대장주", "현재2등대표주", "현재회전형대표주", "판정사유"]
                     show_pinned_dataframe(movement_df[[c for c in cols if c in movement_df.columns]], height=520)
 
                 with tab_detail:
                     st.markdown("#### 섹터 대표주 상세표")
                     st.caption("기준역할은 원래 대표주, 현재역할은 오늘 거래대금 기준 자동 재분류입니다. 회전형이 현재대장으로 올라오면 순환매가 옮겨붙는 신호로 봅니다.")
-                    detail_cols = ["섹터", "종목", "기준역할", "현재역할", "역할변경신호", "섹터내거래대금순위", "섹터내상승률순위", "역할점수", "현재가", "오늘거래대금억", "5일평균거래대금억", "5일대비거래대금증감률", "5일수익률", "120일고점대비눌림률", "고점위험", "대표주판정", "발빼기신호", "매수주의"]
+                    detail_cols = ["오늘행동", "섹터", "종목", "기준역할", "현재역할", "역할변경신호", "행동사유", "대장주예외허용", "섹터내거래대금순위", "섹터내상승률순위", "역할점수", "현재가", "오늘거래대금억", "5일평균거래대금억", "5일대비거래대금증감률", "5일수익률", "120일고점대비눌림률", "고점위험", "대표주판정", "발빼기신호", "매수주의"]
                     show_pinned_dataframe(detail_view[[c for c in detail_cols if c in detail_view.columns]], height=680)
                     st.download_button(
                         "대표주별흐름 CSV 다운로드",
@@ -7981,13 +8551,13 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
                     st.caption("고점권에서 돈이 이미 몰렸거나 둔화가 시작된 섹터/종목을 따로 모읍니다. 신규추격 금지와 일부회수 판단용입니다.")
                     st.markdown("##### 섹터 기준 발빼기")
                     if len(exit_sector_df) > 0:
-                        cols = ["섹터", "표시판정", "쏠림점수", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "역할변화요약", "발빼기신호", "판정사유", "대표주요약"]
+                        cols = ["오늘행동", "섹터", "행동사유", "표시판정", "쏠림점수", "쏠림배율", "전일쏠림점수", "5일평균쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "역할변화요약", "발빼기신호", "판정사유", "대표주요약"]
                         show_pinned_dataframe(exit_sector_df[[c for c in cols if c in exit_sector_df.columns]].head(20), height=360)
                     else:
                         st.caption("섹터 기준 강한 발빼기 신호는 없습니다.")
                     st.markdown("##### 종목 기준 신규추격금지/발빼기")
                     if len(exit_stock_df) > 0:
-                        cols = ["섹터", "종목", "현재역할", "역할변경신호", "섹터내거래대금순위", "현재가", "오늘거래대금억", "5일대비거래대금증감률", "5일수익률", "120일고점대비눌림률", "고점위험", "발빼기신호", "매수주의"]
+                        cols = ["오늘행동", "섹터", "종목", "현재역할", "행동사유", "대장주예외허용", "역할변경신호", "섹터내거래대금순위", "현재가", "오늘거래대금억", "5일대비거래대금증감률", "5일수익률", "120일고점대비눌림률", "고점위험", "발빼기신호", "매수주의"]
                         show_pinned_dataframe(exit_stock_df[[c for c in cols if c in exit_stock_df.columns]].head(30), height=520)
                     else:
                         st.caption("종목 기준 신규추격금지/발빼기 후보가 없습니다.")
@@ -8053,12 +8623,147 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 - `대표주요약`: 해당 섹터 안에서 실제로 거래대금이 큰 대표주와 신호를 같이 보여줍니다.
 """)
 
+
 # =====================================================
-# 6. 도움말
+# 6. 섹터전략 백테스트
+# =====================================================
+
+elif menu == "6. 섹터전략 백테스트":
+    st.header("6. 섹터전략 백테스트")
+    st.caption("섹터 신호는 기준일 장마감으로 계산하고, 실제 매매는 다음 거래일 시가로 처리합니다. 처음에는 20~40거래일 빠른 검증부터 돌리는 것을 권장합니다.")
+
+    sector_df = load_sector_leader_df()
+    if len(sector_df) == 0:
+        st.warning("대표주유니버스가 비어 있습니다. 먼저 5. 섹터 순환매 판단기에서 대표주를 채워 주세요.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            start_date = st.date_input("시작일", value=(datetime.now() - timedelta(days=90)).date(), key="bt_start_date")
+        with c2:
+            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
+        with c3:
+            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=180, value=40, step=5, key="bt_max_days")
+
+        st.subheader("1) 자금 설정")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            initial_cash = st.number_input("총자금", min_value=1_000_000, max_value=10_000_000_000, value=100_000_000, step=1_000_000, format="%d", key="bt_initial_cash")
+        with c2:
+            defense_cash = st.number_input("방어예수금", min_value=0, max_value=10_000_000_000, value=50_000_000, step=1_000_000, format="%d", key="bt_defense_cash")
+        with c3:
+            max_sector_budget = st.number_input("한 섹터 최대금액", min_value=1_000_000, max_value=500_000_000, value=20_000_000, step=1_000_000, format="%d", key="bt_sector_budget")
+        with c4:
+            max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=0, key="bt_max_sectors")
+
+        st.subheader("2) 역할별 차수 설정")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("##### 대장주 3차")
+            leader_1 = st.number_input("대장주 1차", min_value=0, max_value=100_000_000, value=5_000_000, step=500_000, format="%d", key="bt_leader_1")
+            leader_2 = st.number_input("대장주 2차", min_value=0, max_value=100_000_000, value=4_000_000, step=500_000, format="%d", key="bt_leader_2")
+            leader_3 = st.number_input("대장주 3차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_leader_3")
+            leader_drop2 = st.number_input("대장주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_leader_drop2")
+            leader_drop3 = st.number_input("대장주 3차 기준 하락률(%)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="bt_leader_drop3")
+        with c2:
+            st.markdown("##### 2등대표주 2차")
+            second_1 = st.number_input("2등대표주 1차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_second_1")
+            second_2 = st.number_input("2등대표주 2차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_second_2")
+            second_drop2 = st.number_input("2등대표주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_second_drop2")
+        with c3:
+            st.markdown("##### 회전형 1차")
+            include_rotation = st.checkbox("회전형 포함", value=True, key="bt_include_rotation")
+            rotation_1 = st.number_input("회전형 1차", min_value=0, max_value=50_000_000, value=2_000_000, step=500_000, format="%d", key="bt_rotation_1")
+            fee_tax_rate = st.number_input("수수료+세금 비율", min_value=0.0, max_value=0.01, value=0.0023, step=0.0001, format="%.4f", key="bt_fee_tax")
+            lookback_days = st.selectbox("신호 계산용 일봉 기간", options=[120, 190, 260], index=1, key="bt_lookback")
+
+        with st.expander("백테스트 규칙 확인", expanded=False):
+            st.markdown("""
+- `사기` 신호가 나온 섹터만 다음 거래일 시가에 1차 진입합니다.
+- 초보 기본값은 동시 1섹터입니다.
+- 대장주: 1차/2차/3차, 2차는 1차가 대비 -5%, 3차는 -10% 기준입니다.
+- 2등대표주: 1차/2차까지만 허용합니다.
+- 회전형: 1차만 허용하고 물타기는 하지 않습니다.
+- `일부팔기`: 대장주는 절반, 2등/회전형은 전량 회수합니다.
+- `전량회수`: 해당 신호 종목/섹터는 전량 정리합니다.
+- 방어예수금 아래로 내려가는 매수는 수량을 줄이거나 막습니다.
+""")
+
+        if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
+            if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
+                st.error("시작일은 종료일보다 앞서야 합니다.")
+            else:
+                prog = st.progress(0)
+                status = st.empty()
+                def _progress(i, total, d):
+                    if total <= 0:
+                        return
+                    prog.progress(min(1.0, i / total))
+                    status.caption(f"신호 계산 중: {d} ({i}/{total})")
+                try:
+                    daily_df, trade_df, pos_df, summary = run_sector_strategy_backtest(
+                        sector_df,
+                        start_date=str(start_date),
+                        end_date=str(end_date),
+                        initial_cash=initial_cash,
+                        defense_cash=defense_cash,
+                        max_sector_budget=max_sector_budget,
+                        max_active_sectors=max_active_sectors,
+                        leader_steps=(leader_1, leader_2, leader_3),
+                        second_steps=(second_1, second_2),
+                        rotation_step=rotation_1,
+                        leader_drop2=leader_drop2,
+                        leader_drop3=leader_drop3,
+                        second_drop2=second_drop2,
+                        include_rotation=include_rotation,
+                        fee_tax_rate=fee_tax_rate,
+                        lookback_days=lookback_days,
+                        max_signal_days=max_signal_days,
+                        progress_callback=_progress,
+                    )
+                    prog.empty()
+                    status.empty()
+                    if summary.get("오류"):
+                        st.error(summary.get("오류"))
+                    else:
+                        st.success("백테스트 완료")
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("총수익률", f"{summary.get('총수익률', 0)}%")
+                        m2.metric("최종총자산", fmt_won(summary.get("최종총자산", 0)))
+                        m3.metric("최저현금", fmt_won(summary.get("최저현금", 0)))
+                        m4.metric("최대낙폭", f"{summary.get('최대낙폭', 0)}%")
+                        m5.metric("매매건수", f"{summary.get('매매건수', 0)}건")
+
+                        tab_sum, tab_daily, tab_trade, tab_pos, tab_fail = st.tabs(["요약", "자금흐름", "매매내역", "최종보유", "실패구간"])
+                        with tab_sum:
+                            summary_df = pd.DataFrame([summary])
+                            show_pinned_dataframe(summary_df, height=120)
+                            st.caption("최저현금이 방어예수금 아래로 자주 내려가면 차수 금액이나 동시 섹터 수를 줄여야 합니다.")
+                        with tab_daily:
+                            show_pinned_dataframe(daily_df, height=520)
+                            st.download_button("자금흐름 CSV 다운로드", data=daily_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_daily_{today_str()}.csv", mime="text/csv")
+                        with tab_trade:
+                            show_pinned_dataframe(trade_df, height=560)
+                            st.download_button("매매내역 CSV 다운로드", data=trade_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_trades_{today_str()}.csv", mime="text/csv")
+                        with tab_pos:
+                            show_pinned_dataframe(pos_df, height=420)
+                            st.download_button("최종보유 CSV 다운로드", data=pos_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_positions_{today_str()}.csv", mime="text/csv")
+                        with tab_fail:
+                            fail_df = trade_df.copy()
+                            if len(fail_df) > 0 and "실현손익" in fail_df.columns:
+                                fail_df["실현손익"] = pd.to_numeric(fail_df["실현손익"], errors="coerce").fillna(0)
+                                fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
+                            show_pinned_dataframe(fail_df, height=420)
+                except Exception as e:
+                    prog.empty()
+                    status.empty()
+                    st.error(f"백테스트 실행 실패: {e}")
+
+# =====================================================
+# 7. 도움말
 # =====================================================
 
 else:
-    st.header("6. 도움말")
+    st.header("7. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -8067,6 +8772,7 @@ else:
 ### 이번 버전 핵심
 
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
+- `6. 섹터전략 백테스트` 메뉴를 추가했습니다. 신호일 다음 거래일 시가 기준으로 대장주 3차, 2등 2차, 회전형 1차 규칙을 검증합니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
@@ -8092,7 +8798,8 @@ else:
 3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
 4. 보유차수 판단기에서 종목별 최고차수 기준도달 여부와 추가매수/유지/회수 판단
 5. 섹터 순환매 판단기에서 어느 섹터에 돈이 몰렸는지, 어디로 이동하는지, 발빼기 신호가 있는지 확인
-6. TOP50은 기존 신규 후보 출력용으로 별도 사용
+6. 섹터전략 백테스트에서 대장주 3차/2등 2차/회전형 1차 규칙과 예수금 흐름 검증
+7. TOP50은 기존 신규 후보 출력용으로 별도 사용
 
 ### 묶음수동입력 예시
 
