@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_PROFIT_UP_ROLE_GUARD_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_COMPOUND_MODE_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4720,6 +4720,7 @@ def run_sector_strategy_backtest(
     initial_cash=100_000_000,
     defense_cash=50_000_000,
     max_sector_budget=30_000_000,
+    compound_mode=False,
     max_active_sectors=2,
     leader_steps=(10_000_000, 5_000_000, 3_000_000),
     second_steps=(5_000_000, 3_000_000),
@@ -4753,6 +4754,7 @@ def run_sector_strategy_backtest(
     - 익절: 대장주 +8% 절반, +12% 잔여 정리 / 2등 +5% / 회전형 +3%.
     - 대장주 발빼기 후 신호가 다시 사기로 회복되면 재진입대기 → 재진입허용으로 1차의 50%만 복원한다.
     - 전량회수까지 기다리기 전에 대장주/2등대표주 손실축소 규칙을 적용한다.
+    - 증액투자 모드가 켜지면 차수 금액과 섹터 한도가 현재 총자산/초기자금 비율만큼 자동 확대·축소된다.
     """
     leader_df = normalize_sector_leader_df(leader_df)
     active = leader_df[leader_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
@@ -4804,7 +4806,32 @@ def run_sector_strategy_backtest(
     leader_loss_warn = float(leader_loss_warn)
     leader_loss_cut = float(leader_loss_cut)
     second_loss_cut = float(second_loss_cut)
+    compound_mode = bool(compound_mode)
     sold_today_codes = set()
+
+    def _bt_eval_value(asof_date):
+        total = 0.0
+        for _code, _p in positions.items():
+            if _p.get("qty", 0) <= 0:
+                continue
+            _close = _close_on_or_before_local(_code, asof_date)
+            if _close <= 0:
+                _close = _p.get("avg", 0)
+            total += float(_close) * int(_p.get("qty", 0))
+        return total
+
+    def _bt_total_asset_for_budget(asof_date):
+        return float(cash) + float(_bt_eval_value(asof_date))
+
+    def _bt_scaled_budget(base_amount, asof_date):
+        base_amount = float(base_amount or 0)
+        if not compound_mode:
+            return base_amount
+        if float(initial_cash or 0) <= 0:
+            return base_amount
+        # 총자산이 커지면 차수 금액도 커지고, 줄어들면 차수 금액도 줄어드는 복리/증액형.
+        scale = max(0.25, _bt_total_asset_for_budget(asof_date) / float(initial_cash))
+        return base_amount * scale
 
     def active_sectors():
         return sorted({p["sector"] for p in positions.values() if p.get("qty", 0) > 0})
@@ -4831,9 +4858,11 @@ def run_sector_strategy_backtest(
         nonlocal cash
         code = _bt_position_key(row.get("코드", ""))
         sector = str(row.get("섹터", ""))
-        if sector_invested(sector) >= max_sector_budget:
+        sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date)
+        if sector_invested(sector) >= sector_budget_limit:
             return 0
-        budget = min(float(budget), max(0.0, max_sector_budget - sector_invested(sector)))
+        budget = _bt_scaled_budget(float(budget), signal_date)
+        budget = min(float(budget), max(0.0, sector_budget_limit - sector_invested(sector)))
         price, actual_date = _price_on_or_after_local(code, trade_date, field="open")
         if price is None or price <= 0:
             return 0
@@ -5189,7 +5218,8 @@ def run_sector_strategy_backtest(
         "매도승률": round((wins / sells * 100), 1) if sells else 0,
         "최종보유종목수": len(pos_df),
         "검증거래일": len(daily_df),
-        "메모": ("빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
+        "증액투자모드": "ON" if compound_mode else "OFF",
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -9088,7 +9118,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호 기본값: 동시 2섹터, 대장주 1차 1,000만, 2등 1차 500만, 재진입 50%, 회전형 OFF. 현재대장/현재2등 유지 중에는 손실축소 매도하지 않습니다.")
+    st.caption("수익확대+역할보호 기본값: 동시 2섹터, 대장주 1차 1,000만, 2등 1차 500만, 재진입 50%, 회전형 OFF. 증액투자 모드를 켜면 총자산 비율로 차수 금액이 자동 확대됩니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9119,15 +9149,22 @@ elif menu == "6. 섹터전략 백테스트":
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 클 수 있습니다. 실전 판단은 120~240거래일 이상으로 확인하세요.")
 
         st.subheader("1) 자금 설정")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             initial_cash = st.number_input("총자금", min_value=1_000_000, max_value=10_000_000_000, value=100_000_000, step=1_000_000, format="%d", key="bt_initial_cash")
         with c2:
-            defense_cash = st.number_input("방어예수금", min_value=0, max_value=10_000_000_000, value=50_000_000, step=1_000_000, format="%d", key="bt_defense_cash")
+            defense_preset = st.selectbox("최저현금 기준", options=["5천만", "4천만", "3천만", "사용자지정"], index=0, key="bt_defense_preset")
+            defense_default_map = {"5천만": 50_000_000, "4천만": 40_000_000, "3천만": 30_000_000}
+            defense_cash = st.number_input("방어예수금", min_value=0, max_value=10_000_000_000, value=int(defense_default_map.get(defense_preset, 50_000_000)), step=1_000_000, format="%d", key="bt_defense_cash_compound")
         with c3:
             max_sector_budget = st.number_input("한 섹터 최대금액", min_value=1_000_000, max_value=500_000_000, value=30_000_000, step=1_000_000, format="%d", key="bt_sector_budget")
         with c4:
             max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=1, key="bt_max_sectors")
+        with c5:
+            compound_mode = st.checkbox("증액투자 모드", value=False, key="bt_compound_mode")
+            st.caption("ON: 현재 총자산 비율로 차수금액 자동 확대")
+        if compound_mode:
+            st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
 
         st.subheader("2) 역할별 차수 설정")
         c1, c2, c3 = st.columns(3)
@@ -9188,6 +9225,7 @@ elif menu == "6. 섹터전략 백테스트":
 - 2등대표주 손실축소: -5% 이하라도 현재대장/현재2등대표 유지 중이면 매도하지 않습니다. 역할에서 밀렸을 때만 전량회수합니다.
 - `전량회수`: 해당 신호 종목/섹터는 전량 정리합니다.
 - 방어예수금 아래로 내려가는 매수는 수량을 줄이거나 막습니다.
+- 증액투자 모드 ON이면 차수 금액과 한 섹터 최대금액이 현재 총자산/초기자금 비율만큼 자동 확대·축소됩니다.
 """)
 
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
@@ -9209,6 +9247,7 @@ elif menu == "6. 섹터전략 백테스트":
                         initial_cash=initial_cash,
                         defense_cash=defense_cash,
                         max_sector_budget=max_sector_budget,
+                        compound_mode=compound_mode,
                         max_active_sectors=max_active_sectors,
                         leader_steps=(leader_1, leader_2, leader_3),
                         second_steps=(second_1, second_2),
@@ -9255,6 +9294,8 @@ elif menu == "6. 섹터전략 백테스트":
                             "최대검증거래일": max_signal_days,
                             "총자금": initial_cash,
                             "방어예수금": defense_cash,
+                            "최저현금기준": defense_preset,
+                            "증액투자모드": compound_mode,
                             "한섹터최대금액": max_sector_budget,
                             "동시진입섹터수": max_active_sectors,
                             "대장주1차": leader_1,
