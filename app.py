@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_AUTO_SECTOR_WEIGHT_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_MDD_BRAKE_COOLDOWN_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4789,6 +4789,8 @@ def run_sector_strategy_backtest(
     regime_custom_multipliers=None,
     progress_callback=None,
     sector_weight_mode="OFF",
+    account_defense_mode="OFF",
+    loss_cooldown_mode="OFF",
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
 
@@ -4883,6 +4885,14 @@ def run_sector_strategy_backtest(
     second_loss_cut = float(second_loss_cut)
     compound_mode = bool(compound_mode)
     sold_today_codes = set()
+    account_defense_mode = str(account_defense_mode or "OFF")
+    loss_cooldown_mode = str(loss_cooldown_mode or "OFF")
+    account_defense_multiplier = 1.0
+    account_defense_core_only = False
+    account_defense_note = ""
+    sector_cooldown_weight_map = {}
+    sector_cooldown_reason_map = {}
+    symbol_cooldown_block_map = {}
 
     def _bt_eval_value(asof_date):
         total = 0.0
@@ -4933,12 +4943,16 @@ def run_sector_strategy_backtest(
         nonlocal cash
         code = _bt_position_key(row.get("코드", ""))
         sector = str(row.get("섹터", ""))
+        if code in symbol_cooldown_block_map:
+            return 0
         sector_auto_weight = float(sector_weight_map.get(sector, 1.0))
-        sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date) * max(0.0, sector_auto_weight)
+        sector_loss_weight = float(sector_cooldown_weight_map.get(sector, 1.0))
+        total_sector_weight = max(0.0, sector_auto_weight * sector_loss_weight)
+        sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date) * total_sector_weight
         if sector_invested(sector) >= sector_budget_limit:
             return 0
         budget = _bt_scaled_budget(float(budget), signal_date)
-        budget = float(budget) * float(current_buy_multiplier) * max(0.0, sector_auto_weight)
+        budget = float(budget) * float(current_buy_multiplier) * total_sector_weight * float(account_defense_multiplier)
         if budget <= 0:
             return 0
         budget = min(float(budget), max(0.0, sector_budget_limit - sector_invested(sector)))
@@ -4979,7 +4993,14 @@ def run_sector_strategy_backtest(
         p["last_trade_date"] = actual_date or trade_date
         sw = float(sector_weight_map.get(sector, 1.0))
         sg = str(sector_grade_map.get(sector, "B"))
-        smemo = "다음거래일 시가" if sector_weight_mode in {"OFF", "사용안함", "없음"} else f"다음거래일 시가 / 섹터가중 {sg} {sw:.1f}"
+        cw = float(sector_cooldown_weight_map.get(sector, 1.0))
+        smemo = "다음거래일 시가"
+        if sector_weight_mode not in {"OFF", "사용안함", "없음"}:
+            smemo += f" / 섹터가중 {sg} {sw:.1f}"
+        if loss_cooldown_mode not in {"OFF", "사용안함", "없음"} and cw < 1.0:
+            smemo += f" / 손실쿨다운 {cw:.1f}"
+        if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_multiplier < 1.0:
+            smemo += f" / MDD브레이크 {account_defense_multiplier:.1f}"
         record_trade(actual_date or trade_date, signal_date, "매수", reason, row, role, step, qty, price, fee, 0.0, smemo)
         return qty
 
@@ -5141,6 +5162,15 @@ def run_sector_strategy_backtest(
                 ratio = 0.5 if role == "대장주" else 1.0
                 sell(row, ratio, signal_date, next_trade_date, "일부팔기/발빼기 신호")
 
+        # 1-1) 계좌 MDD 브레이크 + 손실 쿨다운은 매도 처리 후, 신규/추가매수 전에만 적용한다.
+        prebuy_eval_value = _bt_eval_value(signal_date)
+        prebuy_total_asset = float(cash) + float(prebuy_eval_value)
+        dd_now_for_defense = (prebuy_total_asset / equity_peak - 1) * 100 if equity_peak > 0 else 0.0
+        account_defense_multiplier, account_defense_core_only, account_defense_note = _bt_account_defense_state(dd_now_for_defense, account_defense_mode)
+        sector_cooldown_weight_map, sector_cooldown_reason_map, symbol_cooldown_block_map = _bt_loss_cooldown_maps(
+            trade_rows, signal_date, mode=loss_cooldown_mode, initial_cash=initial_cash
+        )
+
         # 2) 신규 진입 섹터 선정: 현실수익형 기본값은 한 번에 2섹터까지 허용.
         active_secs = set(active_sectors())
         buy_candidates = pd.DataFrame()
@@ -5149,12 +5179,14 @@ def run_sector_strategy_backtest(
             if len(buy_candidates) > 0:
                 buy_candidates["섹터자동가중"] = buy_candidates["섹터"].astype(str).map(lambda x: float(sector_weight_map.get(x, 1.0)))
                 buy_candidates["섹터자동등급"] = buy_candidates["섹터"].astype(str).map(lambda x: str(sector_grade_map.get(x, "B")))
-                if sector_weight_mode not in {"OFF", "사용안함", "없음"}:
-                    buy_candidates = buy_candidates[pd.to_numeric(buy_candidates["섹터자동가중"], errors="coerce").fillna(1.0) > 0].copy()
-            for c in ["쏠림변화", "5일대비거래대금증감률", "쏠림점수", "섹터자동가중"]:
+                buy_candidates["섹터쿨다운가중"] = buy_candidates["섹터"].astype(str).map(lambda x: float(sector_cooldown_weight_map.get(x, 1.0)))
+                buy_candidates["최종섹터가중"] = pd.to_numeric(buy_candidates["섹터자동가중"], errors="coerce").fillna(1.0) * pd.to_numeric(buy_candidates["섹터쿨다운가중"], errors="coerce").fillna(1.0)
+                if sector_weight_mode not in {"OFF", "사용안함", "없음"} or loss_cooldown_mode not in {"OFF", "사용안함", "없음"}:
+                    buy_candidates = buy_candidates[pd.to_numeric(buy_candidates["최종섹터가중"], errors="coerce").fillna(1.0) > 0].copy()
+            for c in ["쏠림변화", "5일대비거래대금증감률", "쏠림점수", "섹터자동가중", "섹터쿨다운가중", "최종섹터가중"]:
                 if c in buy_candidates.columns:
                     buy_candidates[c] = pd.to_numeric(buy_candidates[c], errors="coerce").fillna(0)
-            sort_cols = [c for c in ["섹터자동가중", "쏠림변화", "5일대비거래대금증감률", "쏠림점수"] if c in buy_candidates.columns]
+            sort_cols = [c for c in ["최종섹터가중", "섹터자동가중", "쏠림변화", "5일대비거래대금증감률", "쏠림점수"] if c in buy_candidates.columns]
             buy_candidates = buy_candidates.sort_values(sort_cols, ascending=[False] * len(sort_cols)) if sort_cols else buy_candidates
 
         allowed_sectors = list(active_secs)
@@ -5182,6 +5214,8 @@ def run_sector_strategy_backtest(
                 sec_action = sector_action_map.get(sector, "대기")
                 st_action = str(row.get("오늘행동", "대기"))
                 cur_role = str(row.get("현재역할", ""))
+                if account_defense_multiplier <= 0:
+                    continue
                 if sec_action == "사기" and st_action in {"사기", "대기"} and "현재대장" in cur_role:
                     budget = max(0.0, leader_steps[0] * reentry_budget_ratio)
                     bought = buy(row, "대장주", max(1, int(p.get("step", 1))), budget, signal_date, next_trade_date, "대장주 재진입허용 1차")
@@ -5205,6 +5239,10 @@ def run_sector_strategy_backtest(
                     continue
                 role = row.get("_role_bucket", "감시")
                 if role == "감시":
+                    continue
+                if account_defense_core_only and role != "대장주":
+                    continue
+                if account_defense_multiplier <= 0:
                     continue
                 if not _bt_regime_role_allowed(current_market_regime, regime_filter_mode, role):
                     continue
@@ -5277,7 +5315,11 @@ def run_sector_strategy_backtest(
             "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
-            "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else ""
+            "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": " / ".join([x for x in [
+                _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else "",
+                account_defense_note if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_note not in {"", "정상"} else "",
+                ("손실쿨다운 " + ", ".join([f"{k}:{float(v):.1f}" for k, v in list(sector_cooldown_weight_map.items())[:4]])) if loss_cooldown_mode not in {"OFF", "사용안함", "없음"} and sector_cooldown_weight_map else "",
+            ] if x])
         })
 
     # 최종 보유표.
@@ -5330,7 +5372,9 @@ def run_sector_strategy_backtest(
         "증액투자모드": "ON" if compound_mode else "OFF",
         "장세매수필터": str(regime_filter_mode),
         "섹터자동가중": str(sector_weight_mode),
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode}"
+        "계좌MDD브레이크": str(account_defense_mode),
+        "손실쿨다운": str(loss_cooldown_mode),
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -5695,6 +5739,119 @@ def _bt_format_sector_weight_memo(weight_map, grade_map, limit=6):
         return "섹터자동가중 " + ", ".join([f"{sec}:{grade_map.get(sec, 'B')}/{float(w):.1f}" for sec, w in items])
     except Exception:
         return ""
+
+
+
+def _bt_account_defense_state(dd_now, mode="OFF"):
+    """계좌 MDD가 커질 때만 신규/추가매수 예산을 줄이는 브레이크.
+    평소 수익 구간은 건드리지 않고, 흔들리는 구간에서만 현금 소모를 줄인다.
+    반환: (budget_multiplier, leader_only, note)
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return 1.0, False, ""
+    try:
+        dd = float(dd_now)
+    except Exception:
+        dd = 0.0
+    if mode == "표준브레이크":
+        if dd <= -10.0:
+            return 0.0, True, f"MDD {dd:.2f}% 신규중단"
+        if dd <= -8.0:
+            return 0.5, True, f"MDD {dd:.2f}% 대장주만 50%"
+        if dd <= -6.0:
+            return 0.7, False, f"MDD {dd:.2f}% 70% 축소"
+        return 1.0, False, "정상"
+    if mode == "강한브레이크":
+        if dd <= -12.0:
+            return 0.0, True, f"MDD {dd:.2f}% 신규중단"
+        if dd <= -9.0:
+            return 0.4, True, f"MDD {dd:.2f}% 대장주만 40%"
+        if dd <= -6.0:
+            return 0.6, False, f"MDD {dd:.2f}% 60% 축소"
+        return 1.0, False, "정상"
+    if mode == "완만브레이크":
+        if dd <= -12.0:
+            return 0.5, True, f"MDD {dd:.2f}% 대장주만 50%"
+        if dd <= -8.0:
+            return 0.7, False, f"MDD {dd:.2f}% 70% 축소"
+        return 1.0, False, "정상"
+    return 1.0, False, "정상"
+
+
+def _bt_loss_cooldown_maps(trade_rows, signal_date, mode="OFF", initial_cash=100_000_000):
+    """전량회수/손실축소가 방금 나온 섹터와 종목을 잠깐 쉬게 한다.
+    영구 제외가 아니라 10~20거래일 수준의 임시 쿨다운 개념이다.
+    반환: sector_weight_map, sector_reason_map, symbol_block_map
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return {}, {}, {}
+    try:
+        target = pd.to_datetime(signal_date)
+    except Exception:
+        target = pd.Timestamp.today()
+    sector_events = {}
+    symbol_events = {}
+    loss_floor = max(300_000.0, float(initial_cash or 0) * 0.003)
+    for t in trade_rows or []:
+        try:
+            if str(t.get("구분", "")) != "매도":
+                continue
+            td = pd.to_datetime(t.get("매매일", ""), errors="coerce")
+            if pd.isna(td) or td > target:
+                continue
+            days = int((target - td).days)
+            if days < 0 or days > 30:
+                continue
+            pnl = float(pd.to_numeric(t.get("실현손익", 0), errors="coerce") or 0)
+            if pnl >= 0:
+                continue
+            reason = str(t.get("사유", ""))
+            severe_reason = any(k in reason for k in ["전량회수", "손실축소", "발빼기"])
+            if not severe_reason and abs(pnl) < loss_floor:
+                continue
+            sec = str(t.get("섹터", ""))
+            code = str(t.get("코드", "")).zfill(6)
+            sector_events.setdefault(sec, []).append((days, pnl, reason))
+            symbol_events.setdefault(code, []).append((days, pnl, reason))
+        except Exception:
+            continue
+
+    sector_w, sector_reason, symbol_block = {}, {}, {}
+    for sec, evs in sector_events.items():
+        cnt10 = sum(1 for d, p, r in evs if d <= 10)
+        cnt20 = sum(1 for d, p, r in evs if d <= 20)
+        pnl20 = sum(p for d, p, r in evs if d <= 20)
+        if mode == "섹터쿨다운":
+            if cnt20 >= 2 or pnl20 <= -loss_floor * 3:
+                sector_w[sec] = 0.0
+                sector_reason[sec] = f"20일 손실쿨다운 D({cnt20}회/{pnl20:,.0f})"
+            elif cnt10 >= 1:
+                sector_w[sec] = 0.5
+                sector_reason[sec] = f"10일 손실쿨다운 C({cnt10}회)"
+        elif mode == "종목+섹터쿨다운":
+            if cnt20 >= 2 or pnl20 <= -loss_floor * 3:
+                sector_w[sec] = 0.0
+                sector_reason[sec] = f"20일 손실쿨다운 D({cnt20}회/{pnl20:,.0f})"
+            elif cnt10 >= 1:
+                sector_w[sec] = 0.5
+                sector_reason[sec] = f"10일 손실쿨다운 C({cnt10}회)"
+        elif mode == "완만쿨다운":
+            if cnt20 >= 2:
+                sector_w[sec] = 0.5
+                sector_reason[sec] = f"완만쿨다운 50%({cnt20}회)"
+            elif cnt10 >= 1:
+                sector_w[sec] = 0.7
+                sector_reason[sec] = f"완만쿨다운 70%({cnt10}회)"
+
+    if mode == "종목+섹터쿨다운":
+        for code, evs in symbol_events.items():
+            cnt10 = sum(1 for d, p, r in evs if d <= 10)
+            pnl10 = sum(p for d, p, r in evs if d <= 10)
+            if cnt10 >= 1 and pnl10 <= -loss_floor:
+                symbol_block[code] = f"종목 10일 재진입금지({pnl10:,.0f})"
+    return sector_w, sector_reason, symbol_block
 
 def build_backtest_regime_result(daily_df, start_date, end_date):
     """일별 자금흐름 + KODEX200 기준으로 장세별 성과표를 만든다."""
@@ -9824,6 +9981,25 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("강한차단형=A 1.2/B 1.0/C 0.3/D 0, 초강한차단형=A 1.2/B 1.0/C 0/D 0입니다. 손실+유입약화 섹터는 더 빨리 C/D로 강등하고, 재유입 시 B로 복귀합니다.")
             st.caption("손실 섹터도 현재 거래대금·쏠림이 다시 살아나면 B등급으로 복귀해 재매수 허용됩니다.")
 
+        st.subheader("4-2) MDD 방어 브레이크 / 손실 쿨다운")
+        br1, br2 = st.columns(2)
+        with br1:
+            account_defense_mode = st.selectbox(
+                "계좌 MDD 브레이크",
+                options=["OFF", "완만브레이크", "표준브레이크", "강한브레이크"],
+                index=0,
+                key="bt_account_defense_mode",
+            )
+            st.caption("평소엔 그대로 두고, 계좌 MDD가 커질 때만 신규/추가매수 예산을 줄입니다. 표준=-6% 70%, -8% 대장주만 50%, -10% 신규중단.")
+        with br2:
+            loss_cooldown_mode = st.selectbox(
+                "전량회수 손실 쿨다운",
+                options=["OFF", "완만쿨다운", "섹터쿨다운", "종목+섹터쿨다운"],
+                index=0,
+                key="bt_loss_cooldown_mode",
+            )
+            st.caption("최근 전량회수/손실축소가 나온 섹터는 10~20일 동안 0.5배 또는 신규금지합니다. 종목+섹터는 같은 종목 재진입도 잠깐 막습니다.")
+
         st.subheader("5) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -9893,6 +10069,8 @@ elif menu == "6. 섹터전략 백테스트":
                 "TP1비율": eff_leader_tp1_ratio,
                 "TP2비율": eff_leader_tp2_ratio if eff_leader_tp_mode == "3단계추세익절" else "미사용",
                 "섹터자동가중": sector_weight_mode,
+                "MDD브레이크": account_defense_mode,
+                "손실쿨다운": loss_cooldown_mode,
             }
         ]), use_container_width=True, hide_index=True)
 
@@ -9946,6 +10124,8 @@ elif menu == "6. 섹터전략 백테스트":
                         regime_custom_multipliers=regime_custom_multipliers,
                         progress_callback=_progress,
                         sector_weight_mode=sector_weight_mode,
+                        account_defense_mode=account_defense_mode,
+                        loss_cooldown_mode=loss_cooldown_mode,
                     )
                     prog.empty()
                     status.empty()
@@ -9989,6 +10169,10 @@ elif menu == "6. 섹터전략 백테스트":
                             "증액투자모드": compound_mode,
                             "장세매수필터": regime_filter_mode,
                             "섹터자동가중": sector_weight_mode,
+                            "MDD브레이크": account_defense_mode,
+                            "손실쿨다운": loss_cooldown_mode,
+                "MDD브레이크": account_defense_mode,
+                "손실쿨다운": loss_cooldown_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
                             "장세배율_상승장": regime_custom_multipliers.get("상승장", ""),
                             "장세배율_횡보장": regime_custom_multipliers.get("횡보장", ""),
