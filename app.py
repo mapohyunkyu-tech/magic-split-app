@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_EXPORT_PERIOD_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_REALISTIC_STOP_REENTRY_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4732,7 +4732,10 @@ def run_sector_strategy_backtest(
     second_tp=5.0,
     rotation_tp=3.0,
     enable_reentry=True,
-    reentry_budget_ratio=1.0,
+    reentry_budget_ratio=0.5,
+    leader_loss_warn=-6.0,
+    leader_loss_cut=-8.0,
+    second_loss_cut=-5.0,
     include_rotation=False,
     fee_tax_rate=0.0023,
     lookback_days=190,
@@ -4748,7 +4751,8 @@ def run_sector_strategy_backtest(
     - 실제 매수/매도는 다음 거래일 시가로 체결한 것으로 처리한다.
     - 대장주 3차, 2등대표주 2차, 회전형 1차만 허용한다.
     - 익절: 대장주 +8% 절반, +12% 잔여 정리 / 2등 +5% / 회전형 +3%.
-    - 대장주 발빼기 후 신호가 다시 사기로 회복되면 재진입대기 → 재진입허용으로 1차만 복원한다.
+    - 대장주 발빼기 후 신호가 다시 사기로 회복되면 재진입대기 → 재진입허용으로 1차의 50%만 복원한다.
+    - 전량회수까지 기다리기 전에 대장주/2등대표주 손실축소 규칙을 적용한다.
     """
     leader_df = normalize_sector_leader_df(leader_df)
     active = leader_df[leader_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
@@ -4797,6 +4801,9 @@ def run_sector_strategy_backtest(
     second_tp = float(second_tp)
     rotation_tp = float(rotation_tp)
     reentry_budget_ratio = float(reentry_budget_ratio)
+    leader_loss_warn = float(leader_loss_warn)
+    leader_loss_cut = float(leader_loss_cut)
+    second_loss_cut = float(second_loss_cut)
     sold_today_codes = set()
 
     def active_sectors():
@@ -4966,6 +4973,33 @@ def run_sector_strategy_backtest(
             sec_action = sector_action_map.get(str(p.get("sector", "")), "대기")
             st_action = str(row.get("오늘행동", "대기")) if isinstance(row, dict) else str(row.get("오늘행동", "대기"))
             role = p.get("role", "")
+            cur_role = str(row.get("현재역할", p.get("current_role", ""))) if isinstance(row, dict) else str(row.get("현재역할", ""))
+
+            # 전량회수 신호가 뜨기 전 손실 축소 룰.
+            # 목적: 대장주/2등대표주가 역할을 잃고 손실이 커질 때 전량회수까지 기다리지 않고 먼저 줄인다.
+            close_now = _close_on_or_before_local(code, signal_date)
+            avg = _safe_float_value(p.get("avg", 0), 0)
+            ret_now = (close_now / avg - 1) * 100 if close_now > 0 and avg > 0 else 0.0
+            weak_signal = (
+                sec_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}
+                or st_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}
+            )
+            leader_role_lost = role == "대장주" and "현재대장" not in cur_role
+            second_role_lost = role == "2등대표주" and ("현재대장" not in cur_role and "현재2등대표" not in cur_role)
+
+            if role == "대장주" and ret_now <= leader_loss_cut and (weak_signal or leader_role_lost) and code not in sold_today_codes:
+                sell(row, 0.5, signal_date, next_trade_date, f"대장주 손실축소 {leader_loss_cut:g}% 일부회수")
+                if code in positions and positions[code].get("qty", 0) > 0:
+                    positions[code]["status"] = "재진입대기"
+                continue
+            elif role == "대장주" and ret_now <= leader_loss_warn and (weak_signal or leader_role_lost):
+                # 경고 단계는 매도하지 않고 추가매수만 막는다.
+                p["status"] = "추가매수금지"
+
+            if role == "2등대표주" and ret_now <= second_loss_cut and (weak_signal or second_role_lost) and code not in sold_today_codes:
+                sell(row, 1.0, signal_date, next_trade_date, f"2등대표주 손실축소 {second_loss_cut:g}% 전량회수")
+                continue
+
             if sec_action == "전량회수" or st_action == "전량회수":
                 sell(row, 1.0, signal_date, next_trade_date, "전량회수 신호")
             elif sec_action == "일부팔기" or st_action == "일부팔기":
@@ -5053,8 +5087,10 @@ def run_sector_strategy_backtest(
                         buy(row, role, 1, rotation_step, signal_date, next_trade_date, "회전형 1차만")
                     continue
 
-                # 추가매수: 기존 포지션만. 발빼기/신규금지 시에는 금지.
+                # 추가매수: 기존 포지션만. 발빼기/신규금지/손실경고 시에는 금지.
                 if stock_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
+                    continue
+                if str(pos.get("status", "")) == "추가매수금지":
                     continue
                 first_price = _safe_float_value(pos.get("first_price", pos.get("avg", price)), price)
                 step_now = int(pos.get("step", 1))
@@ -5142,7 +5178,7 @@ def run_sector_strategy_backtest(
         "매도승률": round((wins / sells * 100), 1) if sells else 0,
         "최종보유종목수": len(pos_df),
         "검증거래일": len(daily_df),
-        "메모": ("빠른모드 현실수익형: 가격데이터 1회 로딩/동시2섹터/대장주1차상향/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
+        "메모": ("빠른모드 현실수익형+손실축소: 동시2섹터/대장주1차상향/재진입50%/전량회수전손실축소/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -9041,7 +9077,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("현실수익형 기본값: 동시 2섹터, 대장주 1차 700만, 회전형 OFF. 신호는 기준일 장마감 계산, 실제 매매는 다음 거래일 시가 기준입니다.")
+    st.caption("현실수익형+손실축소 기본값: 동시 2섹터, 대장주 1차 700만, 재진입 50%, 회전형 OFF. 신호는 기준일 장마감 계산, 실제 매매는 다음 거래일 시가 기준입니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9113,10 +9149,19 @@ elif menu == "6. 섹터전략 백테스트":
             rotation_tp = st.number_input("회전형 익절(%)", min_value=1.0, max_value=30.0, value=3.0, step=0.5, key="bt_rotation_tp")
         with c3:
             enable_reentry = st.checkbox("대장주 재진입 허용", value=True, key="bt_enable_reentry")
-            reentry_budget_ratio = st.number_input("재진입 1차 비율", min_value=0.25, max_value=1.0, value=1.0, step=0.25, key="bt_reentry_ratio")
+            reentry_budget_ratio = st.number_input("재진입 1차 비율", min_value=0.25, max_value=1.0, value=0.5, step=0.25, key="bt_reentry_ratio")
         with c4:
             fast_mode = st.checkbox("빠른 백테스트", value=True, key="bt_fast_mode")
             universe_mode = st.selectbox("검증 종목 범위", options=["핵심만", "전체"], index=0, key="bt_universe_mode")
+
+        st.subheader("4) 손실축소 설정")
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            leader_loss_warn = st.number_input("대장주 추가매수금지 손실률(%)", min_value=-30.0, max_value=-1.0, value=-6.0, step=0.5, key="bt_leader_loss_warn")
+        with sc2:
+            leader_loss_cut = st.number_input("대장주 일부회수 손실률(%)", min_value=-50.0, max_value=-1.0, value=-8.0, step=0.5, key="bt_leader_loss_cut")
+        with sc3:
+            second_loss_cut = st.number_input("2등대표주 전량회수 손실률(%)", min_value=-50.0, max_value=-1.0, value=-5.0, step=0.5, key="bt_second_loss_cut")
 
         with st.expander("백테스트 규칙 확인", expanded=False):
             st.markdown("""
@@ -9127,7 +9172,9 @@ elif menu == "6. 섹터전략 백테스트":
 - 회전형: 기본 OFF입니다. 켤 경우 1차만 허용하고 물타기는 하지 않습니다.
 - 익절 기본값: 대장주 +8% 절반, +12% 전량 / 2등 +5% / 회전형 +3%.
 - `일부팔기`: 대장주는 절반만 줄이고 `재진입대기`, 2등/회전형은 전량 회수합니다.
-- 대장주 재진입: 발빼기 뒤 섹터가 다시 `사기`로 회복되고 현재역할이 `현재대장`이면 1차만 복원합니다.
+- 대장주 재진입: 발빼기 뒤 섹터가 다시 `사기`로 회복되고 현재역할이 `현재대장`이면 1차의 50%만 복원합니다.
+- 대장주 손실축소: -6% 이하 + 신호 약화/현재대장 이탈이면 추가매수금지, -8% 이하면 절반 일부회수합니다.
+- 2등대표주 손실축소: -5% 이하 + 현재2등대표 이탈/신호 약화이면 전량회수합니다.
 - `전량회수`: 해당 신호 종목/섹터는 전량 정리합니다.
 - 방어예수금 아래로 내려가는 매수는 수량을 줄이거나 막습니다.
 """)
@@ -9164,6 +9211,9 @@ elif menu == "6. 섹터전략 백테스트":
                         rotation_tp=rotation_tp,
                         enable_reentry=enable_reentry,
                         reentry_budget_ratio=reentry_budget_ratio,
+                        leader_loss_warn=leader_loss_warn,
+                        leader_loss_cut=leader_loss_cut,
+                        second_loss_cut=second_loss_cut,
                         include_rotation=include_rotation,
                         fee_tax_rate=fee_tax_rate,
                         lookback_days=lookback_days,
@@ -9209,6 +9259,9 @@ elif menu == "6. 섹터전략 백테스트":
                             "회전형익절률": rotation_tp,
                             "대장주재진입허용": enable_reentry,
                             "재진입1차비율": reentry_budget_ratio,
+                            "대장주추가매수금지손실률": leader_loss_warn,
+                            "대장주일부회수손실률": leader_loss_cut,
+                            "2등대표주전량회수손실률": second_loss_cut,
                             "빠른백테스트": fast_mode,
                             "검증종목범위": universe_mode,
                         }])
