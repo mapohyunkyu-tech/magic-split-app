@@ -11,6 +11,7 @@ import re
 import time
 import zipfile
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -25,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_MDD10_PROFIT_EXPAND_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_MDD10_PROFIT_EXPAND_SPEED_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4509,21 +4510,48 @@ def _bt_prepare_single_price_df(raw):
     return df
 
 
-def _bt_preload_price_map(active, start_date, end_date, lookback_days=190):
-    """백테스트용 일봉을 종목별 1회만 로딩한다."""
+@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
+def _bt_preload_price_map_cached(codes_tuple, start_date, end_date, lookback_days=190):
+    """백테스트 일봉 캐시. 같은 종목/기간은 다시 돌려도 재로딩하지 않는다.
+
+    - 1차 실행: FDR 데이터를 병렬로 가져온다.
+    - 2차 실행: Streamlit 캐시에서 바로 꺼내 속도를 크게 줄인다.
+    """
     price_map = {}
-    if active is None or len(active) == 0:
+    codes = [str(c).zfill(6) for c in (codes_tuple or [])]
+    if not codes:
         return price_map
     start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 140) + 30)).strftime("%Y%m%d")
     end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
-    codes = active["코드"].astype(str).str.zfill(6).drop_duplicates().tolist()
-    for code in codes:
+
+    def _load_one(code):
         try:
-            raw = get_ohlcv_fdr_cached(code, start_pad, end_pad)
-            price_map[code] = _bt_prepare_single_price_df(raw)
+            # 이 함수 전체가 이미 st.cache_data로 캐시되므로 내부에서는 FDR을 직접 호출한다.
+            # 중첩 캐시를 쓰지 않아 첫 실행 병렬 로딩 속도가 더 낫다.
+            raw = fdr.DataReader(str(code).zfill(6), pd.to_datetime(start_pad).strftime("%Y-%m-%d"), pd.to_datetime(end_pad).strftime("%Y-%m-%d"))
+            return code, _bt_prepare_single_price_df(raw)
         except Exception:
-            price_map[code] = pd.DataFrame()
+            return code, pd.DataFrame()
+
+    max_workers = min(8, max(1, len(codes)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_load_one, code) for code in codes]
+        for fut in as_completed(futs):
+            code, df = fut.result()
+            price_map[code] = df
+
+    # 실패 종목도 빈 프레임으로 채워서 이후 lookup에서 KeyError가 나지 않게 한다.
+    for code in codes:
+        price_map.setdefault(code, pd.DataFrame())
     return price_map
+
+
+def _bt_preload_price_map(active, start_date, end_date, lookback_days=190):
+    """백테스트용 일봉을 종목별 1회만 로딩한다. 캐시/병렬 로딩 버전."""
+    if active is None or len(active) == 0:
+        return {}
+    codes = tuple(active["코드"].astype(str).str.zfill(6).drop_duplicates().tolist())
+    return _bt_preload_price_map_cached(codes, str(start_date), str(end_date), int(lookback_days))
 
 
 def _bt_price_on_or_after_from_map(price_map, code, trade_date, field="open"):
@@ -4532,14 +4560,17 @@ def _bt_price_on_or_after_from_map(price_map, code, trade_date, field="open"):
     df = price_map.get(code, pd.DataFrame())
     if df is None or len(df) == 0:
         return None, None
-    part = df[df.index >= target].copy()
-    if len(part) == 0:
+    try:
+        pos = int(df.index.searchsorted(target, side="left"))
+    except Exception:
+        pos = 0
+    if pos >= len(df):
         return None, None
-    row = part.iloc[0]
+    row = df.iloc[pos]
     price = _safe_float_value(row.get(field, row.get("close", 0)), 0)
     if price <= 0:
         price = _safe_float_value(row.get("close", 0), 0)
-    return float(price), pd.to_datetime(part.index[0]).strftime("%Y-%m-%d")
+    return float(price), pd.to_datetime(df.index[pos]).strftime("%Y-%m-%d")
 
 
 def _bt_close_on_or_before_from_map(price_map, code, asof_date):
@@ -4548,10 +4579,13 @@ def _bt_close_on_or_before_from_map(price_map, code, asof_date):
     df = price_map.get(code, pd.DataFrame())
     if df is None or len(df) == 0:
         return 0.0
-    part = df[df.index <= target].copy()
-    if len(part) == 0:
+    try:
+        pos = int(df.index.searchsorted(target, side="right")) - 1
+    except Exception:
+        pos = len(df) - 1
+    if pos < 0:
         return 0.0
-    return float(_safe_float_value(part.iloc[-1].get("close", 0), 0))
+    return float(_safe_float_value(df.iloc[pos].get("close", 0), 0))
 
 
 def _bt_stock_flow_row_from_map(row, price_map, asof_date):
@@ -4565,7 +4599,11 @@ def _bt_stock_flow_row_from_map(row, price_map, asof_date):
     if df is None or len(df) == 0:
         df = pd.DataFrame()
     else:
-        df = df[df.index <= pd.to_datetime(asof_date)].copy()
+        try:
+            _pos = int(df.index.searchsorted(pd.to_datetime(asof_date), side="right"))
+            df = df.iloc[:_pos]
+        except Exception:
+            df = df[df.index <= pd.to_datetime(asof_date)]
     if df is None or len(df) < 25:
         return {
             "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
@@ -4780,7 +4818,7 @@ def run_sector_strategy_backtest(
     price_map = {}
     if bool(fast_mode):
         if progress_callback:
-            progress_callback(0, max(1, len(dates) - 1), "가격데이터 1회 로딩")
+            progress_callback(0, max(1, len(dates) - 1), "가격데이터 캐시/병렬 로딩")
         price_map = _bt_preload_price_map(active, start_date, end_date, lookback_days=lookback_days)
 
     benchmark_regime_df = _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=lookback_days)
@@ -4788,15 +4826,31 @@ def run_sector_strategy_backtest(
     current_market_regime = "장세불명"
     current_buy_multiplier = 1.0
 
+    # 같은 날짜/종목 가격조회가 매수·매도·평가에서 반복되므로 실행 중 메모리 캐시를 둔다.
+    _open_lookup_cache = {}
+    _close_lookup_cache = {}
+
     def _price_on_or_after_local(code, trade_date, field="open"):
+        key = (str(code).zfill(6), str(trade_date), str(field))
+        if key in _open_lookup_cache:
+            return _open_lookup_cache[key]
         if bool(fast_mode):
-            return _bt_price_on_or_after_from_map(price_map, code, trade_date, field=field)
-        return _bt_price_on_or_after(code, trade_date, field=field)
+            result = _bt_price_on_or_after_from_map(price_map, code, trade_date, field=field)
+        else:
+            result = _bt_price_on_or_after(code, trade_date, field=field)
+        _open_lookup_cache[key] = result
+        return result
 
     def _close_on_or_before_local(code, asof_date):
+        key = (str(code).zfill(6), str(asof_date))
+        if key in _close_lookup_cache:
+            return _close_lookup_cache[key]
         if bool(fast_mode):
-            return _bt_close_on_or_before_from_map(price_map, code, asof_date)
-        return _bt_close_on_or_before(code, asof_date)
+            result = _bt_close_on_or_before_from_map(price_map, code, asof_date)
+        else:
+            result = _bt_close_on_or_before(code, asof_date)
+        _close_lookup_cache[key] = result
+        return result
 
     cash = float(initial_cash)
     realized = 0.0
