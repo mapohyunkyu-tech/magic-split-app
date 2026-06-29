@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_A_GRADE_STRONG_RECOVERY_FIX_20260624"
+APP_VERSION = "v27_B_GRADE_RECOVERY_CONFIRM_20260624"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4513,6 +4513,34 @@ def get_live_market_trigger_hint(step, entry, trigger_status, info, op, reason):
     return int(trigger_price), f"증권앱 {trigger_price:,}원 이하라도 점수/운영모드 확인"
 
 
+
+def is_b_grade_recovery_confirm_row(row):
+    """B급이지만 하락 기준가가 아니라 '반등이 확인되는지'만 따로 보여주는 후보.
+
+    목적:
+    - 보유 대부분이 B/C인 계좌에서 A급 기준도달만 기다리면 반등장을 계속 놓칠 수 있다.
+    - 다만 B급을 바로 매수로 올리면 물타기가 되므로, 별도 보라색 '수동확인' 칸으로만 분리한다.
+    """
+    auto_grade = str(row.get("자동등급", "")).strip()
+    if auto_grade != "B":
+        return False
+    judge = str(row.get("보유판정", ""))
+    today = str(row.get("오늘추가매수", ""))
+    if today == "매수가능" or judge == "B급 도달검토":
+        return False
+    if "요양원" in judge or str(row.get("요양원여부", "")).upper() == "Y":
+        return False
+    day_pct = _safe_float_value(row.get("당일등락률", 0), 0)
+    pnl_pct = _safe_float_value(row.get("차수손익률", 0), 0)
+    score = _safe_float_value(row.get("점수", 0), 0)
+    amount_score = _safe_float_value(row.get("거래대금점수", 0), 0)
+    rotation = _safe_float_value(row.get("회전점수", 0), 0)
+    heat = str(row.get("과열상태", ""))
+    if "과열" in heat or "추격" in heat:
+        return False
+    # B급 회복확인은 '아직 손실권인 B급이 당일 반등을 보여주는지'만 따로 보는 칸이다.
+    return day_pct >= 2.0 and pnl_pct < 0 and score >= 70 and amount_score >= 17 and rotation >= 5
+
 def make_holding_action_label(row):
     """보유차수 판단표를 모바일에서 바로 볼 수 있게 핵심 액션만 요약한다.
 
@@ -4542,6 +4570,9 @@ def make_holding_action_label(row):
 
     if judge == "B급 도달검토" or (auto_grade == "B" and reached == "도달" and today == "금지"):
         return "🟠 B급 도달검토"
+
+    if is_b_grade_recovery_confirm_row(row):
+        return "🟣 B급 회복확인"
 
     # C/제외 등급은 기준가에 가까워져도 상단 '기준가대기'에 올리지 않는다.
     # 단, A/B급은 오늘추가매수가 금지로 표시되더라도 기준가 미도달이면
@@ -4575,6 +4606,8 @@ def make_holding_live_decision(row):
         return "앱 기준 이미 도달 / 예산·개수 안에서 가능"
     if "기준가대기" in action and trigger_price > 0:
         return f"증권앱 현재가 {trigger_price:,}원 이하이면 후보"
+    if "B급 회복확인" in action:
+        return "B급 반등: 바로 매수 아님 / A급 없고 탄창 여유 있을 때 1개 수동검토"
     if "B급 도달검토" in action:
         return "B급: 바로 사는 칸 아님 / A급 없고 시장 급락일 때만 1개 수동검토"
     if "회수/익절" in action:
@@ -4597,6 +4630,7 @@ def split_holding_action_tables(result):
         return empty, empty, empty, empty
     buy = result[result["핵심행동"].astype(str).str.contains("오늘매수가능", na=False)].copy()
     b_review = result[result["핵심행동"].astype(str).str.contains("B급 도달검토", na=False)].copy()
+    b_rebound = result[result["핵심행동"].astype(str).str.contains("B급 회복확인", na=False)].copy()
     wait = result[result["핵심행동"].astype(str).str.contains("기준가대기", na=False)].copy()
     recovery = result[result["핵심행동"].astype(str).str.contains("회수/익절", na=False)].copy()
     focus_cols = [
@@ -4604,7 +4638,7 @@ def split_holding_action_tables(result):
         "차수손익률", "기준까지남은하락률", "점수", "보유판정", "판정사유"
     ]
     focus_cols = [c for c in focus_cols if c in result.columns]
-    return buy[focus_cols], b_review[focus_cols], wait[focus_cols], recovery[focus_cols]
+    return buy[focus_cols], b_review[focus_cols], b_rebound[focus_cols], wait[focus_cols], recovery[focus_cols]
 
 
 def is_overheat_b_review_exception(info):
@@ -6705,12 +6739,13 @@ elif menu == "4. 보유종목 판단기":
                     st.info(f"시뮬레이션 결과: 최종슬롯 {sim.get('최종슬롯', 0)}개 / {sim.get('문장', '')}")
                 st.download_button("보유차수 판단 CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_holding_lots_judge_{diag.get('기준일','')}.csv", mime="text/csv")
 
-                buy_df, b_review_df, wait_df, recovery_df = split_holding_action_tables(result)
-                a1, a2, a3, a4 = st.columns(4)
+                buy_df, b_review_df, b_rebound_df, wait_df, recovery_df = split_holding_action_tables(result)
+                a1, a2, a3, a4, a5 = st.columns(5)
                 a1.metric("🟢 오늘매수가능", f"{len(buy_df)}개")
                 a2.metric("🟠 B급 도달검토", f"{len(b_review_df)}개")
-                a3.metric("🟡 기준가대기", f"{len(wait_df)}개")
-                a4.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
+                a3.metric("🟣 B급 회복확인", f"{len(b_rebound_df)}개")
+                a4.metric("🟡 기준가대기", f"{len(wait_df)}개")
+                a5.metric("🔵 회수/익절검토", f"{len(recovery_df)}개")
 
                 with st.expander("🟠 B급은 언제 사는 건가?", expanded=False):
                     st.markdown("""
@@ -6722,7 +6757,19 @@ elif menu == "4. 보유종목 판단기":
 - **시장 급락이 아니면:** B급은 기준 도달해도 대기
 - **C급/요양원:** 기준가에 와도 매수후보 제외
 
-쉽게 말하면, **A급은 공포매수 후보 / B급은 급락일 예비후보 / C급은 안 사는 후보**입니다.
+쉽게 말하면, **A급은 공포매수 후보 / B급 도달검토는 급락일 예비후보 / B급 회복확인은 반등장 수동확인 / C급은 안 사는 후보**입니다.
+""")
+
+                with st.expander("🟣 B급 회복확인은 언제 보는 건가?", expanded=False):
+                    st.markdown("""
+**B급 회복확인은 바로 매수 신호가 아닙니다.**  
+A급이 거의 없고, 보유 B급이 손실권에서 거래대금/점수를 유지한 채 당일 반등을 보일 때만 따로 보는 칸입니다.
+
+- **조건:** B급 + 아직 손실권 + 당일 +2% 이상 반등 + 거래대금/회전 양호
+- **매수 판단:** A급 후보가 없거나 슬롯이 남을 때 1개만 수동검토
+- **금지:** C급, 요양원, 과열/추격주의 종목은 반등해도 제외
+
+쉽게 말하면, **계속 안 사다가 반등장까지 놓치지 않기 위한 관찰칸**입니다. 그래도 자동매수는 아닙니다.
 """)
 
                 if len(buy_df) > 0:
@@ -6732,6 +6779,10 @@ elif menu == "4. 보유종목 판단기":
                     with st.expander("🟠 B급 기준도달 검토 후보", expanded=True):
                         st.caption("B급은 바로 매수 신호가 아닙니다. A급 후보가 없거나 적고, 시장/섹터가 같이 급락한 날에만 1개 정도 수동검토하는 예비 후보입니다.")
                         show_pinned_dataframe(b_review_df, height=240, pin_rank=False)
+                if len(b_rebound_df) > 0:
+                    with st.expander("🟣 B급 회복확인 후보", expanded=True):
+                        st.caption("B급이 손실권에서 당일 반등을 보이는 관찰칸입니다. 자동매수 신호가 아니며, A급 후보가 없고 탄창 여유가 있을 때만 1개 수동검토하세요.")
+                        show_pinned_dataframe(b_rebound_df, height=240, pin_rank=False)
                 if len(wait_df) > 0:
                     with st.expander("🟡 현재장 기준가 도달 시 후보", expanded=True):
                         st.caption("FDR 현재가가 늦을 수 있으니, 증권앱 현재가가 추가매수기준가 이하인지 보는 표입니다.")
