@@ -24,7 +24,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_B_GRADE_RECOVERY_CONFIRM_20260624"
+APP_VERSION = "v27_SECTOR_ROTATION_FLOW_EXIT_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -131,6 +131,148 @@ HOLDINGS_COLUMNS = [
 # 정밀 차수 입력이 어려운 100개 이상 보유 상황에서 "종목명,현재차수[,마지막진입가]"만 저장한다.
 SIMPLE_HOLDINGS_COLUMNS = [
     "코드", "종목", "현재차수", "마지막진입가", "메모", "업데이트일"
+]
+
+
+# 새 포트폴리오 세팅 전용 메뉴용 시트/컬럼.
+# 기존 TOP50/보유차수 판단기에는 끼워 넣지 않고, 독립 메뉴에서만 사용한다.
+SECTOR_LEADER_COLUMNS = [
+    "코드", "종목", "섹터", "섹터역할", "대표순위", "회전성", "사용여부",
+    "현재가", "가격구간", "자동매수수량", "예상매수금액", "운영분류",
+    "메모", "업데이트일"
+]
+
+SECTOR_SETUP_RESULT_COLUMNS = [
+    "선택순위", "세팅판정", "판정사유",
+    "코드", "종목", "섹터", "섹터역할", "대표순위", "회전성", "사용여부",
+    "현재가", "가격구간", "자동매수수량", "예상매수금액", "운영분류",
+    "메모", "업데이트일"
+]
+
+# 섹터 순환매 판단기 전용 결과 컬럼.
+# 핵심은 "어느 섹터에 거래대금이 쏠렸는지", "다음 순환매가 어디로 옮겨가는지",
+# "고점에서 신규 진입을 막고 발을 빼야 하는지"를 보는 것이다.
+SECTOR_STOCK_FLOW_COLUMNS = [
+    "섹터", "섹터역할", "대표순위", "코드", "종목",
+    "현재가", "오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억",
+    "전일대비거래대금증감률", "5일대비거래대금증감률",
+    "5일수익률", "20일수익률", "60일수익률", "120일고점대비눌림률",
+    "고점위험", "대표주판정", "발빼기신호", "데이터기준일", "메모"
+]
+
+SECTOR_FLOW_RESULT_COLUMNS = [
+    "순위", "섹터", "섹터판정", "순환상태", "쏠림점수",
+    "오늘거래대금억", "5일평균거래대금억", "20일평균거래대금억",
+    "시장내비중", "균등기준비중", "전일대비거래대금증감률", "5일대비거래대금증감률",
+    "대장주", "2등대표주", "회전형대표주", "대표주요약",
+    "과열대표주수", "이탈주의대표주수", "매수허용", "발빼기신호", "판정사유", "데이터기준일"
+]
+
+SECTOR_CORE_ROLES = {"대장주", "2등대표주", "ETF대체", "핵심대표주", "핵심보유"}
+SECTOR_ACTIVE_VALUES = {"Y", "YES", "TRUE", "1", "사용", "사용함", "ON", "대상"}
+SECTOR_INACTIVE_VALUES = {"N", "NO", "FALSE", "0", "제외", "OFF", "미사용", "회전제외"}
+
+DEFAULT_SECTOR_LEADER_SEED = [
+    # 반도체/소부장/PCB
+    ("005930", "삼성전자", "반도체", "대장주", 1, "보통", "Y", "반도체 대형 기준축"),
+    ("000660", "SK하이닉스", "반도체", "2등대표주", 2, "좋음", "Y", "HBM/메모리 대표"),
+    ("042700", "한미반도체", "반도체", "회전형중형주", 3, "좋음", "Y", "HBM 장비 회전"),
+    ("403870", "HPSP", "반도체", "회전형중형주", 4, "좋음", "Y", "장비 대표"),
+    ("000990", "DB하이텍", "반도체", "회전형중형주", 5, "좋음", "Y", "파운드리 회전"),
+    ("005290", "동진쎄미켐", "반도체", "회전형중형주", 6, "좋음", "Y", "소재 대표"),
+    ("240810", "원익IPS", "반도체", "회전형중형주", 7, "보통", "Y", "장비 대표"),
+    ("089030", "테크윙", "반도체", "회전형중형주", 8, "좋음", "Y", "후공정 회전"),
+    ("007660", "이수페타시스", "PCB", "대장주", 1, "좋음", "Y", "AI PCB 대표"),
+    ("353200", "대덕전자", "PCB", "2등대표주", 2, "좋음", "Y", "PCB 회전"),
+    ("090460", "비에이치", "PCB", "회전형중형주", 3, "좋음", "Y", "FPCB 회전"),
+
+    # 자동차
+    ("005380", "현대차", "자동차", "대장주", 1, "보통", "Y", "완성차 대장"),
+    ("000270", "기아", "자동차", "2등대표주", 2, "보통", "Y", "완성차 대표"),
+    ("012330", "현대모비스", "자동차", "회전형중형주", 3, "보통", "Y", "부품 대형"),
+    ("204320", "HL만도", "자동차", "회전형중형주", 4, "보통", "Y", "부품 회전"),
+
+    # 조선/기계
+    ("329180", "HD현대중공업", "조선/기계", "대장주", 1, "보통", "Y", "조선 대장"),
+    ("009540", "HD한국조선해양", "조선/기계", "2등대표주", 2, "보통", "Y", "조선 지주/대표"),
+    ("042660", "한화오션", "조선/기계", "회전형중형주", 3, "좋음", "Y", "조선 회전"),
+    ("010620", "HD현대미포", "조선/기계", "회전형중형주", 4, "보통", "Y", "중형 조선"),
+    ("075580", "세진중공업", "조선/기계", "회전형중형주", 5, "좋음", "Y", "기자재 회전"),
+
+    # 전력/전선/인프라
+    ("267260", "HD현대일렉트릭", "전력/전선/인프라", "대장주", 1, "좋음", "Y", "전력기기 대장"),
+    ("010120", "LS ELECTRIC", "전력/전선/인프라", "2등대표주", 2, "좋음", "Y", "전력기기 대표"),
+    ("006260", "LS", "전력/전선/인프라", "회전형중형주", 3, "좋음", "Y", "전선/지주 회전"),
+    ("001440", "대한전선", "전력/전선/인프라", "회전형중형주", 4, "좋음", "Y", "전선 회전"),
+    ("298040", "효성중공업", "전력/전선/인프라", "회전형중형주", 5, "좋음", "Y", "전력설비 회전"),
+    ("033100", "제룡전기", "전력/전선/인프라", "회전형중형주", 6, "좋음", "Y", "변압기 회전"),
+
+    # 금융
+    ("105560", "KB금융", "금융", "대장주", 1, "보통", "Y", "은행 대장"),
+    ("055550", "신한지주", "금융", "2등대표주", 2, "보통", "Y", "은행 대표"),
+    ("086790", "하나금융지주", "금융", "회전형중형주", 3, "보통", "Y", "은행 회전"),
+    ("316140", "우리금융지주", "금융", "회전형중형주", 4, "보통", "Y", "은행 회전"),
+    ("006800", "미래에셋증권", "금융", "회전형중형주", 5, "보통", "Y", "증권 대표"),
+
+    # 건설
+    ("000720", "현대건설", "건설", "대장주", 1, "보통", "Y", "건설 대형"),
+    ("028050", "삼성E&A", "건설", "2등대표주", 2, "좋음", "Y", "플랜트 대표"),
+    ("375500", "DL이앤씨", "건설", "회전형중형주", 3, "보통", "Y", "건설 회전"),
+    ("006360", "GS건설", "건설", "회전형중형주", 4, "보통", "Y", "건설 회전"),
+
+    # 바이오/헬스케어
+    ("207940", "삼성바이오로직스", "바이오", "대장주", 1, "낮음", "Y", "바이오 대형"),
+    ("068270", "셀트리온", "바이오", "2등대표주", 2, "보통", "Y", "바이오 대표"),
+    ("000100", "유한양행", "바이오", "회전형중형주", 3, "보통", "Y", "제약 대표"),
+    ("196170", "알테오젠", "바이오", "회전형중형주", 4, "좋음", "Y", "성장 바이오 회전"),
+    ("141080", "리가켐바이오", "바이오", "회전형중형주", 5, "좋음", "Y", "ADC 회전"),
+
+    # 소비/유통/호텔/화장품
+    ("008770", "호텔신라", "소비/유통/호텔", "대장주", 1, "좋음", "Y", "호텔/면세 회전"),
+    ("004170", "신세계", "소비/유통/호텔", "2등대표주", 2, "보통", "Y", "백화점/면세"),
+    ("069960", "현대백화점", "소비/유통/호텔", "회전형중형주", 3, "보통", "Y", "유통 회전"),
+    ("090430", "아모레퍼시픽", "화장품", "대장주", 1, "보통", "Y", "화장품 대형"),
+    ("192820", "코스맥스", "화장품", "2등대표주", 2, "좋음", "Y", "ODM 대표"),
+    ("257720", "실리콘투", "화장품", "회전형중형주", 3, "좋음", "Y", "화장품 회전"),
+
+    # 2차전지
+    ("373220", "LG에너지솔루션", "2차전지", "대장주", 1, "낮음", "Y", "배터리 대장"),
+    ("006400", "삼성SDI", "2차전지", "2등대표주", 2, "보통", "Y", "배터리 대표"),
+    ("003670", "포스코퓨처엠", "2차전지", "회전형중형주", 3, "좋음", "Y", "소재 대표"),
+    ("247540", "에코프로비엠", "2차전지", "회전형중형주", 4, "좋음", "Y", "양극재 회전"),
+    ("086520", "에코프로", "2차전지", "회전형중형주", 5, "좋음", "Y", "지주 회전"),
+
+    # 방산/우주
+    ("012450", "한화에어로스페이스", "방산/우주", "대장주", 1, "좋음", "Y", "방산 대장"),
+    ("064350", "현대로템", "방산/우주", "2등대표주", 2, "좋음", "Y", "방산/철도 회전"),
+    ("047810", "한국항공우주", "방산/우주", "회전형중형주", 3, "보통", "Y", "항공우주 대표"),
+    ("079550", "LIG넥스원", "방산/우주", "회전형중형주", 4, "좋음", "Y", "방산 회전"),
+    ("272210", "한화시스템", "방산/우주", "회전형중형주", 5, "좋음", "Y", "방산/우주 회전"),
+
+    # 인터넷/소프트웨어/게임/엔터
+    ("035420", "NAVER", "인터넷/소프트웨어", "대장주", 1, "보통", "Y", "인터넷 대장"),
+    ("035720", "카카오", "인터넷/소프트웨어", "2등대표주", 2, "보통", "Y", "인터넷 대표"),
+    ("012510", "더존비즈온", "인터넷/소프트웨어", "회전형중형주", 3, "보통", "Y", "소프트웨어 대표"),
+    ("352820", "하이브", "엔터/게임", "대장주", 1, "보통", "Y", "엔터 대장"),
+    ("035900", "JYP Ent.", "엔터/게임", "2등대표주", 2, "좋음", "Y", "엔터 대표"),
+    ("259960", "크래프톤", "엔터/게임", "회전형중형주", 3, "보통", "Y", "게임 대형"),
+
+    # 화학/정유/철강/운송/음식료/통신/로봇
+    ("051910", "LG화학", "화학/정유", "대장주", 1, "보통", "Y", "화학 대장"),
+    ("010950", "S-Oil", "화학/정유", "2등대표주", 2, "보통", "Y", "정유 대표"),
+    ("005490", "POSCO홀딩스", "철강/비철", "대장주", 1, "보통", "Y", "철강/2차전지 소재 축"),
+    ("004020", "현대제철", "철강/비철", "2등대표주", 2, "보통", "Y", "철강 대표"),
+    ("010130", "고려아연", "철강/비철", "회전형중형주", 3, "보통", "Y", "비철 대표"),
+    ("011200", "HMM", "운송/해운", "대장주", 1, "좋음", "Y", "해운 대장"),
+    ("003490", "대한항공", "운송/해운", "2등대표주", 2, "보통", "Y", "항공 대표"),
+    ("097950", "CJ제일제당", "음식료", "대장주", 1, "보통", "Y", "음식료 대형"),
+    ("271560", "오리온", "음식료", "2등대표주", 2, "보통", "Y", "음식료 대표"),
+    ("004370", "농심", "음식료", "회전형중형주", 3, "보통", "Y", "음식료 회전"),
+    ("017670", "SK텔레콤", "통신", "대장주", 1, "낮음", "Y", "통신 대형"),
+    ("030200", "KT", "통신", "2등대표주", 2, "낮음", "Y", "통신 대표"),
+    ("454910", "두산로보틱스", "로봇", "대장주", 1, "좋음", "Y", "로봇 대장"),
+    ("277810", "레인보우로보틱스", "로봇", "2등대표주", 2, "좋음", "Y", "로봇 대표"),
+    ("319400", "현대무벡스", "로봇", "회전형중형주", 3, "좋음", "Y", "자동화 회전"),
 ]
 
 HOLDING_JUDGE_COLUMNS = [
@@ -3206,6 +3348,615 @@ def save_simple_holdings_df(df):
         pass
 
 
+
+# =====================================================
+# v27 독립 메뉴: 섹터대표주 + 주가별 자동 매수단위 유틸
+# =====================================================
+
+def calc_auto_buy_unit(price, is_sector_core=False, allow_high_core=True, exclude_ultra=True):
+    """현재가 기준 자동 매수수량/가격구간/운영분류 계산.
+
+    30만원 이상 종목은 섹터 대장주/핵심대표주일 때만 1주 허용한다.
+    이 함수는 새 포트폴리오 세팅 메뉴에서만 사용한다.
+    """
+    price = _safe_float_value(price, 0)
+    if price <= 0:
+        return {"자동매수수량": 0, "가격구간": "가격없음", "운영분류": "제외", "예상매수금액": 0}
+
+    if price <= 50_000:
+        qty = max(1, int(100_000 // price))
+        return {"자동매수수량": int(qty), "가격구간": "저가회전형", "운영분류": "회전용", "예상매수금액": int(qty * price)}
+
+    if price <= 150_000:
+        qty = 1
+        return {"자동매수수량": int(qty), "가격구간": "중가회전형", "운영분류": "회전용", "예상매수금액": int(qty * price)}
+
+    if price <= 300_000:
+        qty = 1
+        return {"자동매수수량": int(qty), "가격구간": "고가1주형", "운영분류": "제한회전", "예상매수금액": int(qty * price)}
+
+    if price <= 500_000:
+        if bool(is_sector_core) and bool(allow_high_core):
+            qty = 1
+            return {"자동매수수량": int(qty), "가격구간": "핵심보유형", "운영분류": "대장주핵심", "예상매수금액": int(qty * price)}
+        return {"자동매수수량": 0, "가격구간": "핵심보유형", "운영분류": "대표주아님제외", "예상매수금액": 0}
+
+    if bool(exclude_ultra):
+        return {"자동매수수량": 0, "가격구간": "초고가제외", "운영분류": "회전제외", "예상매수금액": 0}
+
+    if bool(is_sector_core) and bool(allow_high_core):
+        qty = 1
+        return {"자동매수수량": int(qty), "가격구간": "초고가핵심", "운영분류": "대장주핵심", "예상매수금액": int(qty * price)}
+    return {"자동매수수량": 0, "가격구간": "초고가제외", "운영분류": "회전제외", "예상매수금액": 0}
+
+
+def _sector_use_yn(v):
+    raw = str(v or "").strip()
+    upper = raw.upper()
+    if raw == "":
+        return "Y"
+    if upper in SECTOR_INACTIVE_VALUES or raw in SECTOR_INACTIVE_VALUES:
+        return "N"
+    if upper in SECTOR_ACTIVE_VALUES or raw in SECTOR_ACTIVE_VALUES:
+        return "Y"
+    return raw
+
+
+def normalize_sector_leader_df(df):
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=SECTOR_LEADER_COLUMNS)
+    out = df.copy()
+    for c in SECTOR_LEADER_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out["코드"] = out["코드"].fillna("").astype(str).str.replace(".0", "", regex=False).str.strip()
+    out["종목"] = out["종목"].fillna("").astype(str).str.strip()
+    out = out[(out["코드"].astype(str).str.len() > 0) | (out["종목"].astype(str).str.len() > 0)].copy()
+    out["코드"] = out["코드"].astype(str).str.zfill(6)
+    out["섹터"] = out["섹터"].replace("", np.nan).fillna("기타").astype(str)
+    out["섹터역할"] = out["섹터역할"].replace("", np.nan).fillna("회전형중형주").astype(str)
+    out["대표순위"] = pd.to_numeric(out["대표순위"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(99).astype(int)
+    out["회전성"] = out["회전성"].replace("", np.nan).fillna("보통").astype(str)
+    out["사용여부"] = out["사용여부"].apply(_sector_use_yn)
+    for c in ["현재가", "자동매수수량", "예상매수금액"]:
+        out[c] = pd.to_numeric(out[c].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0).astype(int)
+    out["가격구간"] = out["가격구간"].fillna("").astype(str)
+    out["운영분류"] = out["운영분류"].fillna("").astype(str)
+    out["메모"] = out["메모"].fillna("").astype(str)
+    out["업데이트일"] = out["업데이트일"].replace("", np.nan).fillna(today_str()).astype(str)
+    out = out.drop_duplicates(subset=["코드"], keep="last").reset_index(drop=True)
+    return out[SECTOR_LEADER_COLUMNS]
+
+
+def load_sector_leader_df():
+    try:
+        ws = get_ws("대표주유니버스", SECTOR_LEADER_COLUMNS)
+        df = read_worksheet_df(ws, SECTOR_LEADER_COLUMNS)
+        return normalize_sector_leader_df(df)
+    except Exception:
+        return pd.DataFrame(columns=SECTOR_LEADER_COLUMNS)
+
+
+def save_sector_leader_df(df):
+    ws = get_ws("대표주유니버스", SECTOR_LEADER_COLUMNS)
+    out = normalize_sector_leader_df(df)
+    write_worksheet(ws, out, SECTOR_LEADER_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return out
+
+
+def save_sector_setup_result_df(df):
+    ws = get_ws("대표주세팅결과", SECTOR_SETUP_RESULT_COLUMNS)
+    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_SETUP_RESULT_COLUMNS)
+    for c in SECTOR_SETUP_RESULT_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[SECTOR_SETUP_RESULT_COLUMNS]
+    write_worksheet(ws, out, SECTOR_SETUP_RESULT_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return out
+
+
+def _sector_role_is_core(role):
+    return str(role or "").strip() in SECTOR_CORE_ROLES
+
+
+def parse_sector_leader_text(text, krx):
+    """대표주유니버스 빠른 입력 파서.
+
+    지원 형식:
+    삼성전자,반도체,대장주,1,보통,Y,메모
+    005930,삼성전자,반도체,대장주,1,보통,Y,메모
+    """
+    rows = []
+    not_found = []
+    for raw in str(text or "").splitlines():
+        line = str(raw).strip().replace("，", ",")
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        parts = [p for p in parts if p != ""]
+        if len(parts) < 1:
+            continue
+
+        code = ""
+        name_text = parts[0]
+        offset = 0
+        if re.fullmatch(r"\d{5,6}", parts[0]) and len(parts) >= 2:
+            code = parts[0].zfill(6)
+            name_text = parts[1]
+            offset = 1
+        else:
+            found = find_stock_by_name(name_text, krx)
+            if found is None:
+                not_found.append(name_text)
+                continue
+            code = found["코드"]
+            name_text = found["종목"]
+
+        sector = parts[offset + 1] if len(parts) > offset + 1 else infer_group_by_name(name_text)
+        role = parts[offset + 2] if len(parts) > offset + 2 else "회전형중형주"
+        rank = _safe_int_value(parts[offset + 3], 99) if len(parts) > offset + 3 else 99
+        rotation = parts[offset + 4] if len(parts) > offset + 4 else "보통"
+        use = parts[offset + 5] if len(parts) > offset + 5 else "Y"
+        memo = parts[offset + 6] if len(parts) > offset + 6 else "빠른입력"
+        rows.append({
+            "코드": str(code).zfill(6),
+            "종목": name_text,
+            "섹터": sector,
+            "섹터역할": role,
+            "대표순위": rank,
+            "회전성": rotation,
+            "사용여부": use,
+            "현재가": 0,
+            "가격구간": "",
+            "자동매수수량": 0,
+            "예상매수금액": 0,
+            "운영분류": "",
+            "메모": memo,
+            "업데이트일": today_str(),
+        })
+    return normalize_sector_leader_df(pd.DataFrame(rows, columns=SECTOR_LEADER_COLUMNS)), not_found
+
+
+def default_sector_leader_df():
+    rows = []
+    for code, name, sector, role, rank, rotation, use, memo in DEFAULT_SECTOR_LEADER_SEED:
+        rows.append({
+            "코드": str(code).zfill(6), "종목": name, "섹터": sector, "섹터역할": role,
+            "대표순위": rank, "회전성": rotation, "사용여부": use, "현재가": 0,
+            "가격구간": "", "자동매수수량": 0, "예상매수금액": 0, "운영분류": "",
+            "메모": memo, "업데이트일": today_str(),
+        })
+    return normalize_sector_leader_df(pd.DataFrame(rows, columns=SECTOR_LEADER_COLUMNS))
+
+
+def refresh_sector_leader_price_units(df, allow_high_core=True, exclude_ultra=True):
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=SECTOR_LEADER_COLUMNS), {"갱신": 0, "실패": 0}
+    out = normalize_sector_leader_df(df)
+    diag = {"갱신": 0, "실패": 0}
+    try:
+        asof_date = find_valid_krx_date()
+        start_date = (pd.to_datetime(asof_date) - pd.DateOffset(days=30)).strftime("%Y%m%d")
+    except Exception:
+        asof_date = today_str()
+        start_date = (pd.to_datetime(asof_date) - pd.DateOffset(days=30)).strftime("%Y%m%d")
+    for idx, r in out.iterrows():
+        code = str(r.get("코드", "")).zfill(6)
+        price = _safe_int_value(r.get("현재가", 0), 0)
+        if code and code != "000000":
+            try:
+                raw = get_ohlcv_fdr_cached(code, start_date, asof_date)
+                clean = raw.dropna(subset=["Close"]) if raw is not None and "Close" in raw.columns else pd.DataFrame()
+                if len(clean) > 0:
+                    price = int(float(clean.iloc[-1]["Close"]))
+            except Exception:
+                diag["실패"] += 1
+        role = str(r.get("섹터역할", ""))
+        auto = calc_auto_buy_unit(price, _sector_role_is_core(role), allow_high_core, exclude_ultra)
+        out.loc[idx, "현재가"] = int(price)
+        out.loc[idx, "가격구간"] = auto["가격구간"]
+        out.loc[idx, "자동매수수량"] = int(auto["자동매수수량"])
+        out.loc[idx, "예상매수금액"] = int(auto["예상매수금액"])
+        out.loc[idx, "운영분류"] = auto["운영분류"]
+        out.loc[idx, "업데이트일"] = today_str()
+        diag["갱신"] += 1
+    return normalize_sector_leader_df(out), diag
+
+
+def build_sector_setup_candidates(df, target_count=50, sector_max_count=3, allow_high_core=True, exclude_ultra=True):
+    """새 포트폴리오 세팅 메뉴에서만 쓰는 독립 후보표 생성."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=SECTOR_SETUP_RESULT_COLUMNS), {"사용종목": 0, "선택종목": 0, "제외종목": 0}
+    out = normalize_sector_leader_df(df)
+    out = out[out["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
+    if len(out) == 0:
+        return pd.DataFrame(columns=SECTOR_SETUP_RESULT_COLUMNS), {"사용종목": 0, "선택종목": 0, "제외종목": 0}
+
+    for idx, r in out.iterrows():
+        price = _safe_int_value(r.get("현재가", 0), 0)
+        role = str(r.get("섹터역할", ""))
+        auto = calc_auto_buy_unit(price, _sector_role_is_core(role), allow_high_core, exclude_ultra)
+        for k, v in auto.items():
+            out.loc[idx, k] = v
+
+    def _role_priority(role):
+        role = str(role)
+        if role == "대장주": return 1
+        if role == "2등대표주": return 2
+        if role == "회전형중형주": return 3
+        if role == "ETF대체": return 4
+        if role == "제외": return 99
+        return 50
+
+    out["_role_priority"] = out["섹터역할"].apply(_role_priority)
+    out["_buyable"] = pd.to_numeric(out["자동매수수량"], errors="coerce").fillna(0).astype(int) > 0
+    out["_amount"] = pd.to_numeric(out["예상매수금액"], errors="coerce").fillna(0).astype(int)
+    out = out.sort_values(
+        ["_buyable", "섹터", "대표순위", "_role_priority", "_amount"],
+        ascending=[False, True, True, True, True]
+    ).reset_index(drop=True)
+
+    selected_idx = []
+    sector_counts = {}
+    target_count = int(target_count or 50)
+    sector_max_count = int(sector_max_count or 3)
+    for idx, row in out.iterrows():
+        if not bool(row.get("_buyable", False)):
+            continue
+        sector = str(row.get("섹터", "기타") or "기타")
+        if sector_counts.get(sector, 0) >= sector_max_count:
+            continue
+        selected_idx.append(idx)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(selected_idx) >= target_count:
+            break
+
+    selected = out.loc[selected_idx].copy() if selected_idx else pd.DataFrame(columns=out.columns)
+    if len(selected) > 0:
+        selected["선택순위"] = np.arange(1, len(selected) + 1)
+
+        def _setup_judge(row):
+            qty = _safe_int_value(row.get("자동매수수량", 0), 0)
+            price_zone = str(row.get("가격구간", ""))
+            op = str(row.get("운영분류", ""))
+            role = str(row.get("섹터역할", ""))
+            if qty <= 0:
+                return "제외", f"{price_zone}/{op}: 자동매수수량 0주"
+            if op == "대장주핵심":
+                return "대장주핵심", f"{role} 역할이라 고가 1주 후보"
+            if op == "제한회전":
+                return "제한회전", "15만~30만원 구간 1주 제한회전 후보"
+            return "회전후보", f"{price_zone} / {qty}주 / 예상 {fmt_won(_safe_int_value(row.get('예상매수금액', 0), 0))}"
+
+        judge_pairs = selected.apply(_setup_judge, axis=1)
+        selected["세팅판정"] = [x[0] for x in judge_pairs]
+        selected["판정사유"] = [x[1] for x in judge_pairs]
+    else:
+        selected = pd.DataFrame(columns=SECTOR_SETUP_RESULT_COLUMNS)
+
+    for c in SECTOR_SETUP_RESULT_COLUMNS:
+        if c not in selected.columns:
+            selected[c] = ""
+    result = selected[SECTOR_SETUP_RESULT_COLUMNS].copy()
+    diag = {
+        "사용종목": int(len(out)),
+        "선택종목": int(len(result)),
+        "제외종목": int(len(out) - len(result)),
+        "섹터수": int(result["섹터"].nunique()) if len(result) else 0,
+        "예상총매수금액": int(pd.to_numeric(result["예상매수금액"], errors="coerce").fillna(0).sum()) if len(result) else 0,
+    }
+    return result, diag
+
+
+
+def save_sector_stock_flow_df(df):
+    ws = get_ws("섹터대표주흐름", SECTOR_STOCK_FLOW_COLUMNS)
+    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_STOCK_FLOW_COLUMNS)
+    for c in SECTOR_STOCK_FLOW_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[SECTOR_STOCK_FLOW_COLUMNS]
+    write_worksheet(ws, out, SECTOR_STOCK_FLOW_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return out
+
+
+def save_sector_flow_result_df(df):
+    ws = get_ws("섹터순환매결과", SECTOR_FLOW_RESULT_COLUMNS)
+    out = df.copy() if df is not None else pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS)
+    for c in SECTOR_FLOW_RESULT_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[SECTOR_FLOW_RESULT_COLUMNS]
+    write_worksheet(ws, out, SECTOR_FLOW_RESULT_COLUMNS)
+    try:
+        get_ws_cached.clear()
+    except Exception:
+        pass
+    return out
+
+
+def _pct_change_safe(now, base):
+    now = _safe_float_value(now, 0)
+    base = _safe_float_value(base, 0)
+    if base <= 0:
+        return 0.0
+    return round((now / base - 1) * 100, 2)
+
+
+def _sector_flow_risk_state(ret5, ret20, ret60, pullback, amount_vs5):
+    """대표주 단위 고점/이탈 위험 판단."""
+    ret5 = _safe_float_value(ret5, 0)
+    ret20 = _safe_float_value(ret20, 0)
+    ret60 = _safe_float_value(ret60, 0)
+    pullback = abs(_safe_float_value(pullback, 0))
+    amount_vs5 = _safe_float_value(amount_vs5, 0)
+
+    high_risk = "정상"
+    if (pullback <= 2 and ret20 >= 20) or ret5 >= 15:
+        high_risk = "고점추격주의"
+    if ret20 >= 45 or ret60 >= 90:
+        high_risk = "과열분출"
+    if 4 <= pullback <= 18 and ret20 > 0 and amount_vs5 > -20:
+        high_risk = "눌림후보"
+    if ret20 <= -20 or ret60 <= -30:
+        high_risk = "약세주의"
+
+    exit_signal = "보유관찰"
+    if high_risk in {"고점추격주의", "과열분출"} and amount_vs5 < -25:
+        exit_signal = "발빼기검토"
+    elif high_risk in {"고점추격주의", "과열분출"}:
+        exit_signal = "신규추격금지"
+    elif ret5 < -5 and amount_vs5 < -35:
+        exit_signal = "이탈주의"
+    elif high_risk == "눌림후보":
+        exit_signal = "눌림관찰"
+    return high_risk, exit_signal
+
+
+def calc_sector_stock_flow_row(row, asof_date=None, lookback_days=190):
+    """대표주 1개에 대해 거래대금/수익률/고점위험을 계산한다."""
+    code = str(row.get("코드", "")).replace(".0", "").strip().zfill(6)
+    name = str(row.get("종목", "")).strip()
+    sector = str(row.get("섹터", "기타") or "기타").strip()
+    role = str(row.get("섹터역할", "회전형중형주") or "회전형중형주").strip()
+    rank = _safe_int_value(row.get("대표순위", 99), 99)
+    memo = str(row.get("메모", ""))
+
+    try:
+        end_date = find_valid_krx_date(asof_date)
+        start_date = (pd.to_datetime(end_date) - pd.DateOffset(days=int(lookback_days))).strftime("%Y%m%d")
+        raw = get_ohlcv_fdr_cached(code, start_date, end_date)
+        df = ms_prepare_indicator_df(raw)
+    except Exception:
+        df = pd.DataFrame()
+
+    if df is None or len(df) < 25:
+        return {
+            "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
+            "현재가": 0, "오늘거래대금억": 0, "전일거래대금억": 0,
+            "5일평균거래대금억": 0, "20일평균거래대금억": 0,
+            "전일대비거래대금증감률": 0, "5일대비거래대금증감률": 0,
+            "5일수익률": 0, "20일수익률": 0, "60일수익률": 0, "120일고점대비눌림률": 0,
+            "고점위험": "데이터부족", "대표주판정": "계산불가", "발빼기신호": "대기",
+            "데이터기준일": "", "메모": memo
+        }
+
+    df = df.copy()
+    if "amount" not in df.columns:
+        df["amount"] = df["close"] * df["volume"]
+    df["amount_ma5"] = df["amount"].rolling(5).mean()
+    df["amount_ma20"] = df["amount"].rolling(20).mean()
+    df["ret5"] = df["close"].pct_change(5) * 100
+    df["ret20"] = df["close"].pct_change(20) * 100
+    df["ret60"] = df["close"].pct_change(60) * 100
+    df["high120"] = df["close"].rolling(120).max()
+    df["pullback120"] = (df["close"] / df["high120"] - 1) * 100
+
+    last = df.dropna(subset=["close"]).iloc[-1]
+    prev = df.dropna(subset=["close"]).iloc[-2] if len(df.dropna(subset=["close"])) >= 2 else last
+    price = int(_safe_float_value(last.get("close", 0), 0))
+    amount_today = _safe_float_value(last.get("amount", 0), 0)
+    amount_prev = _safe_float_value(prev.get("amount", 0), 0)
+    amount_ma5 = _safe_float_value(last.get("amount_ma5", 0), 0)
+    amount_ma20 = _safe_float_value(last.get("amount_ma20", 0), 0)
+    ret5 = _safe_float_value(last.get("ret5", 0), 0)
+    ret20 = _safe_float_value(last.get("ret20", 0), 0)
+    ret60 = _safe_float_value(last.get("ret60", 0), 0)
+    pullback = _safe_float_value(last.get("pullback120", 0), 0)
+    amount_vs_prev = _pct_change_safe(amount_today, amount_prev)
+    amount_vs5 = _pct_change_safe(amount_today, amount_ma5)
+    high_risk, exit_signal = _sector_flow_risk_state(ret5, ret20, ret60, pullback, amount_vs5)
+
+    if high_risk in {"고점추격주의", "과열분출"}:
+        stock_judge = "고점권"
+    elif high_risk == "눌림후보":
+        stock_judge = "눌림관찰"
+    elif amount_vs5 >= 50 and ret5 >= 0:
+        stock_judge = "자금유입"
+    elif exit_signal in {"발빼기검토", "이탈주의"}:
+        stock_judge = "이탈주의"
+    else:
+        stock_judge = "중립"
+
+    try:
+        data_date = pd.to_datetime(df.index[-1]).strftime("%Y-%m-%d")
+    except Exception:
+        data_date = today_str()
+
+    return {
+        "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
+        "현재가": price,
+        "오늘거래대금억": round(amount_today / 100_000_000, 1),
+        "전일거래대금억": round(amount_prev / 100_000_000, 1),
+        "5일평균거래대금억": round(amount_ma5 / 100_000_000, 1),
+        "20일평균거래대금억": round(amount_ma20 / 100_000_000, 1),
+        "전일대비거래대금증감률": amount_vs_prev,
+        "5일대비거래대금증감률": amount_vs5,
+        "5일수익률": round(ret5, 2),
+        "20일수익률": round(ret20, 2),
+        "60일수익률": round(ret60, 2),
+        "120일고점대비눌림률": round(abs(pullback), 2),
+        "고점위험": high_risk,
+        "대표주판정": stock_judge,
+        "발빼기신호": exit_signal,
+        "데이터기준일": data_date,
+        "메모": memo
+    }
+
+
+def _leader_names_by_role(sector_stock_df, sector, role_contains=None, limit=3):
+    if sector_stock_df is None or len(sector_stock_df) == 0:
+        return ""
+    part = sector_stock_df[sector_stock_df["섹터"].astype(str).eq(str(sector))].copy()
+    if role_contains:
+        part = part[part["섹터역할"].astype(str).str.contains(role_contains, regex=False, na=False)].copy()
+    if len(part) == 0:
+        return ""
+    part["_rank"] = pd.to_numeric(part["대표순위"], errors="coerce").fillna(99)
+    part = part.sort_values(["_rank", "오늘거래대금억"], ascending=[True, False])
+    return ", ".join(part["종목"].astype(str).head(int(limit)).tolist())
+
+
+def _sector_decision(concentration_score, amount_vs5, hot_count, exit_count):
+    concentration_score = _safe_float_value(concentration_score, 0)
+    amount_vs5 = _safe_float_value(amount_vs5, 0)
+    hot_count = _safe_int_value(hot_count, 0)
+    exit_count = _safe_int_value(exit_count, 0)
+
+    if concentration_score >= 8.5 and amount_vs5 < -20:
+        return "쏠림후둔화", "고점발빼기", "신규금지", "분할익절/회수검토", "거래대금이 이미 한쪽에 몰린 뒤 5일 평균 대비 꺾이는 구간"
+    if concentration_score >= 8.5:
+        return "강한쏠림", "과열추격주의", "신규금지", "익절라인상향", "섹터 쏠림점수 8.5 이상. 이미 돈이 몰려 신규추격 위험"
+    if amount_vs5 >= 60 and concentration_score >= 5.5:
+        return "순환매유입", "유입강화", "눌림만", "보유유지", "거래대금이 5일 평균 대비 강하게 증가"
+    if amount_vs5 >= 40 and concentration_score < 5.5:
+        return "초기유입", "초기순환", "소량가능", "관찰", "아직 시장 비중은 낮지만 거래대금이 증가하기 시작"
+    if concentration_score <= 3 and amount_vs5 <= -30:
+        return "자금이탈", "이탈", "대기", "회수우선", "시장내 비중과 거래대금 증가율이 동시에 약함"
+    if exit_count >= 2:
+        return "대표주이탈", "이탈주의", "대기", "회수검토", "대표주 여러 개에서 거래대금/가격 이탈 신호"
+    if hot_count >= 2 and concentration_score >= 7:
+        return "대표주과열", "고점주의", "신규금지", "분할익절검토", "대표주 여러 개가 고점권"
+    return "중립", "관찰", "대기", "관찰", "뚜렷한 유입/이탈 신호는 약함"
+
+
+def build_sector_rotation_flow(leader_df, save_to_sheet=False, asof_date=None, lookback_days=190):
+    """섹터 대표주 기반 거래대금 쏠림/순환매/발빼기 판단표 생성."""
+    if leader_df is None or len(leader_df) == 0:
+        return (
+            pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS),
+            pd.DataFrame(columns=SECTOR_STOCK_FLOW_COLUMNS),
+            {"대표주": 0, "섹터": 0, "메모": "대표주유니버스 없음"}
+        )
+
+    active = normalize_sector_leader_df(leader_df)
+    active = active[active["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
+    if len(active) == 0:
+        return (
+            pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS),
+            pd.DataFrame(columns=SECTOR_STOCK_FLOW_COLUMNS),
+            {"대표주": 0, "섹터": 0, "메모": "사용여부 Y 대표주 없음"}
+        )
+
+    rows = []
+    for _, r in active.iterrows():
+        rows.append(calc_sector_stock_flow_row(r, asof_date=asof_date, lookback_days=lookback_days))
+    stock_df = pd.DataFrame(rows, columns=SECTOR_STOCK_FLOW_COLUMNS)
+    for c in ["오늘거래대금억", "전일거래대금억", "5일평균거래대금억", "20일평균거래대금억", "전일대비거래대금증감률", "5일대비거래대금증감률", "5일수익률", "20일수익률", "60일수익률", "120일고점대비눌림률"]:
+        if c in stock_df.columns:
+            stock_df[c] = pd.to_numeric(stock_df[c], errors="coerce").fillna(0)
+
+    valid = stock_df[stock_df["오늘거래대금억"] > 0].copy()
+    if len(valid) == 0:
+        return (
+            pd.DataFrame(columns=SECTOR_FLOW_RESULT_COLUMNS),
+            stock_df,
+            {"대표주": int(len(stock_df)), "섹터": 0, "메모": "거래대금 계산 실패"}
+        )
+
+    total_amount = float(valid["오늘거래대금억"].sum())
+    sector_n = max(int(valid["섹터"].nunique()), 1)
+    equal_share = 100 / sector_n
+
+    result_rows = []
+    for sector, part in valid.groupby("섹터"):
+        today_amount = float(part["오늘거래대금억"].sum())
+        prev_amount = float(part["전일거래대금억"].sum())
+        ma5_amount = float(part["5일평균거래대금억"].sum())
+        ma20_amount = float(part["20일평균거래대금억"].sum())
+        share_pct = (today_amount / total_amount * 100) if total_amount > 0 else 0
+        concentration_score = round(min(10, max(0, 5 * (share_pct / equal_share))), 1) if equal_share > 0 else 0
+        vs_prev = _pct_change_safe(today_amount, prev_amount)
+        vs5 = _pct_change_safe(today_amount, ma5_amount)
+        hot_count = int(part["고점위험"].isin(["고점추격주의", "과열분출"]).sum())
+        exit_count = int(part["발빼기신호"].isin(["발빼기검토", "이탈주의"]).sum())
+        sector_judge, rotation_state, buy_allow, exit_signal, reason = _sector_decision(concentration_score, vs5, hot_count, exit_count)
+
+        leader_summary_src = part.sort_values("오늘거래대금억", ascending=False).head(4)
+        leader_summary = " / ".join([
+            f"{r['종목']} {round(float(r['오늘거래대금억']), 1)}억 {r['대표주판정']}"
+            for _, r in leader_summary_src.iterrows()
+        ])
+        result_rows.append({
+            "섹터": sector,
+            "섹터판정": sector_judge,
+            "순환상태": rotation_state,
+            "쏠림점수": concentration_score,
+            "오늘거래대금억": round(today_amount, 1),
+            "5일평균거래대금억": round(ma5_amount, 1),
+            "20일평균거래대금억": round(ma20_amount, 1),
+            "시장내비중": round(share_pct, 2),
+            "균등기준비중": round(equal_share, 2),
+            "전일대비거래대금증감률": vs_prev,
+            "5일대비거래대금증감률": vs5,
+            "대장주": _leader_names_by_role(part, sector, "대장주", 2),
+            "2등대표주": _leader_names_by_role(part, sector, "2등대표주", 2),
+            "회전형대표주": _leader_names_by_role(part, sector, "회전형", 3),
+            "대표주요약": leader_summary,
+            "과열대표주수": hot_count,
+            "이탈주의대표주수": exit_count,
+            "매수허용": buy_allow,
+            "발빼기신호": exit_signal,
+            "판정사유": reason,
+            "데이터기준일": str(part["데이터기준일"].dropna().astype(str).max() if "데이터기준일" in part.columns else today_str())
+        })
+
+    result_df = pd.DataFrame(result_rows)
+    if len(result_df) > 0:
+        result_df = result_df.sort_values(["쏠림점수", "5일대비거래대금증감률", "오늘거래대금억"], ascending=[False, False, False]).reset_index(drop=True)
+        result_df.insert(0, "순위", np.arange(1, len(result_df) + 1))
+    for c in SECTOR_FLOW_RESULT_COLUMNS:
+        if c not in result_df.columns:
+            result_df[c] = ""
+    result_df = result_df[SECTOR_FLOW_RESULT_COLUMNS]
+
+    diag = {
+        "대표주": int(len(stock_df)),
+        "거래대금계산대표주": int(len(valid)),
+        "섹터": int(sector_n),
+        "총대표주거래대금억": round(total_amount, 1),
+        "균등기준점수": "각 섹터 거래대금 비중이 같으면 쏠림점수 5.0",
+        "쏠림상위": ", ".join(result_df.head(3)["섹터"].astype(str).tolist()) if len(result_df) else "",
+        "초기유입": ", ".join(result_df[result_df["섹터판정"].astype(str).isin(["초기유입", "순환매유입"])].head(5)["섹터"].astype(str).tolist()) if len(result_df) else "",
+        "발빼기": ", ".join(result_df[result_df["발빼기신호"].astype(str).str.contains("회수|익절|발빼기", regex=True, na=False)].head(5)["섹터"].astype(str).tolist()) if len(result_df) else "",
+    }
+    if save_to_sheet:
+        save_sector_stock_flow_df(stock_df)
+        save_sector_flow_result_df(result_df)
+    return result_df, stock_df, diag
+
 def parse_simple_holding_text(simple_text, krx):
     """
     간편 보유 입력 파서.
@@ -5907,7 +6658,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -6796,12 +7547,186 @@ A급이 거의 없고, 보유 B급이 손실권에서 거래대금/점수를 유
                 st.write("진단")
                 st.json(diag)
 
+
 # =====================================================
-# 5. 도움말
+# 5. 섹터 순환매 판단기
+# =====================================================
+
+elif menu == "5. 섹터 순환매 판단기":
+    st.header("5. 섹터 순환매 판단기")
+    st.caption("섹터별 대장주/대표주를 기준으로 거래대금 쏠림, 순환매 유입, 자금이탈, 고점 발빼기 구간을 보는 독립 메뉴입니다.")
+    st.info("기준: 모든 섹터 거래대금 비중이 비슷하면 쏠림점수 5.0입니다. 특정 섹터가 균등 기준보다 많이 몰리면 7~10점, 자금이 빠지면 3점 이하로 내려갑니다.")
+
+    krx = load_krx_master_fdr()
+    sector_df = load_sector_leader_df()
+
+    active_mask = sector_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N") if len(sector_df) > 0 else pd.Series(dtype=bool)
+    active_count = int(active_mask.sum()) if len(sector_df) > 0 else 0
+    sector_count = int(sector_df.loc[active_mask, "섹터"].nunique()) if len(sector_df) > 0 else 0
+    core_count = int(sector_df.loc[active_mask, "섹터역할"].apply(_sector_role_is_core).sum()) if len(sector_df) > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("등록 대표주", f"{len(sector_df)}개")
+    m2.metric("사용 대표주", f"{active_count}개")
+    m3.metric("감시 섹터", f"{sector_count}개")
+    m4.metric("대장/핵심 역할", f"{core_count}개")
+
+    with st.expander("1) 대표주 유니버스 만들기/수정", expanded=(len(sector_df) == 0)):
+        st.caption("여기서 입력한 대표주만 섹터 자금 흐름 계산에 사용합니다. TOP50/보유종목 판단기는 건드리지 않습니다.")
+        st.code("""삼성전자,반도체,대장주,1,보통,Y,반도체 기준축
+SK하이닉스,반도체,2등대표주,2,좋음,Y,HBM/메모리 대표
+한미반도체,반도체,회전형중형주,3,좋음,Y,장비 회전
+HD현대일렉트릭,전력/전선/인프라,대장주,1,좋음,Y,전력기기 대장
+LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표""")
+        leader_text = st.text_area("대표주 입력", height=150, key="sector_flow_leader_text")
+        c_add1, c_add2, c_add3 = st.columns(3)
+        if c_add1.button("입력한 대표주 추가/갱신", type="primary", key="add_sector_flow_leaders"):
+            parsed, not_found = parse_sector_leader_text(leader_text, krx)
+            if len(parsed) == 0:
+                st.error("추가된 대표주가 없습니다. 종목명/형식을 확인하세요.")
+                if not_found:
+                    st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
+            else:
+                combined = pd.concat([sector_df, parsed], ignore_index=True)
+                saved = save_sector_leader_df(combined)
+                st.success(f"대표주 저장 완료: 입력 {len(parsed)}개 / 전체 {len(saved)}개")
+                if not_found:
+                    st.warning("못 찾은 종목: " + ", ".join(not_found[:20]))
+                st.rerun()
+        if c_add2.button("기본 섹터 대표주 채우기", key="fill_default_sector_flow_leaders"):
+            base = default_sector_leader_df()
+            combined = pd.concat([sector_df, base], ignore_index=True)
+            saved = save_sector_leader_df(combined)
+            st.success(f"기본 대표주 저장 완료: 전체 {len(saved)}개")
+            st.rerun()
+        if c_add3.button("대표주 전체 삭제", key="delete_all_sector_flow_leaders"):
+            save_sector_leader_df(pd.DataFrame(columns=SECTOR_LEADER_COLUMNS))
+            st.success("대표주유니버스 전체 삭제 완료")
+            st.rerun()
+
+    st.subheader("2) 섹터 거래대금 쏠림/순환매 계산")
+    c_opt1, c_opt2, c_opt3 = st.columns(3)
+    with c_opt1:
+        lookback_days = st.selectbox("계산용 일봉 기간", options=[120, 190, 260], index=1, key="sector_flow_lookback")
+    with c_opt2:
+        save_flow = st.checkbox("결과를 구글시트에 저장", value=True, key="save_sector_flow_result")
+    with c_opt3:
+        st.write("판정 해석")
+        st.caption("쏠림점수 5 = 균등")
+        st.caption("8 이상 = 돈이 한쪽으로 몰림")
+        st.caption("5점 이하 + 증가율↑ = 초기 순환 가능")
+
+    if st.button("섹터 순환매/발빼기 판단 실행", type="primary", key="run_sector_rotation_flow"):
+        if len(sector_df) == 0:
+            st.error("대표주유니버스가 비어 있습니다. 기본 섹터 대표주 채우기부터 눌러주세요.")
+        else:
+            with st.spinner("대표주 일봉과 거래대금을 계산하는 중입니다."):
+                result_df, stock_flow_df, diag = build_sector_rotation_flow(
+                    sector_df,
+                    save_to_sheet=save_flow,
+                    lookback_days=lookback_days,
+                )
+            if len(result_df) == 0:
+                st.error("섹터 결과가 비어 있습니다. 대표주 코드/데이터를 확인하세요.")
+                st.write("진단", diag)
+            else:
+                st.success(f"섹터 순환매 판단 완료: {diag.get('섹터', 0)}개 섹터 / 대표주 {diag.get('거래대금계산대표주', 0)}개 / 총 거래대금 {diag.get('총대표주거래대금억', 0)}억")
+                st.write("진단", diag)
+
+                top_concentration = result_df.head(5)[["섹터", "쏠림점수", "순환상태", "매수허용", "발빼기신호"]]
+                st.markdown("#### 현재 돈이 몰린 섹터")
+                show_pinned_dataframe(top_concentration, height=230)
+
+                inflow_df = result_df[result_df["섹터판정"].astype(str).isin(["초기유입", "순환매유입"])].copy()
+                if len(inflow_df) > 0:
+                    st.markdown("#### 순환매 유입 후보")
+                    show_pinned_dataframe(inflow_df[["섹터", "섹터판정", "쏠림점수", "5일대비거래대금증감률", "매수허용", "대표주요약"]].head(10), height=320)
+                else:
+                    st.caption("초기유입/순환매유입으로 잡힌 섹터가 아직 없습니다.")
+
+                exit_df = result_df[result_df["발빼기신호"].astype(str).str.contains("회수|익절|발빼기", regex=True, na=False)].copy()
+                if len(exit_df) > 0:
+                    st.markdown("#### 발빼기/회수 검토 섹터")
+                    show_pinned_dataframe(exit_df[["섹터", "쏠림점수", "순환상태", "발빼기신호", "판정사유", "대표주요약"]].head(10), height=320)
+                else:
+                    st.caption("강한 발빼기 신호로 잡힌 섹터는 아직 없습니다.")
+
+                st.markdown("#### 섹터별 전체 결과")
+                show_pinned_dataframe(result_df, height=560, pin_rank=True)
+                st.download_button(
+                    "섹터순환매결과 CSV 다운로드",
+                    data=result_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"magic_split_sector_rotation_flow_{today_str()}.csv",
+                    mime="text/csv"
+                )
+
+                st.markdown("#### 대표주별 세부 신호")
+                detail_view = stock_flow_df.sort_values(["섹터", "대표순위", "오늘거래대금억"], ascending=[True, True, False])
+                show_pinned_dataframe(detail_view, height=560)
+                st.download_button(
+                    "대표주별흐름 CSV 다운로드",
+                    data=stock_flow_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"magic_split_sector_stock_flow_{today_str()}.csv",
+                    mime="text/csv"
+                )
+
+    st.subheader("3) 대표주유니버스 편집")
+    if len(sector_df) == 0:
+        st.warning("대표주유니버스가 비어 있습니다. 기본 섹터 대표주 채우기 또는 빠른 입력을 먼저 사용하세요.")
+    else:
+        view_df = sector_df.copy()
+        view_df.insert(0, "삭제", False)
+        column_config = pinned_stock_column_config(view_df, pin_action=True)
+        column_config.update({
+            "현재가": _safe_number_column("현재가", format="%d"),
+            "자동매수수량": _safe_number_column("자동매수수량", format="%d"),
+            "예상매수금액": _safe_number_column("예상매수금액", format="%d"),
+        })
+        edited_sector = st.data_editor(
+            view_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="sector_flow_leader_editor",
+            column_config=column_config,
+        )
+        b1, b2 = st.columns(2)
+        if b1.button("대표주 수정 저장", key="save_sector_flow_leader_editor"):
+            to_save = edited_sector.drop(columns=["삭제"], errors="ignore")
+            saved = save_sector_leader_df(to_save)
+            st.success(f"대표주 수정 저장 완료: {len(saved)}개")
+            st.rerun()
+        if b2.button("체크한 대표주 삭제", key="delete_checked_sector_flow_leaders"):
+            checked = edited_sector["삭제"].fillna(False).astype(bool) if "삭제" in edited_sector.columns else pd.Series(False, index=edited_sector.index)
+            kept = edited_sector.loc[~checked].drop(columns=["삭제"], errors="ignore")
+            deleted = int(checked.sum())
+            save_sector_leader_df(kept)
+            st.success(f"대표주 삭제 완료: {deleted}개")
+            st.rerun()
+
+        st.download_button(
+            "대표주유니버스 CSV 다운로드",
+            data=sector_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="magic_split_sector_leader_universe.csv",
+            mime="text/csv"
+        )
+
+    with st.expander("판정 기준", expanded=False):
+        st.markdown("""
+- `쏠림점수 5.0`: 등록된 섹터들이 같은 비중으로 거래되는 균등 상태입니다.
+- `쏠림점수 8 이상`: 특정 섹터에 거래대금이 과하게 몰린 상태라 신규 추격을 막습니다.
+- `초기유입`: 아직 시장내 비중은 낮지만 5일 평균 대비 거래대금이 늘어나는 구간입니다.
+- `순환매유입`: 거래대금이 확실히 들어오지만 이미 오른 대표주는 눌림만 봅니다.
+- `쏠림후둔화`: 돈이 많이 몰렸던 섹터에서 거래대금이 꺾이는 구간입니다. 고점 물림 방지용으로 발빼기/회수 검토 신호를 냅니다.
+- `대표주요약`: 해당 섹터 안에서 실제로 거래대금이 큰 대표주와 신호를 같이 보여줍니다.
+""")
+
+# =====================================================
+# 6. 도움말
 # =====================================================
 
 else:
-    st.header("5. 도움말")
+    st.header("6. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -6809,6 +7734,10 @@ else:
 
 ### 이번 버전 핵심
 
+- `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
+- 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
+- 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
+- 쏠림점수는 각 섹터 거래대금 비중이 균등하면 5.0이고, 특정 섹터에 돈이 몰릴수록 8~10점으로 올라갑니다.
 - 보유차수 저장데이터는 1차/2차/3차 모두 유지하되, 판단표는 종목별 현재 보유 최고차수 1줄만 표시합니다.
 - 수동입력에서 종목명을 여러 번 쓰지 않아도 됩니다. `[종목명]` 아래에 차수만 여러 줄 입력합니다.
 - 기존 `종목명,차수,진입단가,수량` 한 줄 입력도 계속 지원합니다.
@@ -6829,7 +7758,8 @@ else:
 2. 운영판단기에서 오늘 모드 확인
 3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
 4. 보유차수 판단기에서 종목별 최고차수 기준도달 여부와 추가매수/유지/회수 판단
-5. TOP50에서 신규 후보 출력
+5. 섹터 순환매 판단기에서 어느 섹터에 돈이 몰렸는지, 어디로 이동하는지, 발빼기 신호가 있는지 확인
+6. TOP50은 기존 신규 후보 출력용으로 별도 사용
 
 ### 묶음수동입력 예시
 
