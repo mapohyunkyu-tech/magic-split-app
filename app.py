@@ -9,6 +9,7 @@
 import io
 import re
 import time
+import zipfile
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -24,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_FAST_REENTRY_BACKTEST_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_EXPORT_PERIOD_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4719,8 +4720,8 @@ def run_sector_strategy_backtest(
     initial_cash=100_000_000,
     defense_cash=50_000_000,
     max_sector_budget=20_000_000,
-    max_active_sectors=1,
-    leader_steps=(5_000_000, 4_000_000, 3_000_000),
+    max_active_sectors=2,
+    leader_steps=(7_000_000, 4_000_000, 3_000_000),
     second_steps=(3_000_000, 3_000_000),
     rotation_step=2_000_000,
     leader_drop2=5.0,
@@ -4732,7 +4733,7 @@ def run_sector_strategy_backtest(
     rotation_tp=3.0,
     enable_reentry=True,
     reentry_budget_ratio=1.0,
-    include_rotation=True,
+    include_rotation=False,
     fee_tax_rate=0.0023,
     lookback_days=190,
     max_signal_days=40,
@@ -4972,7 +4973,7 @@ def run_sector_strategy_backtest(
                 ratio = 0.5 if role == "대장주" else 1.0
                 sell(row, ratio, signal_date, next_trade_date, "일부팔기/발빼기 신호")
 
-        # 2) 신규 진입 섹터 선정: 초보 기본값은 한 번에 1섹터.
+        # 2) 신규 진입 섹터 선정: 현실수익형 기본값은 한 번에 2섹터까지 허용.
         active_secs = set(active_sectors())
         buy_candidates = pd.DataFrame()
         if len(sector_df) > 0:
@@ -5141,7 +5142,7 @@ def run_sector_strategy_backtest(
         "매도승률": round((wins / sells * 100), 1) if sells else 0,
         "최종보유종목수": len(pos_df),
         "검증거래일": len(daily_df),
-        "메모": ("빠른모드: 가격데이터 1회 로딩/핵심대표주 압축" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
+        "메모": ("빠른모드 현실수익형: 가격데이터 1회 로딩/동시2섹터/대장주1차상향/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -9040,19 +9041,35 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("섹터 신호는 기준일 장마감으로 계산하고, 실제 매매는 다음 거래일 시가로 처리합니다. 빠른 모드는 대표주 데이터를 1회 로딩하고 익절/발빼기/재진입까지 검증합니다.")
+    st.caption("현실수익형 기본값: 동시 2섹터, 대장주 1차 700만, 회전형 OFF. 신호는 기준일 장마감 계산, 실제 매매는 다음 거래일 시가 기준입니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
         st.warning("대표주유니버스가 비어 있습니다. 먼저 5. 섹터 순환매 판단기에서 대표주를 채워 주세요.")
     else:
-        c1, c2, c3 = st.columns(3)
+        c0, c1, c2, c3 = st.columns(4)
+        with c0:
+            period_preset = st.selectbox(
+                "백테스트 기간",
+                options=["빠른검증 60거래일", "기본검증 120거래일", "실전검증 240거래일", "장세검증 480거래일", "사용자지정"],
+                index=2,
+                key="bt_period_preset",
+            )
+        preset_days_map = {
+            "빠른검증 60거래일": 60,
+            "기본검증 120거래일": 120,
+            "실전검증 240거래일": 240,
+            "장세검증 480거래일": 480,
+        }
+        default_signal_days = preset_days_map.get(period_preset, 240)
         with c1:
-            start_date = st.date_input("시작일", value=(datetime.now() - timedelta(days=90)).date(), key="bt_start_date")
+            start_date = st.date_input("시작일", value=(datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(), key="bt_start_date")
         with c2:
             end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
         with c3:
-            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=180, value=40, step=5, key="bt_max_days")
+            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=480, value=int(default_signal_days), step=5, key="bt_max_days")
+        if max_signal_days <= 60:
+            st.warning("최근 60거래일 이하는 상승장/하락장 편향이 클 수 있습니다. 실전 판단은 120~240거래일 이상으로 확인하세요.")
 
         st.subheader("1) 자금 설정")
         c1, c2, c3, c4 = st.columns(4)
@@ -9063,13 +9080,13 @@ elif menu == "6. 섹터전략 백테스트":
         with c3:
             max_sector_budget = st.number_input("한 섹터 최대금액", min_value=1_000_000, max_value=500_000_000, value=20_000_000, step=1_000_000, format="%d", key="bt_sector_budget")
         with c4:
-            max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=0, key="bt_max_sectors")
+            max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=1, key="bt_max_sectors")
 
         st.subheader("2) 역할별 차수 설정")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("##### 대장주 3차")
-            leader_1 = st.number_input("대장주 1차", min_value=0, max_value=100_000_000, value=5_000_000, step=500_000, format="%d", key="bt_leader_1")
+            leader_1 = st.number_input("대장주 1차", min_value=0, max_value=100_000_000, value=7_000_000, step=500_000, format="%d", key="bt_leader_1")
             leader_2 = st.number_input("대장주 2차", min_value=0, max_value=100_000_000, value=4_000_000, step=500_000, format="%d", key="bt_leader_2")
             leader_3 = st.number_input("대장주 3차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_leader_3")
             leader_drop2 = st.number_input("대장주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_leader_drop2")
@@ -9081,7 +9098,7 @@ elif menu == "6. 섹터전략 백테스트":
             second_drop2 = st.number_input("2등대표주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_second_drop2")
         with c3:
             st.markdown("##### 회전형 1차")
-            include_rotation = st.checkbox("회전형 포함", value=True, key="bt_include_rotation")
+            include_rotation = st.checkbox("회전형 포함", value=False, key="bt_include_rotation")
             rotation_1 = st.number_input("회전형 1차", min_value=0, max_value=50_000_000, value=2_000_000, step=500_000, format="%d", key="bt_rotation_1")
             fee_tax_rate = st.number_input("수수료+세금 비율", min_value=0.0, max_value=0.01, value=0.0023, step=0.0001, format="%.4f", key="bt_fee_tax")
             lookback_days = st.selectbox("신호 계산용 일봉 기간", options=[120, 190, 260], index=1, key="bt_lookback")
@@ -9104,10 +9121,10 @@ elif menu == "6. 섹터전략 백테스트":
         with st.expander("백테스트 규칙 확인", expanded=False):
             st.markdown("""
 - `사기` 신호가 나온 섹터만 다음 거래일 시가에 1차 진입합니다.
-- 초보 기본값은 동시 1섹터입니다.
-- 대장주: 1차/2차/3차, 2차는 1차가 대비 -5%, 3차는 -10% 기준입니다.
+- 현실수익형 기본값은 동시 2섹터입니다. 안전형 비교가 필요하면 1섹터로 낮춰서 재검증합니다.
+- 대장주: 현실수익형 기본 1차 700만 / 2차 400만 / 3차 300만, 2차는 1차가 대비 -5%, 3차는 -10% 기준입니다.
 - 2등대표주: 1차/2차까지만 허용합니다.
-- 회전형: 1차만 허용하고 물타기는 하지 않습니다.
+- 회전형: 기본 OFF입니다. 켤 경우 1차만 허용하고 물타기는 하지 않습니다.
 - 익절 기본값: 대장주 +8% 절반, +12% 전량 / 2등 +5% / 회전형 +3%.
 - `일부팔기`: 대장주는 절반만 줄이고 `재진입대기`, 2등/회전형은 전량 회수합니다.
 - 대장주 재진입: 발빼기 뒤 섹터가 다시 `사기`로 회복되고 현재역할이 `현재대장`이면 1차만 복원합니다.
@@ -9168,10 +9185,65 @@ elif menu == "6. 섹터전략 백테스트":
                         m4.metric("최대낙폭", f"{summary.get('최대낙폭', 0)}%")
                         m5.metric("매매건수", f"{summary.get('매매건수', 0)}건")
 
+                        summary_df = pd.DataFrame([summary])
+                        settings_df = pd.DataFrame([{
+                            "APP_VERSION": APP_VERSION,
+                            "기간프리셋": period_preset,
+                            "시작일": str(start_date),
+                            "종료일": str(end_date),
+                            "최대검증거래일": max_signal_days,
+                            "총자금": initial_cash,
+                            "방어예수금": defense_cash,
+                            "한섹터최대금액": max_sector_budget,
+                            "동시진입섹터수": max_active_sectors,
+                            "대장주1차": leader_1,
+                            "대장주2차": leader_2,
+                            "대장주3차": leader_3,
+                            "2등대표주1차": second_1,
+                            "2등대표주2차": second_2,
+                            "회전형포함": include_rotation,
+                            "회전형1차": rotation_1,
+                            "대장주1차익절률": leader_tp1,
+                            "대장주전량익절률": leader_tp2,
+                            "2등대표주익절률": second_tp,
+                            "회전형익절률": rotation_tp,
+                            "대장주재진입허용": enable_reentry,
+                            "재진입1차비율": reentry_budget_ratio,
+                            "빠른백테스트": fast_mode,
+                            "검증종목범위": universe_mode,
+                        }])
+                        fail_df = trade_df.copy()
+                        if len(fail_df) > 0 and "실현손익" in fail_df.columns:
+                            fail_df["실현손익"] = pd.to_numeric(fail_df["실현손익"], errors="coerce").fillna(0)
+                            fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
+
+                        export_buffer = io.BytesIO()
+                        with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr(f"magic_split_sector_backtest_summary_{today_str()}.csv", summary_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_settings_{today_str()}.csv", settings_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_daily_{today_str()}.csv", daily_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_trades_{today_str()}.csv", trade_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_positions_{today_str()}.csv", pos_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_failures_{today_str()}.csv", fail_df.to_csv(index=False).encode("utf-8-sig"))
+                        export_buffer.seek(0)
+
+                        st.download_button(
+                            "전체 백테스트 CSV 묶음 다운로드",
+                            data=export_buffer.getvalue(),
+                            file_name=f"magic_split_sector_backtest_ALL_{today_str()}.zip",
+                            mime="application/zip",
+                            key="download_sector_backtest_all_zip",
+                        )
+                        st.caption("나한테 보여줄 때는 이 전체 ZIP 또는 자금흐름/매매내역 CSV를 올리면 됩니다.")
+
                         tab_sum, tab_daily, tab_trade, tab_pos, tab_fail = st.tabs(["요약", "자금흐름", "매매내역", "최종보유", "실패구간"])
                         with tab_sum:
-                            summary_df = pd.DataFrame([summary])
                             show_pinned_dataframe(summary_df, height=120)
+                            cdl1, cdl2 = st.columns(2)
+                            with cdl1:
+                                st.download_button("요약 CSV 다운로드", data=summary_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_summary_{today_str()}.csv", mime="text/csv")
+                            with cdl2:
+                                st.download_button("설정 CSV 다운로드", data=settings_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_settings_{today_str()}.csv", mime="text/csv")
                             st.caption("최저현금이 방어예수금 아래로 자주 내려가면 차수 금액이나 동시 섹터 수를 줄여야 합니다.")
                         with tab_daily:
                             show_pinned_dataframe(daily_df, height=520)
@@ -9183,11 +9255,8 @@ elif menu == "6. 섹터전략 백테스트":
                             show_pinned_dataframe(pos_df, height=420)
                             st.download_button("최종보유 CSV 다운로드", data=pos_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_positions_{today_str()}.csv", mime="text/csv")
                         with tab_fail:
-                            fail_df = trade_df.copy()
-                            if len(fail_df) > 0 and "실현손익" in fail_df.columns:
-                                fail_df["실현손익"] = pd.to_numeric(fail_df["실현손익"], errors="coerce").fillna(0)
-                                fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
                             show_pinned_dataframe(fail_df, height=420)
+                            st.download_button("실패구간 CSV 다운로드", data=fail_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_failures_{today_str()}.csv", mime="text/csv")
                 except Exception as e:
                     prog.empty()
                     status.empty()
