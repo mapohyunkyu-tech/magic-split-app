@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_INPUT_FIX_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_RULE_FIX_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10387,6 +10387,68 @@ elif menu == "7. 실전 운영판":
                     lookback_days=int(lookback_live),
                     dynamic_roles=True,
                 )
+
+            # 실전 운영판은 백테스트 룰을 그대로 따른다.
+            # 회전형 OFF에서는 현재회전형 신규매수(사기)를 반드시 제외한다.
+            # 단, 보유 중 매도는 전량회수/일부팔기 신호가 별도로 있을 때만 판단한다.
+            if len(stock_df) > 0:
+                stock_df = stock_df.copy()
+                stock_df["원래오늘행동"] = stock_df.get("오늘행동", "").astype(str)
+
+                bt_actions = []
+                bt_amounts = []
+                fixed_reasons = []
+                for _idx, _row in stock_df.iterrows():
+                    _action = str(_row.get("오늘행동", "대기") or "대기")
+                    _cur_role = str(_row.get("현재역할", "") or "")
+                    _reason = str(_row.get("행동사유", "") or "")
+
+                    if _action == "사기" and "현재회전형" in _cur_role:
+                        _action = "신규금지"
+                        _reason = (_reason + " / 회전형 OFF 신규매수 제외").strip(" /")
+                        stock_df.at[_idx, "오늘행동"] = _action
+                        if "매수허용" in stock_df.columns:
+                            stock_df.at[_idx, "매수허용"] = "N"
+                        if "대장주예외허용" in stock_df.columns:
+                            stock_df.at[_idx, "대장주예외허용"] = "N"
+                        if "메모" in stock_df.columns:
+                            _memo = str(_row.get("메모", "") or "")
+                            stock_df.at[_idx, "메모"] = (_memo + " / 회전형OFF제외").strip(" /")
+
+                    if _action == "사기":
+                        if "현재대장" in _cur_role:
+                            _bt_action = "사라"
+                            _amount = int(live_leader_1)
+                        elif "현재2등대표" in _cur_role:
+                            _bt_action = "사라"
+                            _amount = int(live_second_1)
+                        else:
+                            _bt_action = "사지마"
+                            _amount = 0
+                    elif _action == "대기":
+                        _bt_action = "대기"
+                        _amount = 0
+                    elif _action == "일부팔기":
+                        _bt_action = "줄여라"
+                        _amount = 0
+                    elif _action == "전량회수":
+                        _bt_action = "팔아라"
+                        _amount = 0
+                    elif _action == "추가매수금지":
+                        _bt_action = "추가매수 하지마"
+                        _amount = 0
+                    else:
+                        _bt_action = "사지마"
+                        _amount = 0
+
+                    bt_actions.append(_bt_action)
+                    bt_amounts.append(_amount)
+                    fixed_reasons.append(_reason)
+
+                stock_df["백테스트행동"] = bt_actions
+                stock_df["적용매수금액"] = bt_amounts
+                stock_df["행동사유"] = fixed_reasons
+
             st.success(f"계산 완료: 대표주 {diag.get('대표주', 0)}개 / 섹터 {diag.get('섹터', 0)}개")
 
             if len(result_df) > 0:
@@ -10418,7 +10480,7 @@ elif menu == "7. 실전 운영판":
             if len(stock_df) > 0:
                 stock_view = stock_df.copy()
                 stock_view = stock_view[stock_view["오늘행동"].astype(str).isin(["사기", "대기", "일부팔기", "전량회수", "신규금지", "추가매수금지"])]
-                stock_cols = [c for c in ["오늘행동", "섹터", "현재역할", "코드", "종목", "오늘거래대금억", "5일수익률", "20일수익률", "고점위험", "대표주판정", "발빼기신호", "행동사유"] if c in stock_view.columns]
+                stock_cols = [c for c in ["백테스트행동", "적용매수금액", "오늘행동", "원래오늘행동", "섹터", "현재역할", "코드", "종목", "오늘거래대금억", "5일수익률", "20일수익률", "고점위험", "대표주판정", "발빼기신호", "행동사유"] if c in stock_view.columns]
                 st.markdown("##### 대표주 상세 행동")
                 show_pinned_dataframe(stock_view[stock_cols].head(80), height=520)
 
@@ -10465,7 +10527,7 @@ elif menu == "7. 실전 운영판":
 - `일부팔기/전량회수`가 있으면 신규매수보다 먼저 확인합니다.
 - 대장주는 +10% 1차익절, +18% 전량익절 기준입니다.
 - 2등대표주는 +5% 익절 기준입니다.
-- 회전형은 실전 기본 OFF입니다.
+- 회전형은 실전 기본 OFF입니다. 현재회전형은 신규매수 `사기`가 떠도 `신규금지/사지마`로 보정합니다.
 - 계좌 MDD가 커지면 브레이크가 먼저입니다. 수익형은 완만브레이크, 균형형은 표준브레이크입니다.
 """)
 
