@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_REALISTIC_STOP_REENTRY_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_PROFIT_UP_ROLE_GUARD_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4719,10 +4719,10 @@ def run_sector_strategy_backtest(
     end_date,
     initial_cash=100_000_000,
     defense_cash=50_000_000,
-    max_sector_budget=20_000_000,
+    max_sector_budget=30_000_000,
     max_active_sectors=2,
-    leader_steps=(7_000_000, 4_000_000, 3_000_000),
-    second_steps=(3_000_000, 3_000_000),
+    leader_steps=(10_000_000, 5_000_000, 3_000_000),
+    second_steps=(5_000_000, 3_000_000),
     rotation_step=2_000_000,
     leader_drop2=5.0,
     leader_drop3=10.0,
@@ -4987,17 +4987,21 @@ def run_sector_strategy_backtest(
             leader_role_lost = role == "대장주" and "현재대장" not in cur_role
             second_role_lost = role == "2등대표주" and ("현재대장" not in cur_role and "현재2등대표" not in cur_role)
 
-            if role == "대장주" and ret_now <= leader_loss_cut and (weak_signal or leader_role_lost) and code not in sold_today_codes:
-                sell(row, 0.5, signal_date, next_trade_date, f"대장주 손실축소 {leader_loss_cut:g}% 일부회수")
+            # 역할보호 손실축소 룰:
+            # 가격 손실만으로는 팔지 않는다. 대장주는 현재대장에서 밀렸을 때만,
+            # 2등대표주는 현재대장/현재2등대표에서 밀렸을 때만 손실축소 매도를 실행한다.
+            if role == "대장주" and ret_now <= leader_loss_cut and leader_role_lost and code not in sold_today_codes:
+                sell(row, 0.5, signal_date, next_trade_date, f"대장주 역할이탈 손실축소 {leader_loss_cut:g}% 일부회수")
                 if code in positions and positions[code].get("qty", 0) > 0:
                     positions[code]["status"] = "재진입대기"
                 continue
             elif role == "대장주" and ret_now <= leader_loss_warn and (weak_signal or leader_role_lost):
                 # 경고 단계는 매도하지 않고 추가매수만 막는다.
+                # 현재대장 유지 중이면 보유는 계속하되 무리한 물타기만 막는다.
                 p["status"] = "추가매수금지"
 
-            if role == "2등대표주" and ret_now <= second_loss_cut and (weak_signal or second_role_lost) and code not in sold_today_codes:
-                sell(row, 1.0, signal_date, next_trade_date, f"2등대표주 손실축소 {second_loss_cut:g}% 전량회수")
+            if role == "2등대표주" and ret_now <= second_loss_cut and second_role_lost and code not in sold_today_codes:
+                sell(row, 1.0, signal_date, next_trade_date, f"2등대표주 역할이탈 손실축소 {second_loss_cut:g}% 전량회수")
                 continue
 
             if sec_action == "전량회수" or st_action == "전량회수":
@@ -5088,9 +5092,16 @@ def run_sector_strategy_backtest(
                     continue
 
                 # 추가매수: 기존 포지션만. 발빼기/신규금지/손실경고 시에는 금지.
-                if stock_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
-                    continue
+                cur_role_for_add = str(row.get("현재역할", ""))
                 if str(pos.get("status", "")) == "추가매수금지":
+                    # 역할이 회복되기 전까지는 추가매수 금지 상태를 유지한다.
+                    if role == "대장주" and "현재대장" in cur_role_for_add and stock_action in {"사기", "대기"} and sec_action not in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
+                        pos["status"] = "보유"
+                    elif role == "2등대표주" and ("현재대장" in cur_role_for_add or "현재2등대표" in cur_role_for_add) and stock_action in {"사기", "대기"} and sec_action not in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
+                        pos["status"] = "보유"
+                    else:
+                        continue
+                if stock_action in {"신규금지", "추가매수금지", "일부팔기", "전량회수"}:
                     continue
                 first_price = _safe_float_value(pos.get("first_price", pos.get("avg", price)), price)
                 step_now = int(pos.get("step", 1))
@@ -5178,7 +5189,7 @@ def run_sector_strategy_backtest(
         "매도승률": round((wins / sells * 100), 1) if sells else 0,
         "최종보유종목수": len(pos_df),
         "검증거래일": len(daily_df),
-        "메모": ("빠른모드 현실수익형+손실축소: 동시2섹터/대장주1차상향/재진입50%/전량회수전손실축소/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
+        "메모": ("빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF" if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준")
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -9077,7 +9088,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("현실수익형+손실축소 기본값: 동시 2섹터, 대장주 1차 700만, 재진입 50%, 회전형 OFF. 신호는 기준일 장마감 계산, 실제 매매는 다음 거래일 시가 기준입니다.")
+    st.caption("수익확대+역할보호 기본값: 동시 2섹터, 대장주 1차 1,000만, 2등 1차 500만, 재진입 50%, 회전형 OFF. 현재대장/현재2등 유지 중에는 손실축소 매도하지 않습니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9114,7 +9125,7 @@ elif menu == "6. 섹터전략 백테스트":
         with c2:
             defense_cash = st.number_input("방어예수금", min_value=0, max_value=10_000_000_000, value=50_000_000, step=1_000_000, format="%d", key="bt_defense_cash")
         with c3:
-            max_sector_budget = st.number_input("한 섹터 최대금액", min_value=1_000_000, max_value=500_000_000, value=20_000_000, step=1_000_000, format="%d", key="bt_sector_budget")
+            max_sector_budget = st.number_input("한 섹터 최대금액", min_value=1_000_000, max_value=500_000_000, value=30_000_000, step=1_000_000, format="%d", key="bt_sector_budget")
         with c4:
             max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=1, key="bt_max_sectors")
 
@@ -9122,14 +9133,14 @@ elif menu == "6. 섹터전략 백테스트":
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("##### 대장주 3차")
-            leader_1 = st.number_input("대장주 1차", min_value=0, max_value=100_000_000, value=7_000_000, step=500_000, format="%d", key="bt_leader_1")
-            leader_2 = st.number_input("대장주 2차", min_value=0, max_value=100_000_000, value=4_000_000, step=500_000, format="%d", key="bt_leader_2")
+            leader_1 = st.number_input("대장주 1차", min_value=0, max_value=100_000_000, value=10_000_000, step=500_000, format="%d", key="bt_leader_1")
+            leader_2 = st.number_input("대장주 2차", min_value=0, max_value=100_000_000, value=5_000_000, step=500_000, format="%d", key="bt_leader_2")
             leader_3 = st.number_input("대장주 3차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_leader_3")
             leader_drop2 = st.number_input("대장주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_leader_drop2")
             leader_drop3 = st.number_input("대장주 3차 기준 하락률(%)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="bt_leader_drop3")
         with c2:
             st.markdown("##### 2등대표주 2차")
-            second_1 = st.number_input("2등대표주 1차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_second_1")
+            second_1 = st.number_input("2등대표주 1차", min_value=0, max_value=100_000_000, value=5_000_000, step=500_000, format="%d", key="bt_second_1")
             second_2 = st.number_input("2등대표주 2차", min_value=0, max_value=100_000_000, value=3_000_000, step=500_000, format="%d", key="bt_second_2")
             second_drop2 = st.number_input("2등대표주 2차 기준 하락률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="bt_second_drop2")
         with c3:
@@ -9154,7 +9165,7 @@ elif menu == "6. 섹터전략 백테스트":
             fast_mode = st.checkbox("빠른 백테스트", value=True, key="bt_fast_mode")
             universe_mode = st.selectbox("검증 종목 범위", options=["핵심만", "전체"], index=0, key="bt_universe_mode")
 
-        st.subheader("4) 손실축소 설정")
+        st.subheader("4) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
             leader_loss_warn = st.number_input("대장주 추가매수금지 손실률(%)", min_value=-30.0, max_value=-1.0, value=-6.0, step=0.5, key="bt_leader_loss_warn")
@@ -9166,15 +9177,15 @@ elif menu == "6. 섹터전략 백테스트":
         with st.expander("백테스트 규칙 확인", expanded=False):
             st.markdown("""
 - `사기` 신호가 나온 섹터만 다음 거래일 시가에 1차 진입합니다.
-- 현실수익형 기본값은 동시 2섹터입니다. 안전형 비교가 필요하면 1섹터로 낮춰서 재검증합니다.
-- 대장주: 현실수익형 기본 1차 700만 / 2차 400만 / 3차 300만, 2차는 1차가 대비 -5%, 3차는 -10% 기준입니다.
+- 수익확대+역할보호 기본값은 동시 2섹터입니다. 안전형 비교가 필요하면 1섹터로 낮춰서 재검증합니다.
+- 대장주: 수익확대 기본 1차 1,000만 / 2차 500만 / 3차 300만, 2차는 1차가 대비 -5%, 3차는 -10% 기준입니다.
 - 2등대표주: 1차/2차까지만 허용합니다.
 - 회전형: 기본 OFF입니다. 켤 경우 1차만 허용하고 물타기는 하지 않습니다.
 - 익절 기본값: 대장주 +8% 절반, +12% 전량 / 2등 +5% / 회전형 +3%.
 - `일부팔기`: 대장주는 절반만 줄이고 `재진입대기`, 2등/회전형은 전량 회수합니다.
 - 대장주 재진입: 발빼기 뒤 섹터가 다시 `사기`로 회복되고 현재역할이 `현재대장`이면 1차의 50%만 복원합니다.
-- 대장주 손실축소: -6% 이하 + 신호 약화/현재대장 이탈이면 추가매수금지, -8% 이하면 절반 일부회수합니다.
-- 2등대표주 손실축소: -5% 이하 + 현재2등대표 이탈/신호 약화이면 전량회수합니다.
+- 대장주 손실축소: -6% 이하 + 신호 약화/현재대장 이탈이면 추가매수금지만 걸고, -8% 이하라도 현재대장 유지 중이면 매도하지 않습니다. 현재대장에서 밀렸을 때만 절반 일부회수합니다.
+- 2등대표주 손실축소: -5% 이하라도 현재대장/현재2등대표 유지 중이면 매도하지 않습니다. 역할에서 밀렸을 때만 전량회수합니다.
 - `전량회수`: 해당 신호 종목/섹터는 전량 정리합니다.
 - 방어예수금 아래로 내려가는 매수는 수량을 줄이거나 막습니다.
 """)
