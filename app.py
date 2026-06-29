@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_MDD_BRAKE_COOLDOWN_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -8630,7 +8630,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -9824,7 +9824,7 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 
 elif menu == "6. 섹터전략 백테스트":
     st.header("6. 섹터전략 백테스트")
-    st.caption("수익확대+역할보호+속도개선판에 섹터신뢰도 자동가중을 추가했습니다. 이번 버전은 강한차단형/초강한차단형을 포함해 손실 섹터 축소 테스트가 가능합니다.")
+    st.caption("실전 운영판 기본값을 현재 1등 세팅으로 고정했습니다. 백테스트는 C 조합공격 + MDD10 상승강화 + 섹터자동가중 표준형 + 완만브레이크/완만쿨다운을 기본으로 시작합니다.")
 
     sector_df = load_sector_leader_df()
     if len(sector_df) == 0:
@@ -9835,7 +9835,7 @@ elif menu == "6. 섹터전략 백테스트":
             period_preset = st.selectbox(
                 "백테스트 기간",
                 options=["빠른검증 60거래일", "기본검증 120거래일", "실전검증 240거래일", "장세검증 480거래일", "스트레스검증 720거래일", "사용자지정"],
-                index=2,
+                index=4,
                 key="bt_period_preset",
             )
         preset_days_map = {
@@ -9868,7 +9868,7 @@ elif menu == "6. 섹터전략 백테스트":
         with c4:
             max_active_sectors = st.selectbox("동시 진입 섹터 수", options=[1, 2, 3], index=1, key="bt_max_sectors")
         with c5:
-            compound_mode = st.checkbox("증액투자 모드", value=False, key="bt_compound_mode")
+            compound_mode = st.checkbox("증액투자 모드", value=True, key="bt_compound_mode")
             st.caption("ON: 현재 총자산 비율로 차수금액 자동 확대")
         if compound_mode:
             st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
@@ -9877,7 +9877,7 @@ elif menu == "6. 섹터전략 백테스트":
         profit_expand_preset = st.selectbox(
             "수익확대 프리셋",
             options=["직접입력/현재값", "A 상승배율강화", "B 대장주1차확대", "C 조합공격", "D 대장주25%추세익절"],
-            index=0,
+            index=3,
             key="bt_profit_expand_preset",
         )
         st.caption("프리셋은 실행 시 실제 적용값만 덮어씁니다. 화면 숫자는 참고용이고, 아래 적용값 표와 settings CSV에 실제값이 저장됩니다.")
@@ -9907,8 +9907,8 @@ elif menu == "6. 섹터전략 백테스트":
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             leader_tp_mode = st.selectbox("대장주 익절방식", options=["2단계", "3단계추세익절"], index=0, key="bt_leader_tp_mode")
-            leader_tp1 = st.number_input("대장주 1차익절(%)", min_value=1.0, max_value=50.0, value=8.0, step=0.5, key="bt_leader_tp1")
-            leader_tp2 = st.number_input("대장주 2차/전량익절(%)", min_value=1.0, max_value=80.0, value=12.0, step=0.5, key="bt_leader_tp2")
+            leader_tp1 = st.number_input("대장주 1차익절(%)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="bt_leader_tp1")
+            leader_tp2 = st.number_input("대장주 2차/전량익절(%)", min_value=1.0, max_value=80.0, value=18.0, step=0.5, key="bt_leader_tp2")
             leader_tp3 = st.number_input("대장주 3차 잔여익절(%)", min_value=1.0, max_value=120.0, value=25.0, step=0.5, key="bt_leader_tp3")
             leader_tp1_ratio = st.number_input("대장주 1차 익절비율", min_value=0.1, max_value=1.0, value=0.5, step=0.1, key="bt_leader_tp1_ratio")
             leader_tp2_ratio = st.number_input("대장주 2차 익절비율", min_value=0.1, max_value=1.0, value=0.3, step=0.1, key="bt_leader_tp2_ratio")
@@ -9928,7 +9928,7 @@ elif menu == "6. 섹터전략 백테스트":
             regime_filter_mode = st.selectbox(
                 "장세별 매수필터",
                 options=["OFF", "하락/급락 차단", "횡보축소 + 하락차단", "횡보완전차단 + 조정축소", "상승공격 + 횡보차단", "MDD10 상승강화 + 횡보차단", "MDD10 초공격 + 횡보차단", "상승장만 매수", "사용자지정"],
-                index=3,
+                index=5,
                 key="bt_regime_filter_mode",
             )
         default_mult = {"강한상승장": 1.2, "상승장": 1.0, "횡보장": 0.5, "조정장": 0.5, "하락장": 0.0, "급락일": 0.0, "장세불명": 0.5}
@@ -9973,7 +9973,7 @@ elif menu == "6. 섹터전략 백테스트":
             sector_weight_mode = st.selectbox(
                 "섹터 자동가중",
                 options=["OFF", "보수형", "표준형", "공격형", "강한차단형", "초강한차단형"],
-                index=0,
+                index=2,
                 key="bt_sector_weight_mode",
             )
         with wg2:
@@ -9987,7 +9987,7 @@ elif menu == "6. 섹터전략 백테스트":
             account_defense_mode = st.selectbox(
                 "계좌 MDD 브레이크",
                 options=["OFF", "완만브레이크", "표준브레이크", "강한브레이크"],
-                index=0,
+                index=1,
                 key="bt_account_defense_mode",
             )
             st.caption("평소엔 그대로 두고, 계좌 MDD가 커질 때만 신규/추가매수 예산을 줄입니다. 표준=-6% 70%, -8% 대장주만 50%, -10% 신규중단.")
@@ -9995,7 +9995,7 @@ elif menu == "6. 섹터전략 백테스트":
             loss_cooldown_mode = st.selectbox(
                 "전량회수 손실 쿨다운",
                 options=["OFF", "완만쿨다운", "섹터쿨다운", "종목+섹터쿨다운"],
-                index=0,
+                index=1,
                 key="bt_loss_cooldown_mode",
             )
             st.caption("최근 전량회수/손실축소가 나온 섹터는 10~20일 동안 0.5배 또는 신규금지합니다. 종목+섹터는 같은 종목 재진입도 잠깐 막습니다.")
@@ -10268,12 +10268,132 @@ elif menu == "6. 섹터전략 백테스트":
                     status.empty()
                     st.error(f"백테스트 실행 실패: {e}")
 
+
 # =====================================================
-# 7. 도움말
+# 7. 실전 운영판
+# =====================================================
+
+elif menu == "7. 실전 운영판":
+    st.header("7. 실전 운영판")
+    st.caption("백테스트 1등 세팅을 실전용으로 고정해, 오늘 사기/대기/회수 신호를 먼저 보는 화면입니다.")
+
+    st.subheader("1) 최종 후보 세팅")
+    profile = st.radio(
+        "운영 프로필",
+        ["수익형 1등", "균형형"],
+        horizontal=True,
+        key="live_profile",
+    )
+
+    if profile == "수익형 1등":
+        live_result = {"총수익률": "+70.79%", "MDD": "-9.40%", "메모": "수익 우선 후보"}
+        live_brake = "완만브레이크"
+    else:
+        live_result = {"총수익률": "+67.48%", "MDD": "-8.88%", "메모": "균형형 후보"}
+        live_brake = "표준브레이크"
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("720거래일 수익률", live_result["총수익률"])
+    m2.metric("최대낙폭", live_result["MDD"])
+    m3.metric("섹터자동가중", "표준형")
+    m4.metric("회전형", "OFF")
+
+    live_settings = pd.DataFrame([
+        {"항목": "수익확대프리셋", "값": "C 조합공격", "실전 의미": "대장주 1차 확대 + 2등대표주 1차 확대"},
+        {"항목": "장세매수필터", "값": "MDD10 상승강화 + 횡보차단", "실전 의미": "강상승 1.6배 / 상승 1.3배 / 횡보·하락·급락 0배"},
+        {"항목": "섹터자동가중", "값": "표준형", "실전 의미": "좋은 섹터 1.2배, 보통 1.0배, 약한 섹터 0.5배, D급 0배"},
+        {"항목": "MDD브레이크", "값": live_brake, "실전 의미": "계좌가 흔들릴 때만 신규/추가매수 축소"},
+        {"항목": "손실쿨다운", "값": "완만쿨다운", "실전 의미": "전량회수 손실 섹터/종목은 잠깐 축소"},
+        {"항목": "대장주", "값": "1차 1,300만 / 2차 500만 / 3차 300만", "실전 의미": "맞는 자리 1차를 크게, 물타기 3차는 키우지 않음"},
+        {"항목": "2등대표주", "값": "1차 700만 / 2차 300만", "실전 의미": "보조 수익 담당, 오래 끌지 않음"},
+        {"항목": "익절", "값": "대장주 +10% / +18%, 2등 +5%", "실전 의미": "대장주는 더 보유, 2등은 짧게 회전"},
+        {"항목": "증액투자", "값": "ON", "실전 의미": "총자산이 커지면 차수금액 자동 확대"},
+    ])
+    show_pinned_dataframe(live_settings, height=340)
+
+    st.subheader("2) 오늘 행동판")
+    st.caption("아래 버튼을 누르면 대표주 유니버스 기준으로 오늘 섹터 순환매를 계산하고, 실전용 행동값을 앞에 보여줍니다.")
+    sector_df = load_sector_leader_df()
+    if len(sector_df) == 0:
+        st.warning("대표주유니버스가 비어 있습니다. 먼저 5. 섹터 순환매 판단기에서 대표주를 채워 주세요.")
+    else:
+        asof_live = st.date_input("신호 기준일", value=datetime.now().date(), key="live_asof_date")
+        lookback_live = st.selectbox("신호 계산용 일봉 기간", options=[120, 190, 260], index=1, key="live_lookback")
+        if st.button("오늘 섹터 신호 계산", type="primary", key="run_live_operation_board"):
+            with st.spinner("대표주 거래대금/역할/순환매 신호 계산 중..."):
+                result_df, stock_df, diag = build_sector_rotation_flow(
+                    sector_df,
+                    save_to_sheet=False,
+                    asof_date=asof_live,
+                    lookback_days=int(lookback_live),
+                    dynamic_roles=True,
+                )
+            st.success(f"계산 완료: 대표주 {diag.get('대표주', 0)}개 / 섹터 {diag.get('섹터', 0)}개")
+
+            if len(result_df) > 0:
+                action_df = result_df.copy()
+                def _live_priority(a):
+                    a = str(a)
+                    if "전량" in a or "회수" in a or "일부팔" in a:
+                        return 1
+                    if "사기" in a:
+                        return 2
+                    if "신규금지" in a or "추가매수금지" in a:
+                        return 3
+                    return 4
+                action_df["실전우선순위"] = action_df["오늘행동"].apply(_live_priority)
+                action_df["실전메모"] = action_df["오늘행동"].astype(str).map(lambda x: "회수/익절 먼저 확인" if ("회수" in x or "팔" in x) else ("1차 후보, 현금·MDD 확인 후" if "사기" in x else ("새로 사지 말기" if "금지" in x else "관찰")))
+                show_cols = [c for c in ["실전우선순위", "오늘행동", "실전메모", "섹터", "쏠림점수", "쏠림변화", "5일대비거래대금증감률", "현재대장주", "현재2등대표주", "순환상태", "발빼기신호", "행동사유"] if c in action_df.columns]
+                action_df = action_df.sort_values(["실전우선순위", "쏠림점수", "5일대비거래대금증감률"], ascending=[True, False, False])
+                st.markdown("##### 오늘 섹터 행동")
+                show_pinned_dataframe(action_df[show_cols], height=420, pin_rank=False)
+
+                buy_sectors = action_df[action_df["오늘행동"].astype(str).str.contains("사기", na=False)]["섹터"].astype(str).head(5).tolist()
+                block_sectors = action_df[action_df["오늘행동"].astype(str).str.contains("신규금지|추가매수금지", regex=True, na=False)]["섹터"].astype(str).head(5).tolist()
+                exit_sectors = action_df[action_df["오늘행동"].astype(str).str.contains("팔|회수", regex=True, na=False)]["섹터"].astype(str).head(5).tolist()
+                c1, c2, c3 = st.columns(3)
+                c1.info("사기 후보: " + (", ".join(buy_sectors) if buy_sectors else "없음"))
+                c2.warning("신규금지/축소: " + (", ".join(block_sectors) if block_sectors else "없음"))
+                c3.error("회수/익절 확인: " + (", ".join(exit_sectors) if exit_sectors else "없음"))
+
+            if len(stock_df) > 0:
+                stock_view = stock_df.copy()
+                stock_view = stock_view[stock_view["오늘행동"].astype(str).isin(["사기", "대기", "일부팔기", "전량회수", "신규금지", "추가매수금지"])]
+                stock_cols = [c for c in ["오늘행동", "섹터", "현재역할", "코드", "종목", "오늘거래대금억", "5일수익률", "20일수익률", "고점위험", "대표주판정", "발빼기신호", "행동사유"] if c in stock_view.columns]
+                st.markdown("##### 대표주 상세 행동")
+                show_pinned_dataframe(stock_view[stock_cols].head(80), height=520)
+
+                export_buffer = io.BytesIO()
+                with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(f"magic_split_live_sector_action_{today_str()}.csv", result_df.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_stock_action_{today_str()}.csv", stock_df.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_settings_{today_str()}.csv", live_settings.to_csv(index=False).encode("utf-8-sig"))
+                export_buffer.seek(0)
+                st.download_button(
+                    "실전 운영판 CSV 묶음 다운로드",
+                    data=export_buffer.getvalue(),
+                    file_name=f"magic_split_live_operation_board_{today_str()}.zip",
+                    mime="application/zip",
+                    key="download_live_operation_zip",
+                )
+
+    st.subheader("3) 실전 사용 규칙")
+    st.markdown("""
+- `사기`가 떠도 횡보/하락/급락 장세에서는 새로 들어가지 않습니다.
+- `신규금지`는 새 종목만 금지입니다. 기존 보유 회수/익절 판단은 별도로 봅니다.
+- `일부팔기/전량회수`가 있으면 신규매수보다 먼저 확인합니다.
+- 대장주는 +10% 1차익절, +18% 전량익절 기준입니다.
+- 2등대표주는 +5% 익절 기준입니다.
+- 회전형은 실전 기본 OFF입니다.
+- 계좌 MDD가 커지면 브레이크가 먼저입니다. 수익형은 완만브레이크, 균형형은 표준브레이크입니다.
+""")
+
+# =====================================================
+# 8. 도움말
 # =====================================================
 
 else:
-    st.header("7. 도움말")
+    st.header("8. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -10282,7 +10402,8 @@ else:
 ### 이번 버전 핵심
 
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
-- `6. 섹터전략 백테스트` 메뉴를 추가했습니다. 신호일 다음 거래일 시가 기준으로 대장주 3차, 2등 2차, 회전형 1차 규칙을 검증하고, 480/720거래일 장세검증과 월별/장세별 결과표를 제공합니다.
+- `6. 섹터전략 백테스트` 메뉴는 현재 1등 실전 세팅을 기본값으로 시작합니다. 720거래일 스트레스 검증과 월별/장세별 결과표를 제공합니다.
+- `7. 실전 운영판` 메뉴를 추가했습니다. 최종 후보 세팅과 오늘 섹터/대표주 행동값을 한 화면에서 확인합니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
@@ -10308,8 +10429,9 @@ else:
 3. 보유차수 판단기에 증권사 CSV 또는 묶음수동입력으로 1차/2차별 보유 저장
 4. 보유차수 판단기에서 종목별 최고차수 기준도달 여부와 추가매수/유지/회수 판단
 5. 섹터 순환매 판단기에서 어느 섹터에 돈이 몰렸는지, 어디로 이동하는지, 발빼기 신호가 있는지 확인
-6. 섹터전략 백테스트에서 빠른 모드, 익절률, 발빼기 후 대장주 재진입대기/재진입허용 흐름 검증
-7. TOP50은 기존 신규 후보 출력용으로 별도 사용
+6. 섹터전략 백테스트에서 최종 후보 세팅 재검증
+7. 실전 운영판에서 오늘 사기/대기/회수 신호 확인
+8. TOP50은 기존 신규 후보 출력용으로 별도 사용
 
 ### 묶음수동입력 예시
 
