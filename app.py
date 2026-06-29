@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_RULE_FIX_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_EMERGENCY_RISK_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -198,7 +198,7 @@ def _ensure_sector_flow_text_columns(df):
 # 섹터전략 백테스트 전용 컬럼.
 # 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
 SECTOR_BACKTEST_DAILY_COLUMNS = [
-    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
+    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "긴급위험모드", "긴급위험발동", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
     "누적실현손익", "일일손익", "최대낙폭", "보유종목수", "매수건수", "매도건수", "메모"
 ]
 
@@ -4751,6 +4751,61 @@ def _build_sector_rotation_flow_from_map(active, price_map, asof_date, dynamic_r
     result_df = result_df[SECTOR_FLOW_RESULT_COLUMNS]
     return result_df, stock_df, {"대표주": int(len(stock_df)), "거래대금계산대표주": int(len(valid)), "섹터": int(sector_n)}
 
+
+def _bt_benchmark_row_on_date(benchmark_df, asof_date):
+    """KODEX200 기준 해당일 벤치마크 행을 반환한다."""
+    try:
+        if benchmark_df is None or len(benchmark_df) == 0:
+            return None
+        target = pd.to_datetime(asof_date)
+        part = benchmark_df[benchmark_df.index <= target].copy()
+        if len(part) == 0:
+            return None
+        return part.iloc[-1]
+    except Exception:
+        return None
+
+
+def _bt_emergency_risk_state(benchmark_df, asof_date, market_regime, mode="OFF"):
+    """긴급위험모드: 매도는 유지하고 신규/추가매수만 차단한다.
+
+    백테스트는 결과를 보고 악재 날짜를 빼는 방식이 아니라, 신호일에 이미 알 수 있는 KODEX200 일간/20일 수익률과 장세만 사용한다.
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return False, 1.0, ""
+    row = _bt_benchmark_row_on_date(benchmark_df, asof_date)
+    day_ret = 0.0
+    ret20 = np.nan
+    try:
+        if row is not None:
+            day_ret = float(row.get("day_ret", 0) or 0)
+            ret20 = float(row.get("ret20", np.nan))
+    except Exception:
+        day_ret = 0.0
+        ret20 = np.nan
+    regime = str(market_regime or "장세불명")
+    active = False
+    reason = ""
+    if mode == "급락일만 차단":
+        active = (regime == "급락일") or (day_ret <= -3.5)
+        reason = f"급락일 조건 day_ret={day_ret:.2f}% 장세={regime}"
+    elif mode == "지수쇼크 차단":
+        active = (day_ret <= -2.0) or (regime == "급락일")
+        reason = f"지수쇼크 day_ret={day_ret:.2f}% 장세={regime}"
+    elif mode == "강한위험 차단":
+        active = (day_ret <= -1.5) or (regime in {"급락일", "하락장"}) or (pd.notna(ret20) and ret20 <= -8 and day_ret <= -0.5)
+        reason = f"강한위험 day_ret={day_ret:.2f}% ret20={(0 if pd.isna(ret20) else ret20):.2f}% 장세={regime}"
+    elif mode == "초강한위험 차단":
+        active = (day_ret <= -1.0) or (regime in {"급락일", "하락장", "조정장"})
+        reason = f"초강한위험 day_ret={day_ret:.2f}% ret20={(0 if pd.isna(ret20) else ret20):.2f}% 장세={regime}"
+    else:
+        active = False
+        reason = ""
+    if active:
+        return True, 0.0, reason
+    return False, 1.0, "정상"
+
 def run_sector_strategy_backtest(
     leader_df,
     start_date,
@@ -4791,6 +4846,7 @@ def run_sector_strategy_backtest(
     sector_weight_mode="OFF",
     account_defense_mode="OFF",
     loss_cooldown_mode="OFF",
+    emergency_risk_mode="OFF",
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
 
@@ -4893,6 +4949,10 @@ def run_sector_strategy_backtest(
     sector_cooldown_weight_map = {}
     sector_cooldown_reason_map = {}
     symbol_cooldown_block_map = {}
+    emergency_risk_mode = str(emergency_risk_mode or "OFF")
+    emergency_active = False
+    emergency_note = ""
+    emergency_buy_multiplier = 1.0
 
     def _bt_eval_value(asof_date):
         total = 0.0
@@ -5045,6 +5105,9 @@ def run_sector_strategy_backtest(
         next_trade_date = dates[i + 1]
         current_market_regime = _bt_regime_on_date(benchmark_regime_df, signal_date)
         current_buy_multiplier = _bt_regime_multiplier(current_market_regime, regime_filter_mode, regime_custom_multipliers)
+        emergency_active, emergency_buy_multiplier, emergency_note = _bt_emergency_risk_state(benchmark_regime_df, signal_date, current_market_regime, emergency_risk_mode)
+        if emergency_active:
+            current_buy_multiplier = 0.0
         if progress_callback:
             progress_callback(i + 1, len(dates) - 1, signal_date)
 
@@ -5055,7 +5118,7 @@ def run_sector_strategy_backtest(
                 sector_df, stock_df, _diag = build_sector_rotation_flow(active, save_to_sheet=False, asof_date=signal_date, lookback_days=lookback_days, dynamic_roles=True)
         except Exception as e:
             daily_rows.append({
-                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
+                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "긴급위험모드": str(emergency_risk_mode), "긴급위험발동": str("ON" if emergency_active else "OFF"), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
                 "현금": round(cash, 0), "평가금액": 0, "총자산": round(cash, 0), "누적실현손익": round(realized, 0),
                 "일일손익": 0, "최대낙폭": round(max_drawdown, 2), "보유종목수": len([p for p in positions.values() if p.get("qty", 0) > 0]),
                 "매수건수": 0, "매도건수": 0, "메모": f"신호 계산 실패: {e}"
@@ -5312,12 +5375,13 @@ def run_sector_strategy_backtest(
         sells_today = len([t for t in trade_rows if t["구분"] == "매도"]) - sell_count_before
         signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
         daily_rows.append({
-            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
+            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "긴급위험모드": str(emergency_risk_mode), "긴급위험발동": str("ON" if emergency_active else "OFF"), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
             "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": " / ".join([x for x in [
                 _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else "",
                 account_defense_note if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_note not in {"", "정상"} else "",
+                ("긴급위험 " + emergency_note) if emergency_active else "",
                 ("손실쿨다운 " + ", ".join([f"{k}:{float(v):.1f}" for k, v in list(sector_cooldown_weight_map.items())[:4]])) if loss_cooldown_mode not in {"OFF", "사용안함", "없음"} and sector_cooldown_weight_map else "",
             ] if x])
         })
@@ -5374,7 +5438,8 @@ def run_sector_strategy_backtest(
         "섹터자동가중": str(sector_weight_mode),
         "계좌MDD브레이크": str(account_defense_mode),
         "손실쿨다운": str(loss_cooldown_mode),
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
+        "긴급위험모드": str(emergency_risk_mode),
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode} / 긴급위험모드:{emergency_risk_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -10000,6 +10065,19 @@ elif menu == "6. 섹터전략 백테스트":
             )
             st.caption("최근 전량회수/손실축소가 나온 섹터는 10~20일 동안 0.5배 또는 신규금지합니다. 종목+섹터는 같은 종목 재진입도 잠깐 막습니다.")
 
+        st.subheader("4-3) 긴급위험모드")
+        er1, er2 = st.columns([1, 3])
+        with er1:
+            emergency_risk_mode = st.selectbox(
+                "긴급위험모드",
+                options=["OFF", "급락일만 차단", "지수쇼크 차단", "강한위험 차단", "초강한위험 차단"],
+                index=0,
+                key="bt_emergency_risk_mode",
+            )
+        with er2:
+            st.caption("백테스트용 긴급위험모드는 결과 보고 악재 날짜를 빼는 기능이 아닙니다. 신호일에 이미 알 수 있는 KODEX200 일간/20일 수익률과 장세로만 신규/추가매수를 차단합니다.")
+            st.caption("발동 시: 사라 신호는 전부 차단, 대기/사지마 유지, 줄여라/팔아라 신호는 그대로 실행합니다. 추천 비교는 지수쇼크 차단부터입니다.")
+
         st.subheader("5) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -10071,6 +10149,7 @@ elif menu == "6. 섹터전략 백테스트":
                 "섹터자동가중": sector_weight_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
+                "긴급위험모드": emergency_risk_mode,
             }
         ]), use_container_width=True, hide_index=True)
 
@@ -10126,6 +10205,7 @@ elif menu == "6. 섹터전략 백테스트":
                         sector_weight_mode=sector_weight_mode,
                         account_defense_mode=account_defense_mode,
                         loss_cooldown_mode=loss_cooldown_mode,
+                        emergency_risk_mode=emergency_risk_mode,
                     )
                     prog.empty()
                     status.empty()
@@ -10171,6 +10251,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "섹터자동가중": sector_weight_mode,
                             "MDD브레이크": account_defense_mode,
                             "손실쿨다운": loss_cooldown_mode,
+                            "긴급위험모드": emergency_risk_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
@@ -10204,6 +10285,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "2등대표주전량회수손실률": second_loss_cut,
                             "빠른백테스트": fast_mode,
                             "검증종목범위": universe_mode,
+                            "긴급위험모드": emergency_risk_mode,
                         }])
                         fail_df = trade_df.copy()
                         if len(fail_df) > 0 and "실현손익" in fail_df.columns:
@@ -10360,6 +10442,7 @@ elif menu == "7. 실전 운영판":
         {"항목": "섹터자동가중", "값": "표준형", "실전 의미": "좋은 섹터 1.2배, 보통 1.0배, 약한 섹터 0.5배, D급 0배"},
         {"항목": "MDD브레이크", "값": live_brake, "실전 의미": "계좌가 흔들릴 때만 신규/추가매수 축소"},
         {"항목": "손실쿨다운", "값": "완만쿨다운", "실전 의미": "전량회수 손실 섹터/종목은 잠깐 축소"},
+        {"항목": "긴급위험모드", "값": "OFF/수동ON", "실전 의미": "ON이면 신규매수 사라를 전부 사지마로 바꿈"},
         {"항목": "총자본", "값": f"{int(live_total_cash):,}원", "실전 의미": "실전 운영 기준 자본"},
         {"항목": "최저현금", "값": f"{int(live_defense_cash):,}원", "실전 의미": "이 금액 아래로 내려가면 신규/추가매수 제한"},
         {"항목": "운용가능금", "값": f"{int(live_available_cash):,}원", "실전 의미": "총자본 - 최저현금"},
@@ -10378,6 +10461,9 @@ elif menu == "7. 실전 운영판":
     else:
         asof_live = st.date_input("신호 기준일", value=datetime.now().date(), key="live_asof_date")
         lookback_live = st.selectbox("신호 계산용 일봉 기간", options=[120, 190, 260], index=1, key="live_lookback")
+        live_emergency_mode = st.selectbox("긴급위험모드", options=["OFF", "수동ON"], index=0, key="live_emergency_mode")
+        if live_emergency_mode == "수동ON":
+            st.warning("긴급위험모드 ON: 신규매수 사라 신호는 전부 사지마로 바꾸고, 줄여라/팔아라만 유지합니다.")
         if st.button("오늘 섹터 신호 계산", type="primary", key="run_live_operation_board"):
             with st.spinner("대표주 거래대금/역할/순환매 신호 계산 중..."):
                 result_df, stock_df, diag = build_sector_rotation_flow(
@@ -10402,6 +10488,15 @@ elif menu == "7. 실전 운영판":
                     _action = str(_row.get("오늘행동", "대기") or "대기")
                     _cur_role = str(_row.get("현재역할", "") or "")
                     _reason = str(_row.get("행동사유", "") or "")
+
+                    if live_emergency_mode == "수동ON" and _action == "사기":
+                        _action = "신규금지"
+                        _reason = (_reason + " / 긴급위험모드 신규매수 차단").strip(" /")
+                        stock_df.at[_idx, "오늘행동"] = _action
+                        if "매수허용" in stock_df.columns:
+                            stock_df.at[_idx, "매수허용"] = "N"
+                        if "대장주예외허용" in stock_df.columns:
+                            stock_df.at[_idx, "대장주예외허용"] = "N"
 
                     if _action == "사기" and "현재회전형" in _cur_role:
                         _action = "신규금지"
@@ -10505,6 +10600,7 @@ elif menu == "7. 실전 운영판":
                     "2등대표주익절": "+5%",
                     "증액투자": "ON",
                     "회전형": "OFF",
+                    "긴급위험모드": live_emergency_mode,
                 }])
                 with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     zf.writestr(f"magic_split_live_sector_action_{today_str()}.csv", result_df.to_csv(index=False).encode("utf-8-sig"))
@@ -10528,6 +10624,7 @@ elif menu == "7. 실전 운영판":
 - 대장주는 +10% 1차익절, +18% 전량익절 기준입니다.
 - 2등대표주는 +5% 익절 기준입니다.
 - 회전형은 실전 기본 OFF입니다. 현재회전형은 신규매수 `사기`가 떠도 `신규금지/사지마`로 보정합니다.
+- 긴급위험모드 ON이면 모든 신규매수 `사라`가 `사지마`로 바뀌고, `줄여라/팔아라`만 그대로 실행합니다.
 - 계좌 MDD가 커지면 브레이크가 먼저입니다. 수익형은 완만브레이크, 균형형은 표준브레이크입니다.
 """)
 
