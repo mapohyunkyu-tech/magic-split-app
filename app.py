@@ -25,7 +25,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_BACKTEST_COMPOUND_MODE_20260629"
+APP_VERSION = "v27_SECTOR_BACKTEST_COMPOUND_REGIME_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5223,6 +5223,188 @@ def run_sector_strategy_backtest(
     }
     return daily_df, trade_df, pos_df, summary
 
+
+def _bt_annualized_summary_fields(summary, daily_df):
+    """백테스트 요약에 단순/복리 연환산 수익률을 보강한다."""
+    out = dict(summary or {})
+    try:
+        days = int(out.get("검증거래일", 0) or 0)
+        total_return = float(out.get("총수익률", 0) or 0)
+        initial_cash = float(out.get("초기자금", 0) or 0)
+        final_asset = float(out.get("최종총자산", 0) or 0)
+        if days > 0:
+            out["단순연환산수익률"] = round(total_return * 240 / days, 2)
+            if initial_cash > 0 and final_asset > 0:
+                out["복리연환산수익률"] = round(((final_asset / initial_cash) ** (240 / days) - 1) * 100, 2)
+            else:
+                out["복리연환산수익률"] = 0.0
+        else:
+            out["단순연환산수익률"] = 0.0
+            out["복리연환산수익률"] = 0.0
+    except Exception:
+        out["단순연환산수익률"] = 0.0
+        out["복리연환산수익률"] = 0.0
+    return out
+
+
+def build_backtest_monthly_result(daily_df):
+    """일별 자금흐름에서 월별 성과표를 만든다."""
+    cols = ["월", "거래일수", "시작총자산", "월말총자산", "월손익", "월수익률", "월최저현금", "월최대낙폭", "매수건수", "매도건수"]
+    if daily_df is None or len(daily_df) == 0:
+        return pd.DataFrame(columns=cols)
+    df = daily_df.copy()
+    df["기준일_dt"] = pd.to_datetime(df["기준일"], errors="coerce")
+    df = df.dropna(subset=["기준일_dt"]).sort_values("기준일_dt")
+    if len(df) == 0:
+        return pd.DataFrame(columns=cols)
+    for c in ["총자산", "현금", "매수건수", "매도건수"]:
+        df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+    df["월"] = df["기준일_dt"].dt.strftime("%Y-%m")
+    rows = []
+    for month, part in df.groupby("월"):
+        part = part.sort_values("기준일_dt")
+        start_asset = float(part.iloc[0]["총자산"])
+        end_asset = float(part.iloc[-1]["총자산"])
+        pnl = end_asset - start_asset
+        ret = (pnl / start_asset * 100) if start_asset > 0 else 0
+        peak = part["총자산"].cummax().replace(0, np.nan)
+        dd = ((part["총자산"] / peak - 1) * 100).min()
+        rows.append({
+            "월": month,
+            "거래일수": int(len(part)),
+            "시작총자산": round(start_asset, 0),
+            "월말총자산": round(end_asset, 0),
+            "월손익": round(pnl, 0),
+            "월수익률": round(ret, 2),
+            "월최저현금": round(float(part["현금"].min()), 0),
+            "월최대낙폭": round(float(dd if pd.notna(dd) else 0), 2),
+            "매수건수": int(part["매수건수"].sum()),
+            "매도건수": int(part["매도건수"].sum()),
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _bt_benchmark_close_frame(start_date, end_date):
+    """코스피 대체 벤치마크. FDR 인덱스가 환경마다 다를 수 있어 KODEX200(069500)을 기본으로 쓴다."""
+    try:
+        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=120)).strftime("%Y-%m-%d")
+        end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=5)).strftime("%Y-%m-%d")
+        df = _bt_price_frame("069500", start_pad, end_pad)
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=["기준일_dt", "벤치마크종가"])
+        out = df.copy().reset_index().rename(columns={"index": "기준일_dt"})
+        # reset_index 결과 컬럼명이 Date/날짜 등으로 올 수 있어 첫 컬럼을 날짜로 통일한다.
+        first_col = out.columns[0]
+        out = out.rename(columns={first_col: "기준일_dt"})
+        out["기준일_dt"] = pd.to_datetime(out["기준일_dt"], errors="coerce")
+        close_col = "close" if "close" in out.columns else ("종가" if "종가" in out.columns else None)
+        if close_col is None:
+            return pd.DataFrame(columns=["기준일_dt", "벤치마크종가"])
+        out["벤치마크종가"] = pd.to_numeric(out[close_col], errors="coerce")
+        out = out.dropna(subset=["기준일_dt", "벤치마크종가"]).sort_values("기준일_dt")
+        return out[["기준일_dt", "벤치마크종가"]]
+    except Exception:
+        return pd.DataFrame(columns=["기준일_dt", "벤치마크종가"])
+
+
+def _bt_classify_market_regime(ret20, day_ret):
+    """KODEX200 20거래일 수익률과 당일 수익률로 장세를 단순 분류한다."""
+    try:
+        ret20 = float(ret20)
+        day_ret = float(day_ret)
+    except Exception:
+        return "장세불명"
+    if pd.isna(ret20):
+        return "장세불명"
+    if day_ret <= -3.5:
+        return "급락일"
+    if ret20 >= 10:
+        return "강한상승장"
+    if ret20 >= 3:
+        return "상승장"
+    if ret20 <= -10:
+        return "하락장"
+    if ret20 <= -3:
+        return "조정장"
+    return "횡보장"
+
+
+def build_backtest_regime_result(daily_df, start_date, end_date):
+    """일별 자금흐름 + KODEX200 기준으로 장세별 성과표를 만든다."""
+    cols = [
+        "장세", "거래일수", "시작일", "종료일", "전략누적수익률", "KODEX200누적수익률", "초과수익률",
+        "전략평균일수익률", "KODEX200평균일수익률", "전략최대낙폭", "최저현금", "최악일손익", "메모"
+    ]
+    detail_cols = [
+        "기준일", "장세", "총자산", "전략일수익률", "KODEX200종가", "KODEX200일수익률", "KODEX200_20일수익률", "현금", "보유섹터", "오늘신호섹터"
+    ]
+    if daily_df is None or len(daily_df) == 0:
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=detail_cols)
+    df = daily_df.copy()
+    df["기준일_dt"] = pd.to_datetime(df["기준일"], errors="coerce")
+    df = df.dropna(subset=["기준일_dt"]).sort_values("기준일_dt")
+    if len(df) == 0:
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=detail_cols)
+    for c in ["총자산", "현금", "일일손익"]:
+        df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+    df["전략일수익률"] = df["총자산"].pct_change().fillna(0) * 100
+
+    bench = _bt_benchmark_close_frame(start_date, end_date)
+    if bench is not None and len(bench) > 0:
+        bench = bench.sort_values("기준일_dt")
+        bench["KODEX200일수익률"] = bench["벤치마크종가"].pct_change().fillna(0) * 100
+        bench["KODEX200_20일수익률"] = bench["벤치마크종가"].pct_change(20) * 100
+        merged = pd.merge_asof(df.sort_values("기준일_dt"), bench, on="기준일_dt", direction="backward")
+    else:
+        merged = df.copy()
+        merged["벤치마크종가"] = np.nan
+        merged["KODEX200일수익률"] = 0.0
+        merged["KODEX200_20일수익률"] = np.nan
+    merged["장세"] = merged.apply(lambda r: _bt_classify_market_regime(r.get("KODEX200_20일수익률", np.nan), r.get("KODEX200일수익률", 0)), axis=1)
+
+    rows = []
+    for regime, part in merged.groupby("장세"):
+        part = part.sort_values("기준일_dt")
+        if len(part) == 0:
+            continue
+        strat_curve = (1 + pd.to_numeric(part["전략일수익률"], errors="coerce").fillna(0) / 100).cumprod()
+        bench_curve = (1 + pd.to_numeric(part["KODEX200일수익률"], errors="coerce").fillna(0) / 100).cumprod()
+        strat_ret = (float(strat_curve.iloc[-1]) - 1) * 100 if len(strat_curve) else 0
+        bench_ret = (float(bench_curve.iloc[-1]) - 1) * 100 if len(bench_curve) else 0
+        peak = part["총자산"].cummax().replace(0, np.nan)
+        dd = ((part["총자산"] / peak - 1) * 100).min()
+        rows.append({
+            "장세": regime,
+            "거래일수": int(len(part)),
+            "시작일": pd.to_datetime(part.iloc[0]["기준일_dt"]).strftime("%Y-%m-%d"),
+            "종료일": pd.to_datetime(part.iloc[-1]["기준일_dt"]).strftime("%Y-%m-%d"),
+            "전략누적수익률": round(strat_ret, 2),
+            "KODEX200누적수익률": round(bench_ret, 2),
+            "초과수익률": round(strat_ret - bench_ret, 2),
+            "전략평균일수익률": round(float(part["전략일수익률"].mean()), 3),
+            "KODEX200평균일수익률": round(float(part["KODEX200일수익률"].mean()), 3),
+            "전략최대낙폭": round(float(dd if pd.notna(dd) else 0), 2),
+            "최저현금": round(float(part["현금"].min()), 0),
+            "최악일손익": round(float(part["일일손익"].min()), 0),
+            "메모": "KODEX200(069500) 20거래일 수익률 기준"
+        })
+    regime_df = pd.DataFrame(rows, columns=cols)
+    order = {"강한상승장": 1, "상승장": 2, "횡보장": 3, "조정장": 4, "하락장": 5, "급락일": 6, "장세불명": 9}
+    if len(regime_df) > 0:
+        regime_df["_order"] = regime_df["장세"].map(order).fillna(99)
+        regime_df = regime_df.sort_values(["_order", "장세"]).drop(columns=["_order"]).reset_index(drop=True)
+    detail = merged.copy()
+    detail["기준일"] = detail["기준일_dt"].dt.strftime("%Y-%m-%d")
+    detail = detail.rename(columns={"벤치마크종가": "KODEX200종가"})
+    for c in ["전략일수익률", "KODEX200일수익률", "KODEX200_20일수익률"]:
+        if c in detail.columns:
+            detail[c] = pd.to_numeric(detail[c], errors="coerce").round(3)
+    for c in detail_cols:
+        if c not in detail.columns:
+            detail[c] = ""
+    return regime_df, detail[detail_cols]
+
+
 def parse_simple_holding_text(simple_text, krx):
     """
     간편 보유 입력 파서.
@@ -9128,7 +9310,7 @@ elif menu == "6. 섹터전략 백테스트":
         with c0:
             period_preset = st.selectbox(
                 "백테스트 기간",
-                options=["빠른검증 60거래일", "기본검증 120거래일", "실전검증 240거래일", "장세검증 480거래일", "사용자지정"],
+                options=["빠른검증 60거래일", "기본검증 120거래일", "실전검증 240거래일", "장세검증 480거래일", "스트레스검증 720거래일", "사용자지정"],
                 index=2,
                 key="bt_period_preset",
             )
@@ -9144,9 +9326,9 @@ elif menu == "6. 섹터전략 백테스트":
         with c2:
             end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
         with c3:
-            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=480, value=int(default_signal_days), step=5, key="bt_max_days")
+            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=720, value=int(default_signal_days), step=5, key="bt_max_days")
         if max_signal_days <= 60:
-            st.warning("최근 60거래일 이하는 상승장/하락장 편향이 클 수 있습니다. 실전 판단은 120~240거래일 이상으로 확인하세요.")
+            st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일로 확인하세요.")
 
         st.subheader("1) 자금 설정")
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -9278,12 +9460,23 @@ elif menu == "6. 섹터전략 백테스트":
                         st.error(summary.get("오류"))
                     else:
                         st.success("백테스트 완료")
+                        summary = _bt_annualized_summary_fields(summary, daily_df)
+                        monthly_df = build_backtest_monthly_result(daily_df)
+                        regime_df, regime_daily_df = build_backtest_regime_result(daily_df, str(start_date), str(end_date))
+                        if len(regime_df) > 0:
+                            try:
+                                summary["KODEX200대비메모"] = "KODEX200(069500) 기준 장세별 결과 생성"
+                            except Exception:
+                                pass
                         m1, m2, m3, m4, m5 = st.columns(5)
                         m1.metric("총수익률", f"{summary.get('총수익률', 0)}%")
                         m2.metric("최종총자산", fmt_won(summary.get("최종총자산", 0)))
                         m3.metric("최저현금", fmt_won(summary.get("최저현금", 0)))
                         m4.metric("최대낙폭", f"{summary.get('최대낙폭', 0)}%")
                         m5.metric("매매건수", f"{summary.get('매매건수', 0)}건")
+                        m6, m7 = st.columns(2)
+                        m6.metric("단순 연환산", f"{summary.get('단순연환산수익률', 0)}%")
+                        m7.metric("복리 연환산", f"{summary.get('복리연환산수익률', 0)}%")
 
                         summary_df = pd.DataFrame([summary])
                         settings_df = pd.DataFrame([{
@@ -9330,6 +9523,9 @@ elif menu == "6. 섹터전략 백테스트":
                             zf.writestr(f"magic_split_sector_backtest_trades_{today_str()}.csv", trade_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_positions_{today_str()}.csv", pos_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_failures_{today_str()}.csv", fail_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_monthly_{today_str()}.csv", monthly_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_regime_{today_str()}.csv", regime_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_sector_backtest_regime_daily_{today_str()}.csv", regime_daily_df.to_csv(index=False).encode("utf-8-sig"))
                         export_buffer.seek(0)
 
                         st.download_button(
@@ -9341,7 +9537,7 @@ elif menu == "6. 섹터전략 백테스트":
                         )
                         st.caption("나한테 보여줄 때는 이 전체 ZIP 또는 자금흐름/매매내역 CSV를 올리면 됩니다.")
 
-                        tab_sum, tab_daily, tab_trade, tab_pos, tab_fail = st.tabs(["요약", "자금흐름", "매매내역", "최종보유", "실패구간"])
+                        tab_sum, tab_daily, tab_trade, tab_pos, tab_fail, tab_month, tab_regime = st.tabs(["요약", "자금흐름", "매매내역", "최종보유", "실패구간", "월별결과", "장세별결과"])
                         with tab_sum:
                             show_pinned_dataframe(summary_df, height=120)
                             cdl1, cdl2 = st.columns(2)
@@ -9362,6 +9558,16 @@ elif menu == "6. 섹터전략 백테스트":
                         with tab_fail:
                             show_pinned_dataframe(fail_df, height=420)
                             st.download_button("실패구간 CSV 다운로드", data=fail_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_failures_{today_str()}.csv", mime="text/csv")
+                        with tab_month:
+                            show_pinned_dataframe(monthly_df, height=420)
+                            st.download_button("월별결과 CSV 다운로드", data=monthly_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_monthly_{today_str()}.csv", mime="text/csv")
+                        with tab_regime:
+                            st.caption("장세는 KODEX200(069500) 20거래일 수익률 기준으로 단순 분류합니다. 코스피 대비 확인용이며, 매매 신호 자체에는 영향을 주지 않습니다.")
+                            show_pinned_dataframe(regime_df, height=300)
+                            st.download_button("장세별결과 CSV 다운로드", data=regime_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_regime_{today_str()}.csv", mime="text/csv")
+                            with st.expander("일별 장세 상세", expanded=False):
+                                show_pinned_dataframe(regime_daily_df, height=420)
+                                st.download_button("일별장세 CSV 다운로드", data=regime_daily_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"magic_split_sector_backtest_regime_daily_{today_str()}.csv", mime="text/csv")
                 except Exception as e:
                     prog.empty()
                     status.empty()
@@ -9381,7 +9587,7 @@ else:
 ### 이번 버전 핵심
 
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
-- `6. 섹터전략 백테스트` 메뉴를 추가했습니다. 신호일 다음 거래일 시가 기준으로 대장주 3차, 2등 2차, 회전형 1차 규칙을 검증합니다.
+- `6. 섹터전략 백테스트` 메뉴를 추가했습니다. 신호일 다음 거래일 시가 기준으로 대장주 3차, 2등 2차, 회전형 1차 규칙을 검증하고, 480/720거래일 장세검증과 월별/장세별 결과표를 제공합니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
