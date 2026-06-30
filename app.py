@@ -5776,7 +5776,7 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
     """
     status = []
     try:
-        date_index = pd.to_datetime(pd.Series(dates).dropna().unique()).sort_values()
+        date_index = pd.DatetimeIndex(pd.to_datetime(pd.Series(dates).dropna().unique())).sort_values()
         price_df = pd.DataFrame(index=date_index)
         for item in candidates:
             code_expr = str(item.get("code", "")).strip()
