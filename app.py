@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_PERSIST_FIX_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_ONE_EXPORT_FIX_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10525,14 +10525,66 @@ elif menu == "7. 실전 운영판":
                     "증액투자": "ON",
                     "회전형": "OFF",
                 }])
+                # 7번 실전 운영판 다운로드 한 번에 보유장부까지 같이 묶는다.
+                # 보유장부는 8번 메뉴의 자동저장 위치(MagicSplitData)를 읽는다.
+                live_data_dir = Path.home() / "MagicSplitData"
+                live_holding_path = live_data_dir / "magic_split_live_holding_ledger.csv"
+                live_sell_path = live_data_dir / "magic_split_live_sell_history.csv"
+
+                def _read_live_csv_for_export(path):
+                    try:
+                        if path.exists():
+                            return pd.read_csv(path, encoding="utf-8-sig")
+                    except Exception:
+                        try:
+                            return pd.read_csv(path)
+                        except Exception:
+                            pass
+                    return pd.DataFrame()
+
+                holding_export_df = _read_live_csv_for_export(live_holding_path)
+                sell_export_df = _read_live_csv_for_export(live_sell_path)
+                if len(holding_export_df) > 0 and "보유주수" in holding_export_df.columns:
+                    holding_summary_export_df = holding_export_df.copy()
+                    holding_summary_export_df["보유주수"] = pd.to_numeric(holding_summary_export_df["보유주수"], errors="coerce").fillna(0)
+                    if "매수금액" in holding_summary_export_df.columns:
+                        holding_summary_export_df["매수금액"] = pd.to_numeric(holding_summary_export_df["매수금액"], errors="coerce").fillna(0)
+                    else:
+                        holding_summary_export_df["매수금액"] = 0
+                    if "차수" in holding_summary_export_df.columns:
+                        holding_summary_export_df["차수"] = pd.to_numeric(holding_summary_export_df["차수"], errors="coerce").fillna(0)
+                    else:
+                        holding_summary_export_df["차수"] = 0
+                    holding_summary_export_df = holding_summary_export_df[holding_summary_export_df["보유주수"] > 0].copy()
+                    if len(holding_summary_export_df) > 0 and {"코드", "종목"}.issubset(set(holding_summary_export_df.columns)):
+                        holding_summary_export_df = holding_summary_export_df.groupby(["코드", "종목"], dropna=False).agg(
+                            섹터=("섹터", "last") if "섹터" in holding_summary_export_df.columns else ("종목", "last"),
+                            최고차수=("차수", "max"),
+                            총매수금액=("매수금액", "sum"),
+                            총보유주수=("보유주수", "sum"),
+                            매수역할=("매수역할", "last") if "매수역할" in holding_summary_export_df.columns else ("종목", "last"),
+                        ).reset_index()
+                        holding_summary_export_df["평균단가"] = np.where(
+                            holding_summary_export_df["총보유주수"] > 0,
+                            (holding_summary_export_df["총매수금액"] / holding_summary_export_df["총보유주수"]).round(0),
+                            0,
+                        )
+                    else:
+                        holding_summary_export_df = pd.DataFrame()
+                else:
+                    holding_summary_export_df = pd.DataFrame()
+
                 with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     zf.writestr(f"magic_split_live_sector_action_{today_str()}.csv", result_df.to_csv(index=False).encode("utf-8-sig"))
                     zf.writestr(f"magic_split_live_stock_action_{today_str()}.csv", stock_df.to_csv(index=False).encode("utf-8-sig"))
                     zf.writestr(f"magic_split_live_settings_{today_str()}.csv", live_settings.to_csv(index=False).encode("utf-8-sig"))
                     zf.writestr(f"magic_split_live_capital_settings_{today_str()}.csv", live_capital_df.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_holding_ledger_{today_str()}.csv", holding_export_df.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_holding_summary_{today_str()}.csv", holding_summary_export_df.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_live_sell_history_{today_str()}.csv", sell_export_df.to_csv(index=False).encode("utf-8-sig"))
                 export_buffer.seek(0)
                 st.download_button(
-                    "실전 운영판 CSV 묶음 다운로드",
+                    "실전 운영판 CSV 전체 묶음 다운로드",
                     data=export_buffer.getvalue(),
                     file_name=f"magic_split_live_operation_board_{today_str()}.zip",
                     mime="application/zip",
@@ -11007,6 +11059,7 @@ else:
 - `6. 섹터전략 백테스트` 메뉴는 현재 1등 실전 세팅을 기본값으로 시작합니다. 720거래일 스트레스 검증과 월별/장세별 결과표를 제공합니다.
 - `7. 실전 운영판` 메뉴를 추가했습니다. 최종 후보 세팅과 오늘 섹터/대표주 행동값을 한 화면에서 확인합니다.
 - `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다. 삼성SDI처럼 영문 혼합 종목명은 정식명/코드로 자동 보정하고, 보유장부는 홈 폴더의 MagicSplitData에 자동저장되어 새 버전에서도 유지됩니다.
+- `7. 실전 운영판 CSV 전체 묶음 다운로드`를 누르면 신호 CSV, 자본설정, 보유장부, 보유요약, 매도기록이 한 번에 같이 나옵니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.

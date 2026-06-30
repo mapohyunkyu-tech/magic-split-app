@@ -1,19 +1,30 @@
-# v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_NAME_FIX_20260629
+# v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_PERSIST_FIX_20260629
 
 ## 수정 내용
 
-- `8. 실전 보유장부` 매수 기록 입력 시 종목명/코드를 저장 전에 자동 확인합니다.
-- `삼성sdi`, `삼성SDI`, `삼성에스디아이`, `삼성ssi`, `sdi`, `ssi`, `006400` 입력을 모두 `삼성SDI / 006400 / 2차전지`로 보정합니다.
-- 코드가 있으면 코드 우선, 종목명이 있으면 대표주 유니버스 → KRX 순서로 확인합니다.
-- 종목을 확인하지 못하면 잘못 저장하지 않도록 매수 기록 추가를 막습니다.
-- 기존 보유장부/팔아라/줄여라 기능은 유지합니다.
+- `8. 실전 보유장부`가 앱 폴더가 아니라 사용자 홈 폴더의 `MagicSplitData`에 자동 저장됩니다.
+- 새 버전 zip을 새로 깔아도 같은 PC에서는 보유장부/매도기록을 자동으로 다시 불러옵니다.
+- 저장 위치가 화면에 표시됩니다.
+- `현재 장부 즉시 자동저장`, `자동저장 파일 다시 불러오기` 버튼을 추가했습니다.
+- 매수 기록 추가, 매도/축소 기록, 장부 수정/삭제, CSV 불러오기 후 자동 저장됩니다.
+- 삼성SDI 종목명 보정과 회전형 OFF 신규매수 제외 룰은 유지됩니다.
 
-## 사용
+## 자동저장 위치
 
-1. `8. 실전 보유장부` 이동
-2. 매수 기록 추가에서 종목에 `삼성SDI` 입력
-3. 매수 기록 추가
-4. 저장 결과가 `삼성SDI(006400)`으로 뜨는지 확인
+- Windows 예시: `C:\Users\사용자명\MagicSplitData`
+- macOS/Linux 예시: `/Users/사용자명/MagicSplitData` 또는 `/home/사용자명/MagicSplitData`
+
+저장 파일:
+
+- `magic_split_live_holding_ledger.csv`
+- `magic_split_live_sell_history.csv`
+
+## 사용법
+
+1. `8. 실전 보유장부`로 이동
+2. 매수/매도 기록 입력
+3. 앱이 자동으로 `MagicSplitData`에 저장
+4. 다음 버전을 새로 받아도 같은 PC면 자동 불러오기
 
 ## 검사
 
