@@ -5693,26 +5693,48 @@ def _bt_growth_collapse_state(growth_df, asof_date, mode="OFF"):
 
 
 def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
-    """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열."""
+    """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열.
+
+    기존 버전은 ETF 데이터 로딩 실패 시 조용히 빈 시리즈를 반환했고,
+    그 결과 듀얼모멘텀을 선택해도 전 기간 CASH:100%로 떨어지는 문제가 있었다.
+    이 버전은 FDR 원본 Close 컬럼을 우선 사용하고, 실패 시에만 보조 변환을 쓴다.
+    """
     try:
-        code = str(code or "").strip().zfill(6)
-        if not code or code == "000000":
+        raw_code = str(code or "").strip()
+        if not raw_code:
             return pd.Series(dtype=float)
-        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 40)).strftime("%Y%m%d")
+        # 국내 ETF/종목은 6자리. 해외 지수/티커 확장 가능성을 위해 비숫자 코드는 zfill하지 않는다.
+        code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
+        if code == "000000":
+            return pd.Series(dtype=float)
+        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 80)).strftime("%Y%m%d")
         end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
         raw = get_ohlcv_fdr_cached(code, start_pad, end_pad)
-        df = _bt_prepare_single_price_df(raw)
-        if df is None or len(df) == 0:
+        if raw is None or len(raw) == 0:
             return pd.Series(dtype=float)
-        close = pd.to_numeric(df.get("close", np.nan), errors="coerce").dropna()
+
+        # 1순위: FDR 원본 Close/close/종가를 그대로 사용
+        close = _ohlcv_close_series(raw)
+        if close is None or len(close) == 0:
+            # 2순위: 앱 내부 보조 정규화
+            df = _bt_prepare_single_price_df(raw)
+            if df is None or len(df) == 0 or "close" not in df.columns:
+                return pd.Series(dtype=float)
+            close = pd.to_numeric(df.get("close", np.nan), errors="coerce").dropna()
+        close.index = pd.to_datetime(close.index)
+        close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
         close.name = code
-        return close.sort_index()
+        return close
     except Exception:
         return pd.Series(dtype=float)
 
 
-def _bt_bunker_asset_prices(candidates, dates, start_date, end_date):
-    """방공호 후보 자산의 종가 테이블. 날짜는 대장주 백테스트 거래일에 맞춘다."""
+def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=False):
+    """방공호 후보 자산의 종가 테이블. 날짜는 대장주 백테스트 거래일에 맞춘다.
+
+    return_status=True이면 후보별 로딩 상태를 함께 반환한다.
+    """
+    status = []
     try:
         date_index = pd.to_datetime(pd.Series(dates).dropna().unique()).sort_values()
         price_df = pd.DataFrame(index=date_index)
@@ -5723,44 +5745,78 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date):
                 continue
             s = _bt_load_bunker_close_series(code, start_date, end_date)
             if len(s) == 0:
+                status.append({"자산": name, "코드": code, "상태": "실패", "원본행수": 0, "사용가능일수": 0})
                 continue
             aligned = s.reindex(price_df.index, method="ffill")
-            price_df[name] = pd.to_numeric(aligned, errors="coerce")
+            aligned = pd.to_numeric(aligned, errors="coerce")
+            price_df[name] = aligned
+            status.append({
+                "자산": name,
+                "코드": code,
+                "상태": "성공" if int(aligned.notna().sum()) > 0 else "실패",
+                "원본행수": int(len(s)),
+                "사용가능일수": int(aligned.notna().sum()),
+                "첫데이터일": s.index.min().strftime("%Y-%m-%d") if len(s) else "",
+                "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if len(s) else "",
+            })
+        if return_status:
+            return price_df, pd.DataFrame(status)
         return price_df
-    except Exception:
+    except Exception as e:
+        if return_status:
+            status.append({"자산": "전체", "코드": "", "상태": f"오류:{e}", "원본행수": 0, "사용가능일수": 0})
+            return pd.DataFrame(), pd.DataFrame(status)
         return pd.DataFrame()
 
 
-def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2):
-    """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 200일선 위, 점수 양수인 자산 상위 N개."""
+def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False):
+    """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 추세선 위, 점수 양수인 자산 상위 N개.
+
+    초반 200일 데이터가 부족한 구간은 MA200 대신 MA120/MA60 순서로 완화한다.
+    그래서 2020 초반처럼 검증 시작 직후에도 듀얼이 전부 CASH로 죽지 않는다.
+    """
     picks = []
+    detail_rows = []
     try:
         if price_df is None or len(price_df) == 0:
-            return picks
+            return (picks, pd.DataFrame(detail_rows)) if return_detail else picks
         target = pd.to_datetime(asof_date)
         hist = price_df[price_df.index <= target].copy()
         if len(hist) < 30:
-            return picks
-        row = hist.iloc[-1]
+            return (picks, pd.DataFrame(detail_rows)) if return_detail else picks
         rows = []
         for col in hist.columns:
             ser = pd.to_numeric(hist[col], errors="coerce").dropna()
             ser = ser[ser.index <= target]
-            if len(ser) < 70:
+            if len(ser) < 45:
                 continue
             close = float(ser.iloc[-1])
             ret63 = (close / float(ser.iloc[-64]) - 1.0) * 100 if len(ser) >= 64 and float(ser.iloc[-64]) > 0 else np.nan
             ret126 = (close / float(ser.iloc[-127]) - 1.0) * 100 if len(ser) >= 127 and float(ser.iloc[-127]) > 0 else np.nan
-            ma200 = float(ser.tail(min(200, len(ser))).mean()) if len(ser) >= 120 else np.nan
-            score = np.nanmean([ret63, ret126])
-            if pd.isna(score) or pd.isna(ma200):
-                continue
-            if close > ma200 and score > 0:
-                rows.append({"asset": col, "score": float(score), "ret63": float(ret63) if not pd.isna(ret63) else np.nan, "ret126": float(ret126) if not pd.isna(ret126) else np.nan})
+            ret21 = (close / float(ser.iloc[-22]) - 1.0) * 100 if len(ser) >= 22 and float(ser.iloc[-22]) > 0 else np.nan
+            score_parts = [x for x in [ret63, ret126] if not pd.isna(x)]
+            if len(score_parts) == 0 and not pd.isna(ret21):
+                score_parts = [ret21]
+            score = float(np.mean(score_parts)) if len(score_parts) else np.nan
+            if len(ser) >= 200:
+                ma = float(ser.tail(200).mean()); ma_label = "MA200"
+            elif len(ser) >= 120:
+                ma = float(ser.tail(120).mean()); ma_label = "MA120"
+            elif len(ser) >= 60:
+                ma = float(ser.tail(60).mean()); ma_label = "MA60"
+            else:
+                ma = float(ser.tail(45).mean()); ma_label = "MA45"
+            ok = (not pd.isna(score)) and close > ma and score > 0
+            d = {"asset": col, "score": score, "ret21": ret21, "ret63": ret63, "ret126": ret126, "trend_ma": ma_label, "close": close, "ma": ma, "pass": bool(ok)}
+            detail_rows.append(d)
+            if ok:
+                rows.append(d)
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         picks = [r["asset"] for r in rows[:int(max_assets)]]
     except Exception:
         picks = []
+    if return_detail:
+        return picks, pd.DataFrame(detail_rows)
     return picks
 
 
@@ -5800,7 +5856,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             {"name": "DOLLAR", "code": dollar_code, "type": "asset"},
             {"name": "CASH", "code": "", "type": "cash"},
         ]
-        price_df = _bt_bunker_asset_prices(candidates, dates, start_date, end_date)
+        price_df, bunker_price_status_df = _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=True)
+        loaded_assets = list(price_df.columns) if price_df is not None and len(price_df.columns) > 0 else []
         daily_rate = (1.0 + float(cash_annual_rate or 0.0) / 100.0) ** (1.0 / 252.0) - 1.0
         mode = str(mode or "월간 듀얼모멘텀 상위2")
         static_weights = {
@@ -5851,7 +5908,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                     current_weights = {"CASH": 1.0}
                 else:
                     asof = prev_date if prev_date is not None else date
-                    picks = _bt_pick_bunker_dual_momentum(price_df, asof, max_assets=2)
+                    picks, pick_detail = _bt_pick_bunker_dual_momentum(price_df, asof, max_assets=2, return_detail=True)
                     if len(picks) == 0:
                         current_weights = {"CASH": 1.0}
                     else:
@@ -5883,6 +5940,9 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 "통합수익률": round((combined / total_initial - 1.0) * 100.0, 2),
                 "통합MDD": round(dd, 2),
                 "방공호보유": ",".join([f"{k}:{round(v*100)}%" for k, v in current_weights.items()]),
+                "방공호데이터자산수": len(loaded_assets),
+                "방공호데이터자산": ",".join(loaded_assets),
+                "방공호모드": mode,
             })
             prev_date = date
         out = pd.DataFrame(rows)
@@ -5891,6 +5951,14 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         final_total = float(out["통합총자산"].iloc[-1])
         bunker_final = float(out["방공호평가금액"].iloc[-1])
         leader_final = float(out["대장주엔진평가금액"].iloc[-1])
+        cash_days = int(out["방공호보유"].astype(str).str.contains("CASH:100%", regex=False).sum()) if "방공호보유" in out.columns else 0
+        noncash_days = int(len(out) - cash_days) if len(out) else 0
+        status_text = ""
+        try:
+            if bunker_price_status_df is not None and len(bunker_price_status_df) > 0:
+                status_text = " | ".join([f"{r.get('자산','')}:{r.get('상태','')}({r.get('사용가능일수',0)}일)" for _, r in bunker_price_status_df.iterrows()])
+        except Exception:
+            status_text = ""
         summary = {
             "방공호전략": mode,
             "초기총자금": round(total_initial),
@@ -5906,7 +5974,13 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "리밸런싱횟수": rebalance_count,
             "현금연수익률가정": float(cash_annual_rate or 0.0),
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}",
-            "메모": "대장주 엔진 일별 총자산 곡선을 70%로 스케일하고, 30% 방공호를 별도 월간 리밸런싱으로 합산한 통합 백테스트입니다.",
+            "방공호가격데이터자산수": len(loaded_assets),
+            "방공호가격데이터자산": ",".join(loaded_assets),
+            "CASH100일수": cash_days,
+            "비현금방공호일수": noncash_days,
+            "마지막방공호보유": str(out["방공호보유"].iloc[-1]) if len(out) else "",
+            "방공호데이터상태": status_text,
+            "메모": "대장주 엔진 일별 총자산 곡선을 70%로 스케일하고, 30% 방공호를 별도 월간 리밸런싱으로 합산한 통합 백테스트입니다. 듀얼 선택 시 방공호보유가 전 기간 CASH:100%이면 가격데이터 로딩 실패/모멘텀 미충족으로 봅니다.",
         }
         return out, summary
     except Exception as e:
@@ -10743,8 +10817,12 @@ elif menu == "6. 섹터전략 백테스트":
                                     bm2.metric("통합최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
                                     bm3.metric("통합MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
                                     bm4.metric("방공호최종", fmt_won(bunker_summary.get("최종방공호", 0)))
+                                    if "듀얼" in str(bunker_mode) and int(bunker_summary.get("비현금방공호일수", 0) or 0) == 0:
+                                        st.error("방공호 듀얼모멘텀이 실제 적용되지 않았습니다. 전 기간 CASH:100%입니다. 방공호가격데이터자산수/데이터상태를 확인하세요.")
+                                    else:
+                                        st.caption(f"방공호 데이터자산 {bunker_summary.get('방공호가격데이터자산수', 0)}개 / 비현금 방공호일수 {bunker_summary.get('비현금방공호일수', 0)}일 / 마지막보유 {bunker_summary.get('마지막방공호보유', '')}")
                                     with st.expander("70/30 방공호 통합 결과", expanded=False):
-                                        show_pinned_dataframe(bunker_summary_df, height=120)
+                                        show_pinned_dataframe(bunker_summary_df, height=160)
                                         show_pinned_dataframe(bunker_daily_df.tail(80), height=300, pin_rank=False)
                             except Exception as e:
                                 st.warning(f"방공호 통합 백테스트 계산 중 오류: {e}")
