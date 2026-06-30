@@ -1,23 +1,17 @@
-# BUNKER 70/30 Dual Sort Fix 20260630
+# BUNKER_70_30_DUAL_NAVER_FALLBACK_FIX_20260630
 
-수정 내용:
-- 방공호 듀얼모멘텀 실행 시 `DatetimeArray object has no attribute sort_values` 오류로 전 기간 `CASH:100%` 처리되던 문제 수정.
-- 방공호 거래일 인덱스 생성 로직을 `DatetimeIndex.sort_values()` 방식으로 변경.
-- 기존 DUAL_DATA_FIX의 대체코드/데이터상태 CSV 기능 유지.
+방공호 듀얼모멘텀이 계속 CASH:100%로 떨어지는 문제를 한 번 더 보강한 버전입니다.
 
-정상 확인:
-- `magic_split_bunker_7030_data_status_*.csv`에 전체 오류가 없어야 함.
-- `방공호가격데이터자산수`가 1개 이상이어야 함.
-- `비현금방공호일수`가 0보다 커야 함.
-- `방공호보유`가 전 기간 `CASH:100%`이면 실패.
+## 수정
+- 국내 ETF 6자리 코드가 FinanceDataReader에서 실패하면 네이버 차트 API로 백업 로딩
+- QQQ/GLD 같은 해외 ETF가 FinanceDataReader에서 실패하면 Stooq CSV로 백업 로딩
+- KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 후보 데이터 로딩 실패 시 전부 CASH로 조용히 떨어지는 문제 완화
+- 기존 DatetimeArray sort_values 수정 유지
 
-권장 재검증 세팅:
-- 백테스트 기간: 2020부터 전체검증
-- 최대검증거래일: 3000
-- 빠른 백테스트: ON 가능하나, 기간 프리셋이 `빠른검증 60거래일`이면 안 됨
-- 70/30 방공호 같이 계산: ON
-- 방공호 방식: 월간 듀얼모멘텀 상위2
-- 시장붕괴 차단 필터: OFF
-- 성장주 보조필터: OFF
-- 동시진입섹터수: 2
-- 대장주 익절: 10 / 18
+## 정상 확인
+백테스트 결과에서 아래가 나와야 정상입니다.
+- 방공호가격데이터자산수 > 0
+- 비현금방공호일수 > 0
+- 방공호보유가 CASH:100%만 반복되지 않음
+
+예: NASDAQ100:50%,GOLD:50% / GOLD:50%,DOLLAR:50%

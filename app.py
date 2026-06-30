@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_DATA_FIX_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_NAVER_FALLBACK_FIX_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5713,6 +5713,75 @@ def _split_bunker_code_candidates(code_expr):
     return out
 
 
+
+def _bt_load_naver_close_series(code, start_date, end_date, lookback_days=260):
+    """국내 ETF/종목 6자리 코드용 네이버 차트 백업 로더.
+
+    FinanceDataReader가 일부 ETF를 못 읽으면 방공호가 전 기간 CASH로 떨어지므로,
+    6자리 국내 코드에 한해 네이버 일봉 XML 데이터를 백업으로 사용한다.
+    """
+    try:
+        raw_code = str(code or "").strip().zfill(6)
+        if not raw_code.isdigit() or raw_code == "000000":
+            return pd.Series(dtype=float)
+        sd = pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)
+        ed = pd.to_datetime(end_date) + pd.DateOffset(days=30)
+        # 거래일 기준 넉넉하게. 네이버 count는 최근 N개라 시작~종료 범위를 충분히 덮는다.
+        count = max(900, int((ed - sd).days * 1.8) + 260)
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={raw_code}&timeframe=day&count={count}&requestType=0"
+        r = requests.get(url, timeout=12)
+        if r.status_code != 200 or not r.text:
+            return pd.Series(dtype=float)
+        rows = []
+        for m in re.finditer(r'data="([0-9]{8})\|([^\"]+)"', r.text):
+            parts = m.group(2).split("|")
+            # date|open|high|low|close|volume 구조. m.group(1)은 date.
+            if len(parts) < 4:
+                continue
+            date = pd.to_datetime(m.group(1), format="%Y%m%d", errors="coerce")
+            if pd.isna(date):
+                continue
+            try:
+                close = float(str(parts[3]).replace(",", ""))
+            except Exception:
+                continue
+            if close > 0:
+                rows.append((date, close))
+        if not rows:
+            return pd.Series(dtype=float)
+        s = pd.Series([x[1] for x in rows], index=pd.DatetimeIndex([x[0] for x in rows]), dtype=float).sort_index()
+        s = s[(s.index >= sd) & (s.index <= ed)]
+        s.name = raw_code
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _bt_load_stooq_close_series(ticker, start_date, end_date, lookback_days=260):
+    """미국 ETF(QQQ/GLD 등)용 Stooq 백업 로더."""
+    try:
+        t = str(ticker or "").strip().lower()
+        if not t or t.isdigit():
+            return pd.Series(dtype=float)
+        # Stooq는 미국 ETF에 .us 접미어를 쓴다.
+        if "." not in t:
+            t = f"{t}.us"
+        sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)).strftime("%Y%m%d")
+        ed = (pd.to_datetime(end_date) + pd.DateOffset(days=30)).strftime("%Y%m%d")
+        url = f"https://stooq.com/q/d/l/?s={t}&d1={sd}&d2={ed}&i=d"
+        r = requests.get(url, timeout=12)
+        if r.status_code != 200 or "Date" not in r.text:
+            return pd.Series(dtype=float)
+        df = pd.read_csv(io.StringIO(r.text))
+        if df is None or len(df) == 0 or "Close" not in df.columns or "Date" not in df.columns:
+            return pd.Series(dtype=float)
+        s = pd.Series(pd.to_numeric(df["Close"], errors="coerce").values, index=pd.to_datetime(df["Date"], errors="coerce"), dtype=float).dropna().sort_index()
+        s.name = str(ticker).strip().upper()
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
     """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열.
 
@@ -5741,6 +5810,15 @@ def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
             except Exception:
                 raw = pd.DataFrame()
         if raw is None or len(raw) == 0:
+            # 3차 백업: 국내 6자리 ETF는 네이버 차트, 해외 ETF는 Stooq로 시도한다.
+            if str(code2).isdigit():
+                s_nav = _bt_load_naver_close_series(code2, start_date, end_date, lookback_days=lookback_days)
+                if s_nav is not None and len(s_nav) > 0:
+                    return s_nav
+            else:
+                s_stooq = _bt_load_stooq_close_series(code2, start_date, end_date, lookback_days=lookback_days)
+                if s_stooq is not None and len(s_stooq) > 0:
+                    return s_stooq
             return pd.Series(dtype=float)
 
         close = _ohlcv_close_series(raw)
@@ -5752,9 +5830,20 @@ def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
         close.index = pd.to_datetime(close.index)
         close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
         close.name = code2
-        return close
+        if len(close) > 0:
+            return close
+        # FDR가 비어 있지 않았지만 종가 추출이 실패한 경우도 백업 로더로 재시도한다.
+        if str(code2).isdigit():
+            return _bt_load_naver_close_series(code2, start_date, end_date, lookback_days=lookback_days)
+        return _bt_load_stooq_close_series(code2, start_date, end_date, lookback_days=lookback_days)
     except Exception:
-        return pd.Series(dtype=float)
+        try:
+            raw_code = str(code or "").strip()
+            if raw_code.isdigit():
+                return _bt_load_naver_close_series(raw_code, start_date, end_date, lookback_days=lookback_days)
+            return _bt_load_stooq_close_series(raw_code, start_date, end_date, lookback_days=lookback_days)
+        except Exception:
+            return pd.Series(dtype=float)
 
 
 def _bt_load_bunker_close_series_any(code_expr, start_date, end_date, lookback_days=260):
