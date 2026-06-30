@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_LOOKBACK_INDEX_FIX_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_20_10_SPLIT_FIX_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10675,17 +10675,17 @@ elif menu == "6. 섹터전략 백테스트":
         if compound_mode:
             st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
 
-        st.subheader("1-0) 70/30 방공호 통합 백테스트")
+        st.subheader("1-0) 70/20/10 방공호+부스터 통합 백테스트")
         bk1, bk2, bk3 = st.columns(3)
         with bk1:
-            enable_bunker_backtest = st.checkbox("70/30 방공호 같이 계산", value=False, key="bt_enable_bunker_7030")
+            enable_bunker_backtest = st.checkbox("70/20/10 방공호+부스터 같이 계산", value=False, key="bt_enable_bunker_7030")
             leader_alloc_ratio = st.number_input("대장주 엔진 비중(%)", min_value=10.0, max_value=95.0, value=70.0, step=5.0, key="bt_leader_alloc_ratio")
         with bk2:
             bunker_mode = st.selectbox("방공호 방식", options=["70/20/10 방공호+부스터", "월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
             bunker_cash_rate = st.number_input("현금/단기채 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="bt_bunker_cash_rate")
         with bk3:
-            st.caption("시작 원금 1억을 대장주 70% + 방공호/부스터 30%로 나눠 통합자산/MDD를 계산합니다. 70/20/10은 방공호와 부스터를 분리합니다.")
-            st.caption("방공호 기본 후보: KODEX200, KOSDAQ150, 나스닥100 ETF, 금 ETF, 달러 ETF, 현금")
+            st.caption("시작 원금 1억을 대장주 70% + 진짜방공호 20% + 수익부스터 10%로 나눠 통합자산/MDD를 계산합니다.")
+            st.caption("진짜방공호: CASH/GOLD/DOLLAR 중심 · 수익부스터: KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR")
             st.caption("대장주 엔진은 현재 백테스트 총자산 곡선을 비중만큼 스케일합니다.")
 
         st.subheader("1-1) MDD -10% 수익확대 프리셋")
@@ -11020,7 +11020,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "손실쿨다운": loss_cooldown_mode,
                             "시장붕괴필터": market_collapse_mode,
                             "성장주붕괴필터": growth_collapse_mode,
-                            "방공호통합백테스트": enable_bunker_backtest,
+                            "방공호부스터통합백테스트": enable_bunker_backtest,
                             "대장주엔진비중": leader_alloc_ratio,
                             "방공호방식": bunker_mode,
                             "방공호현금연수익률": bunker_cash_rate,
@@ -11082,7 +11082,7 @@ elif menu == "6. 섹터전략 백테스트":
                                         st.error("방공호 듀얼모멘텀이 실제 적용되지 않았습니다. 전 기간 CASH:100%입니다. 방공호가격데이터자산수/데이터상태/모멘텀계산일수를 확인하세요.")
                                     else:
                                         st.caption(f"방공호 데이터자산 {bunker_summary.get('방공호가격데이터자산수', 0)}개 / 비현금 방공호일수 {bunker_summary.get('비현금방공호일수', 0)}일 / 마지막보유 {bunker_summary.get('마지막방공호보유', '')}")
-                                    with st.expander("70/30 방공호 통합 결과", expanded=False):
+                                    with st.expander("70/20/10 방공호+부스터 통합 결과", expanded=False):
                                         show_pinned_dataframe(bunker_summary_df, height=160)
                                         show_pinned_dataframe(bunker_daily_df.tail(80), height=300, pin_rank=False)
                             except Exception as e:
@@ -11105,9 +11105,9 @@ elif menu == "6. 섹터전략 백테스트":
                             zf.writestr(f"magic_split_sector_backtest_regime_{today_str()}.csv", regime_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_regime_daily_{today_str()}.csv", regime_daily_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_summary_df) > 0:
-                                zf.writestr(f"magic_split_bunker_7030_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                                zf.writestr(f"magic_split_bunker_702010_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_daily_df) > 0:
-                                zf.writestr(f"magic_split_bunker_7030_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                                zf.writestr(f"magic_split_bunker_702010_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
                                 try:
                                     # 방공호 데이터 로딩 상태를 별도 파일로도 저장
                                     if len(bunker_summary_df) > 0 and "방공호데이터상태" in bunker_summary_df.columns:
@@ -11115,7 +11115,7 @@ elif menu == "6. 섹터전략 백테스트":
                                         rows_status = []
                                         for part in status_text.split(" | "):
                                             rows_status.append({"상태": part})
-                                        zf.writestr(f"magic_split_bunker_7030_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                                        zf.writestr(f"magic_split_bunker_702010_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
                                 except Exception:
                                     pass
                         export_buffer.seek(0)
