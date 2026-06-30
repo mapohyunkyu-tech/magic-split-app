@@ -6008,11 +6008,15 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
 
 
 def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", gold_code="132030", dollar_code="261240"):
-    """대장주 엔진 + 방공호 엔진 70/30 통합 백테스트.
+    """대장주 엔진 + 방공호/부스터 통합 백테스트.
 
-    - 대장주 엔진은 현재 실행한 섹터전략 백테스트 총자산 곡선을 leader_ratio만큼 스케일한다.
-    - 방공호 엔진은 현금/금/달러/나스닥/시장 ETF를 월간 리밸런싱한다.
-    - 목적은 전략 과최적화가 아니라 전체 계좌 MDD 완충 효과를 보는 것이다.
+    지원 모드
+    - 월간 듀얼모멘텀 상위2: 기존 70% 대장주 + 30% 공격형 듀얼
+    - 정적 50/30/20: 기존 70% 대장주 + 30% 정적 방공호
+    - 현금/단기채만: 기존 70% 대장주 + 30% 현금
+    - 70/20/10 방공호+부스터: 70% 대장주 + 20% 진짜방공호(GOLD/DOLLAR/CASH) + 10% 공격형 듀얼부스터
+
+    목적은 대장주 엔진을 과최적화하지 않고, 전체 계좌 기준 MDD/수익률을 확인하는 것이다.
     """
     try:
         if daily_df is None or len(daily_df) == 0:
@@ -6023,11 +6027,22 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         df["기준일"] = pd.to_datetime(df["기준일"])
         df = df.sort_values("기준일").reset_index(drop=True)
         total_initial = float(total_initial or 100_000_000)
-        leader_ratio = float(leader_ratio or 0.70)
-        leader_ratio = min(0.95, max(0.05, leader_ratio))
-        bunker_ratio = 1.0 - leader_ratio
+        mode = str(mode or "월간 듀얼모멘텀 상위2")
+
+        split_702010 = ("70/20/10" in mode) or ("부스터" in mode)
+        if split_702010:
+            leader_ratio = 0.70
+            safe_ratio = 0.20
+            booster_ratio = 0.10
+        else:
+            leader_ratio = float(leader_ratio or 0.70)
+            leader_ratio = min(0.95, max(0.05, leader_ratio))
+            safe_ratio = 1.0 - leader_ratio
+            booster_ratio = 0.0
+
         leader_initial = total_initial * leader_ratio
-        bunker_initial = total_initial * bunker_ratio
+        safe_initial = total_initial * safe_ratio
+        booster_initial = total_initial * booster_ratio
         daily_total = pd.to_numeric(df["총자산"], errors="coerce").ffill().fillna(total_initial)
         base = float(daily_total.iloc[0]) if float(daily_total.iloc[0]) > 0 else total_initial
         df["대장주엔진평가금액"] = (daily_total / base) * leader_initial
@@ -6046,7 +6061,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         price_df, bunker_price_status_df = _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=True)
         loaded_assets = list(price_df.columns) if price_df is not None and len(price_df.columns) > 0 else []
         daily_rate = (1.0 + float(cash_annual_rate or 0.0) / 100.0) ** (1.0 / 252.0) - 1.0
-        mode = str(mode or "월간 듀얼모멘텀 상위2")
+
         static_weights = {
             "CASH": max(0.0, float(static_cash_weight or 0.0)),
             "GOLD": max(0.0, float(static_gold_weight or 0.0)),
@@ -6058,84 +6073,138 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             sw_sum = 100.0
         static_weights = {k: v / sw_sum for k, v in static_weights.items() if v > 0}
 
-        cash_value = bunker_initial
-        shares = {}
-        current_weights = {"CASH": 1.0}
-        last_month = None
-        rows = []
-        peak = total_initial
-        max_dd = 0.0
-        prev_date = None
-        rebalance_count = 0
+        def make_state(initial_value):
+            return {"cash": float(initial_value), "shares": {}, "weights": {"CASH": 1.0}, "last_month": None, "rebalances": 0}
 
-        def current_bunker_value(date):
-            val = float(cash_value)
+        safe_state = make_state(safe_initial)
+        booster_state = make_state(booster_initial)
+
+        def component_value(state, date):
+            val = float(state.get("cash", 0.0))
             if price_df is not None and len(price_df) > 0:
-                for asset, qty in shares.items():
+                for asset, qty in state.get("shares", {}).items():
                     if asset in price_df.columns:
                         part = price_df.loc[price_df.index <= pd.to_datetime(date), asset].dropna()
                         if len(part) > 0:
                             val += float(qty) * float(part.iloc[-1])
             return val
 
+        def rebalance_component(state, date, prev_date, component_mode, allowed_assets=None):
+            total_before = component_value(state, date)
+            state["cash"] = 0.0
+            state["shares"] = {}
+            allowed_assets = list(allowed_assets or [])
+
+            if component_mode == "cash":
+                weights = {"CASH": 1.0}
+            elif component_mode == "static":
+                weights = dict(static_weights)
+            elif component_mode == "defensive_dual":
+                # 진짜 방공호: 주식형 제외. GOLD/DOLLAR만 점수로 뽑고, 조건 미충족이면 CASH.
+                cols = [c for c in ["GOLD", "DOLLAR"] if price_df is not None and c in price_df.columns]
+                sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
+                asof = prev_date if prev_date is not None else date
+                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
+                if len(picks) == 0:
+                    weights = {"CASH": 1.0}
+                else:
+                    # 방공호는 최소 50% 현금 완충을 깔고, 나머지 50%를 GOLD/DOLLAR 상위자산에 배분한다.
+                    weights = {"CASH": 0.50}
+                    w = 0.50 / len(picks)
+                    for p in picks:
+                        weights[p] = weights.get(p, 0.0) + w
+            elif component_mode == "aggressive_dual":
+                cols = [c for c in ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR"] if price_df is not None and c in price_df.columns]
+                sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
+                asof = prev_date if prev_date is not None else date
+                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
+                if len(picks) == 0:
+                    weights = {"CASH": 1.0}
+                else:
+                    w = 1.0 / len(picks)
+                    weights = {p: w for p in picks}
+            else:
+                weights = {"CASH": 1.0}
+
+            for asset, w in weights.items():
+                alloc = float(total_before) * float(w)
+                if asset == "CASH" or asset not in loaded_assets or price_df is None or asset not in price_df.columns:
+                    state["cash"] += alloc
+                else:
+                    pxs = price_df.loc[price_df.index <= pd.to_datetime(date), asset].dropna()
+                    if len(pxs) == 0 or float(pxs.iloc[-1]) <= 0:
+                        state["cash"] += alloc
+                    else:
+                        state["shares"][asset] = state["shares"].get(asset, 0.0) + alloc / float(pxs.iloc[-1])
+            state["weights"] = weights
+            state["rebalances"] = int(state.get("rebalances", 0)) + 1
+            return state
+
+        rows = []
+        peak = total_initial
+        max_dd = 0.0
+        prev_date = None
+
         for i, date in enumerate(dates):
             date = pd.to_datetime(date)
             if i > 0:
-                cash_value *= (1.0 + daily_rate)
+                safe_state["cash"] *= (1.0 + daily_rate)
+                booster_state["cash"] *= (1.0 + daily_rate)
             month_key = date.strftime("%Y-%m")
-            need_rebalance = (last_month != month_key)
-            if need_rebalance:
-                # 리밸런싱 직전 평가 후 현재가로 새 비중 편성
-                total_bunker_before = current_bunker_value(date)
-                shares = {}
-                cash_value = 0.0
-                if mode == "정적 50/30/20":
-                    current_weights = dict(static_weights)
+
+            if safe_state.get("last_month") != month_key:
+                if split_702010:
+                    safe_mode = "defensive_dual"
+                elif mode == "정적 50/30/20":
+                    safe_mode = "static"
                 elif mode == "현금/단기채만":
-                    current_weights = {"CASH": 1.0}
+                    safe_mode = "cash"
                 else:
-                    asof = prev_date if prev_date is not None else date
-                    picks, pick_detail = _bt_pick_bunker_dual_momentum(price_df, asof, max_assets=2, return_detail=True)
-                    if len(picks) == 0:
-                        current_weights = {"CASH": 1.0}
-                    else:
-                        w = 1.0 / len(picks)
-                        current_weights = {p: w for p in picks}
-                for asset, w in current_weights.items():
-                    alloc = float(total_bunker_before) * float(w)
-                    if asset == "CASH" or asset not in price_df.columns:
-                        cash_value += alloc
-                    else:
-                        pxs = price_df.loc[price_df.index <= date, asset].dropna()
-                        if len(pxs) == 0 or float(pxs.iloc[-1]) <= 0:
-                            cash_value += alloc
-                        else:
-                            shares[asset] = alloc / float(pxs.iloc[-1])
-                last_month = month_key
-                rebalance_count += 1
-            bunker_val = current_bunker_value(date)
+                    safe_mode = "aggressive_dual"
+                safe_state = rebalance_component(safe_state, date, prev_date, safe_mode)
+                safe_state["last_month"] = month_key
+
+            if booster_ratio > 0 and booster_state.get("last_month") != month_key:
+                booster_state = rebalance_component(booster_state, date, prev_date, "aggressive_dual")
+                booster_state["last_month"] = month_key
+
+            safe_val = component_value(safe_state, date)
+            booster_val = component_value(booster_state, date) if booster_ratio > 0 else 0.0
+            bunker_val = safe_val + booster_val
             leader_val = float(df.loc[i, "대장주엔진평가금액"])
             combined = leader_val + bunker_val
             peak = max(float(peak), float(combined))
             dd = (combined / peak - 1.0) * 100.0 if peak > 0 else 0.0
             max_dd = min(float(max_dd), float(dd))
+
+            safe_hold = ",".join([f"{k}:{round(v*100)}%" for k, v in safe_state.get("weights", {}).items()])
+            booster_hold = ",".join([f"{k}:{round(v*100)}%" for k, v in booster_state.get("weights", {}).items()]) if booster_ratio > 0 else ""
+            combined_hold = safe_hold if booster_ratio <= 0 else f"방공호[{safe_hold}] / 부스터[{booster_hold}]"
+
             rows.append({
                 "기준일": date.strftime("%Y-%m-%d"),
                 "대장주엔진평가금액": round(leader_val),
+                "진짜방공호평가금액": round(safe_val),
+                "수익부스터평가금액": round(booster_val),
                 "방공호평가금액": round(bunker_val),
                 "통합총자산": round(combined),
                 "통합수익률": round((combined / total_initial - 1.0) * 100.0, 2),
                 "통합MDD": round(dd, 2),
-                "방공호보유": ",".join([f"{k}:{round(v*100)}%" for k, v in current_weights.items()]),
+                "방공호보유": combined_hold,
+                "진짜방공호보유": safe_hold,
+                "수익부스터보유": booster_hold,
                 "방공호데이터자산수": len(loaded_assets),
                 "방공호데이터자산": ",".join(loaded_assets),
                 "방공호모드": mode,
             })
             prev_date = date
+
         out = pd.DataFrame(rows)
         if len(out) == 0:
             return out, {"오류": "방공호 결과가 없습니다."}
         final_total = float(out["통합총자산"].iloc[-1])
+        safe_final = float(out["진짜방공호평가금액"].iloc[-1]) if "진짜방공호평가금액" in out.columns else 0.0
+        booster_final = float(out["수익부스터평가금액"].iloc[-1]) if "수익부스터평가금액" in out.columns else 0.0
         bunker_final = float(out["방공호평가금액"].iloc[-1])
         leader_final = float(out["대장주엔진평가금액"].iloc[-1])
         cash_days = int(out["방공호보유"].astype(str).str.contains("CASH:100%", regex=False).sum()) if "방공호보유" in out.columns else 0
@@ -6150,24 +6219,29 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "방공호전략": mode,
             "초기총자금": round(total_initial),
             "대장주비중": round(leader_ratio * 100, 1),
-            "방공호비중": round(bunker_ratio * 100, 1),
+            "방공호비중": round(safe_ratio * 100, 1),
+            "수익부스터비중": round(booster_ratio * 100, 1),
             "대장주초기금액": round(leader_initial),
-            "방공호초기금액": round(bunker_initial),
+            "방공호초기금액": round(safe_initial),
+            "수익부스터초기금액": round(booster_initial),
             "최종대장주엔진": round(leader_final),
+            "최종진짜방공호": round(safe_final),
+            "최종수익부스터": round(booster_final),
             "최종방공호": round(bunker_final),
             "최종통합총자산": round(final_total),
             "통합총수익률": round((final_total / total_initial - 1.0) * 100.0, 2),
             "통합최대낙폭": round(float(out["통합MDD"].min()), 2),
-            "리밸런싱횟수": rebalance_count,
+            "리밸런싱횟수": int(safe_state.get("rebalances", 0)) + int(booster_state.get("rebalances", 0)),
             "현금연수익률가정": float(cash_annual_rate or 0.0),
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}",
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
+            "모멘텀계산일수": int(len(price_df)) if price_df is not None else 0,
             "CASH100일수": cash_days,
             "비현금방공호일수": noncash_days,
             "마지막방공호보유": str(out["방공호보유"].iloc[-1]) if len(out) else "",
             "방공호데이터상태": status_text,
-            "메모": "대장주 엔진 일별 총자산 곡선을 70%로 스케일하고, 30% 방공호를 별도 월간 리밸런싱으로 합산한 통합 백테스트입니다. 듀얼 선택 시 방공호보유가 전 기간 CASH:100%이면 가격데이터 로딩 실패/모멘텀 미충족으로 봅니다.",
+            "메모": "70/20/10 모드는 대장주 70%, 진짜방공호 20%(CASH 50% + GOLD/DOLLAR 방어듀얼 50%), 수익부스터 10%(KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격듀얼)를 분리 계산합니다.",
         }
         return out, summary
     except Exception as e:
@@ -10607,10 +10681,10 @@ elif menu == "6. 섹터전략 백테스트":
             enable_bunker_backtest = st.checkbox("70/30 방공호 같이 계산", value=False, key="bt_enable_bunker_7030")
             leader_alloc_ratio = st.number_input("대장주 엔진 비중(%)", min_value=10.0, max_value=95.0, value=70.0, step=5.0, key="bt_leader_alloc_ratio")
         with bk2:
-            bunker_mode = st.selectbox("방공호 방식", options=["월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
+            bunker_mode = st.selectbox("방공호 방식", options=["70/20/10 방공호+부스터", "월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
             bunker_cash_rate = st.number_input("현금/단기채 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="bt_bunker_cash_rate")
         with bk3:
-            st.caption("시작 원금 1억을 대장주 70% + 방공호 30%로 나눠 통합자산/MDD를 계산합니다.")
+            st.caption("시작 원금 1억을 대장주 70% + 방공호/부스터 30%로 나눠 통합자산/MDD를 계산합니다. 70/20/10은 방공호와 부스터를 분리합니다.")
             st.caption("방공호 기본 후보: KODEX200, KOSDAQ150, 나스닥100 ETF, 금 ETF, 달러 ETF, 현금")
             st.caption("대장주 엔진은 현재 백테스트 총자산 곡선을 비중만큼 스케일합니다.")
 
