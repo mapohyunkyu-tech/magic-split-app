@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_NAME_FIX_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -423,9 +423,27 @@ NAME_ALIAS = {
     "금호석화": "금호석유",
     "DB하이텍": "DB하이텍",
     "디비하이텍": "DB하이텍",
+    "삼성sdi": "삼성SDI",
+    "삼성SDI": "삼성SDI",
+    "삼성에스디아이": "삼성SDI",
+    "삼성ssi": "삼성SDI",
+    "sdi": "삼성SDI",
+    "SDI": "삼성SDI",
+    "ssi": "삼성SDI",
+    "SSI": "삼성SDI",
 }
 
 MANUAL_CODE_MAP = {
+    "삼성SDI": ("006400", "삼성SDI"),
+    "삼성sdi": ("006400", "삼성SDI"),
+    "삼성에스디아이": ("006400", "삼성SDI"),
+    "삼성ssi": ("006400", "삼성SDI"),
+    "sdi": ("006400", "삼성SDI"),
+    "SDI": ("006400", "삼성SDI"),
+    "ssi": ("006400", "삼성SDI"),
+    "SSI": ("006400", "삼성SDI"),
+    "006400": ("006400", "삼성SDI"),
+    "삼성SDI 006400": ("006400", "삼성SDI"),
     "DB하이텍": ("000990", "DB하이텍"),
     "디비하이텍": ("000990", "DB하이텍"),
     "DB하이텍 000990": ("000990", "DB하이텍"),
@@ -10610,6 +10628,87 @@ elif menu == "8. 실전 보유장부":
             return "사지마"
         return a if a else "대기"
 
+    def _norm_live_stock_text(v):
+        # 한글/영문 혼합 종목명 입력을 안정적으로 비교한다. 삼성sdi, 삼성SDI, 삼성ssi 같은 오타도 같은 키로 본다.
+        t = str(v or "").strip()
+        t = re.sub(r"\s+", "", t)
+        t = t.replace("㈜", "").replace("주식회사", "")
+        return t.upper()
+
+    LIVE_STOCK_ALIAS = {
+        "삼성SDI": ("006400", "삼성SDI", "2차전지"),
+        "삼성에스디아이": ("006400", "삼성SDI", "2차전지"),
+        "삼성SSI": ("006400", "삼성SDI", "2차전지"),
+        "SDI": ("006400", "삼성SDI", "2차전지"),
+        "SSI": ("006400", "삼성SDI", "2차전지"),
+        "006400": ("006400", "삼성SDI", "2차전지"),
+    }
+
+    def _resolve_live_stock_input(input_code, input_name, input_sector=""):
+        """
+        실전 보유장부 입력용 종목 확인.
+        - 코드가 있으면 코드 우선
+        - 종목명은 정확 매칭 우선
+        - 대표주 유니버스 → KRX 순서로 확인
+        - 못 찾으면 저장하지 않도록 None 반환
+        """
+        raw_code = str(input_code or "").strip()
+        raw_name = str(input_name or "").strip()
+        raw_sector = str(input_sector or "").strip()
+
+        code_match = re.search(r"\b\d{6}\b", raw_code) or re.search(r"\b\d{6}\b", raw_name)
+        if code_match:
+            code = code_match.group(0).zfill(6)
+            # 대표주 유니버스 코드 우선
+            try:
+                ldf = load_sector_leader_df()
+                if len(ldf) > 0:
+                    hit = ldf[ldf["코드"].astype(str).str.zfill(6) == code]
+                    if len(hit) > 0:
+                        r = hit.iloc[0]
+                        return {"코드": code, "종목": str(r.get("종목", raw_name)).strip(), "섹터": str(r.get("섹터", raw_sector)).strip()}
+            except Exception:
+                pass
+            # KRX 코드 확인
+            try:
+                krx = load_krx_master_fdr()
+                hit = krx[krx["Code"].astype(str).str.zfill(6) == code] if len(krx) > 0 else pd.DataFrame()
+                if len(hit) > 0:
+                    return {"코드": code, "종목": str(hit.iloc[0].get("Name", raw_name)).strip(), "섹터": raw_sector}
+            except Exception:
+                pass
+            return {"코드": code, "종목": raw_name or code, "섹터": raw_sector}
+
+        key = _norm_live_stock_text(raw_name)
+        if key in LIVE_STOCK_ALIAS:
+            code, name, sector = LIVE_STOCK_ALIAS[key]
+            return {"코드": code, "종목": name, "섹터": raw_sector or sector}
+
+        # 대표주 유니버스 종목명 정확 매칭 우선
+        try:
+            ldf = load_sector_leader_df()
+            if len(ldf) > 0:
+                tmp = ldf.copy()
+                tmp["_norm"] = tmp["종목"].astype(str).map(_norm_live_stock_text)
+                hit = tmp[tmp["_norm"] == key]
+                if len(hit) == 0 and key:
+                    hit = tmp[tmp["_norm"].str.contains(key, regex=False, na=False)]
+                if len(hit) > 0:
+                    r = hit.iloc[0]
+                    return {"코드": str(r.get("코드", "")).zfill(6), "종목": str(r.get("종목", raw_name)).strip(), "섹터": raw_sector or str(r.get("섹터", "")).strip()}
+        except Exception:
+            pass
+
+        # KRX 종목명 확인
+        try:
+            krx = load_krx_master_fdr()
+            found = find_stock_by_name(raw_name, krx) if len(krx) > 0 else None
+            if found:
+                return {"코드": str(found.get("코드", "")).zfill(6), "종목": str(found.get("종목", raw_name)).strip(), "섹터": raw_sector}
+        except Exception:
+            pass
+        return None
+
     if "live_holdings_df" not in st.session_state:
         st.session_state["live_holdings_df"] = _empty_holdings_df()
     if "live_sell_df" not in st.session_state:
@@ -10635,7 +10734,7 @@ elif menu == "8. 실전 보유장부":
                 st.error(f"매도기록 불러오기 실패: {e}")
 
     st.subheader("2) 매수 기록 추가")
-    st.caption("오늘 산 종목은 여기 입력합니다. 예: 삼성SDI / 1차 / 매수가 / 900만원 / 몇 주")
+    st.caption("오늘 산 종목은 여기 입력합니다. 예: 삼성SDI / 1차 / 매수가 / 900만원 / 몇 주. 종목명은 저장 전 자동으로 정식명/코드로 보정합니다.")
     with st.form("add_live_buy_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -10658,17 +10757,23 @@ elif menu == "8. 실전 보유장부":
             buy_memo = st.text_input("메모", value="", placeholder="예: 실전 운영판 사라 신호", key="ledger_buy_memo")
         submitted = st.form_submit_button("매수 기록 추가", type="primary")
         if submitted:
-            if not buy_name.strip():
-                st.error("종목명은 필수입니다.")
+            resolved_stock = _resolve_live_stock_input(buy_code, buy_name, buy_sector)
+            if not str(buy_name).strip() and not str(buy_code).strip():
+                st.error("종목명 또는 코드는 필수입니다.")
+            elif resolved_stock is None:
+                st.error("종목을 확인하지 못했습니다. 예: 삼성SDI 또는 006400처럼 입력하세요. 잘못 저장하지 않도록 추가를 막았습니다.")
             elif buy_qty <= 0:
                 st.error("매수주수는 1주 이상이어야 합니다.")
             else:
                 actual_amount = int(round(float(buy_price) * int(buy_qty))) if buy_price > 0 else int(buy_amount)
+                fixed_code = str(resolved_stock.get("코드", "")).zfill(6)
+                fixed_name = str(resolved_stock.get("종목", buy_name)).strip()
+                fixed_sector = str(resolved_stock.get("섹터", buy_sector)).strip()
                 new_row = pd.DataFrame([{
                     "매수일": str(buy_date),
-                    "코드": str(buy_code).strip(),
-                    "종목": str(buy_name).strip(),
-                    "섹터": str(buy_sector).strip(),
+                    "코드": fixed_code,
+                    "종목": fixed_name,
+                    "섹터": fixed_sector,
                     "매수역할": str(buy_role),
                     "차수": int(buy_round),
                     "매수가": float(buy_price),
@@ -10677,7 +10782,7 @@ elif menu == "8. 실전 보유장부":
                     "메모": str(buy_memo),
                 }])
                 st.session_state["live_holdings_df"] = _clean_holdings_df(pd.concat([st.session_state["live_holdings_df"], new_row], ignore_index=True))
-                st.success(f"{buy_name} {buy_round}차 {buy_qty}주 기록 완료")
+                st.success(f"{fixed_name}({fixed_code}) {buy_round}차 {buy_qty}주 기록 완료")
 
     holdings_df = _clean_holdings_df(st.session_state["live_holdings_df"])
     sell_df = _clean_sell_df(st.session_state["live_sell_df"])
@@ -10845,7 +10950,7 @@ else:
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
 - `6. 섹터전략 백테스트` 메뉴는 현재 1등 실전 세팅을 기본값으로 시작합니다. 720거래일 스트레스 검증과 월별/장세별 결과표를 제공합니다.
 - `7. 실전 운영판` 메뉴를 추가했습니다. 최종 후보 세팅과 오늘 섹터/대표주 행동값을 한 화면에서 확인합니다.
-- `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다.
+- `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다. 삼성SDI처럼 영문 혼합 종목명은 정식명/코드로 자동 보정합니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
