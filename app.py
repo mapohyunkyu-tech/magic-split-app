@@ -12,6 +12,7 @@ import time
 import zipfile
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -26,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_NAME_FIX_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_PERSIST_FIX_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10596,6 +10597,40 @@ elif menu == "8. 실전 보유장부":
         df["매도주수"] = df["매도주수"].astype(int)
         return df
 
+    # 새 버전으로 갈아껴도 보유장부가 날아가지 않도록 앱 폴더 밖에 자동 저장한다.
+    LIVE_DATA_DIR = Path.home() / "MagicSplitData"
+    LIVE_HOLDING_PATH = LIVE_DATA_DIR / "magic_split_live_holding_ledger.csv"
+    LIVE_SELL_PATH = LIVE_DATA_DIR / "magic_split_live_sell_history.csv"
+
+    def _read_csv_safe(path):
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig")
+        except Exception:
+            try:
+                return pd.read_csv(path)
+            except Exception:
+                return None
+
+    def _ensure_live_data_dir():
+        try:
+            LIVE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    def _load_live_ledgers_from_disk():
+        _ensure_live_data_dir()
+        hold = _read_csv_safe(LIVE_HOLDING_PATH) if LIVE_HOLDING_PATH.exists() else None
+        sell = _read_csv_safe(LIVE_SELL_PATH) if LIVE_SELL_PATH.exists() else None
+        return _clean_holdings_df(hold), _clean_sell_df(sell)
+
+    def _save_live_ledgers_to_disk(holdings_df=None, sell_df=None):
+        _ensure_live_data_dir()
+        h = _clean_holdings_df(holdings_df if holdings_df is not None else st.session_state.get("live_holdings_df", _empty_holdings_df()))
+        s = _clean_sell_df(sell_df if sell_df is not None else st.session_state.get("live_sell_df", _empty_sell_df()))
+        h.to_csv(LIVE_HOLDING_PATH, index=False, encoding="utf-8-sig")
+        s.to_csv(LIVE_SELL_PATH, index=False, encoding="utf-8-sig")
+        return str(LIVE_DATA_DIR)
+
     def _holding_summary(df):
         df = _clean_holdings_df(df)
         df = df[df["보유주수"] > 0].copy()
@@ -10709,19 +10744,23 @@ elif menu == "8. 실전 보유장부":
             pass
         return None
 
-    if "live_holdings_df" not in st.session_state:
-        st.session_state["live_holdings_df"] = _empty_holdings_df()
-    if "live_sell_df" not in st.session_state:
-        st.session_state["live_sell_df"] = _empty_sell_df()
+    if "live_holdings_df" not in st.session_state or "live_sell_df" not in st.session_state:
+        disk_hold, disk_sell = _load_live_ledgers_from_disk()
+        if "live_holdings_df" not in st.session_state:
+            st.session_state["live_holdings_df"] = disk_hold
+        if "live_sell_df" not in st.session_state:
+            st.session_state["live_sell_df"] = disk_sell
 
     st.subheader("1) 장부 불러오기/저장")
+    st.caption(f"자동저장 위치: {LIVE_DATA_DIR}  | 새 버전으로 바꿔도 이 폴더의 장부를 자동으로 불러옵니다.")
     up_c1, up_c2 = st.columns(2)
     with up_c1:
         holding_upload = st.file_uploader("기존 보유장부 CSV 불러오기", type=["csv"], key="holding_ledger_upload")
         if holding_upload is not None and st.button("보유장부 불러오기", key="load_holding_ledger"):
             try:
                 st.session_state["live_holdings_df"] = _clean_holdings_df(pd.read_csv(holding_upload))
-                st.success("보유장부를 불러왔습니다.")
+                _save_live_ledgers_to_disk()
+                st.success("보유장부를 불러왔고 자동저장했습니다.")
             except Exception as e:
                 st.error(f"보유장부 불러오기 실패: {e}")
     with up_c2:
@@ -10729,9 +10768,22 @@ elif menu == "8. 실전 보유장부":
         if sell_upload is not None and st.button("매도기록 불러오기", key="load_sell_history"):
             try:
                 st.session_state["live_sell_df"] = _clean_sell_df(pd.read_csv(sell_upload))
-                st.success("매도기록을 불러왔습니다.")
+                _save_live_ledgers_to_disk()
+                st.success("매도기록을 불러왔고 자동저장했습니다.")
             except Exception as e:
                 st.error(f"매도기록 불러오기 실패: {e}")
+
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        if st.button("현재 장부 즉시 자동저장", key="save_live_ledgers_disk"):
+            saved_dir = _save_live_ledgers_to_disk()
+            st.success(f"저장 완료: {saved_dir}")
+    with bc2:
+        if st.button("자동저장 파일 다시 불러오기", key="reload_live_ledgers_disk"):
+            disk_hold, disk_sell = _load_live_ledgers_from_disk()
+            st.session_state["live_holdings_df"] = disk_hold
+            st.session_state["live_sell_df"] = disk_sell
+            st.success("자동저장 장부를 다시 불러왔습니다.")
 
     st.subheader("2) 매수 기록 추가")
     st.caption("오늘 산 종목은 여기 입력합니다. 예: 삼성SDI / 1차 / 매수가 / 900만원 / 몇 주. 종목명은 저장 전 자동으로 정식명/코드로 보정합니다.")
@@ -10782,7 +10834,8 @@ elif menu == "8. 실전 보유장부":
                     "메모": str(buy_memo),
                 }])
                 st.session_state["live_holdings_df"] = _clean_holdings_df(pd.concat([st.session_state["live_holdings_df"], new_row], ignore_index=True))
-                st.success(f"{fixed_name}({fixed_code}) {buy_round}차 {buy_qty}주 기록 완료")
+                _save_live_ledgers_to_disk()
+                st.success(f"{fixed_name}({fixed_code}) {buy_round}차 {buy_qty}주 기록 완료 / 자동저장 완료")
 
     holdings_df = _clean_holdings_df(st.session_state["live_holdings_df"])
     sell_df = _clean_sell_df(st.session_state["live_sell_df"])
@@ -10803,13 +10856,15 @@ elif menu == "8. 실전 보유장부":
         with cc1:
             if st.button("수정 내용 저장", key="save_edited_holdings"):
                 st.session_state["live_holdings_df"] = _clean_holdings_df(edited.drop(columns=["삭제"], errors="ignore"))
-                st.success("수정 내용을 저장했습니다.")
+                _save_live_ledgers_to_disk()
+                st.success("수정 내용을 저장했고 자동저장했습니다.")
         with cc2:
             if st.button("삭제 체크 행 제거", key="delete_checked_holdings"):
                 if "삭제" in edited.columns:
                     kept = edited[edited["삭제"] != True].drop(columns=["삭제"], errors="ignore")
                     st.session_state["live_holdings_df"] = _clean_holdings_df(kept)
-                    st.success("삭제했습니다.")
+                    _save_live_ledgers_to_disk()
+                    st.success("삭제했고 자동저장했습니다.")
 
     st.subheader("4) 오늘 신호와 보유 종목 매칭")
     st.caption("7번 실전 운영판에서 받은 `magic_split_live_stock_action_날짜.csv`를 올리면, 보유 중인 종목만 팔아라/줄여라/대기 형태로 보여줍니다.")
@@ -10916,7 +10971,8 @@ elif menu == "8. 실전 보유장부":
                         "메모": str(sell_memo),
                     }])
                     st.session_state["live_sell_df"] = _clean_sell_df(pd.concat([st.session_state["live_sell_df"], new_sell], ignore_index=True))
-                    st.success(f"{sel_name} {sell_type} {sell_qty}주 기록 완료")
+                    _save_live_ledgers_to_disk()
+                    st.success(f"{sel_name} {sell_type} {sell_qty}주 기록 완료 / 자동저장 완료")
 
     st.subheader("6) 다운로드")
     holdings_df = _clean_holdings_df(st.session_state["live_holdings_df"])
@@ -10950,7 +11006,7 @@ else:
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
 - `6. 섹터전략 백테스트` 메뉴는 현재 1등 실전 세팅을 기본값으로 시작합니다. 720거래일 스트레스 검증과 월별/장세별 결과표를 제공합니다.
 - `7. 실전 운영판` 메뉴를 추가했습니다. 최종 후보 세팅과 오늘 섹터/대표주 행동값을 한 화면에서 확인합니다.
-- `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다. 삼성SDI처럼 영문 혼합 종목명은 정식명/코드로 자동 보정합니다.
+- `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다. 삼성SDI처럼 영문 혼합 종목명은 정식명/코드로 자동 보정하고, 보유장부는 홈 폴더의 MagicSplitData에 자동저장되어 새 버전에서도 유지됩니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
