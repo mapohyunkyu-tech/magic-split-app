@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_BACKTEST_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_DATA_FIX_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5692,70 +5692,117 @@ def _bt_growth_collapse_state(growth_df, asof_date, mode="OFF"):
 
 
 
+def _split_bunker_code_candidates(code_expr):
+    """방공호 자산 코드 후보를 여러 개로 받는다.
+
+    예: "133690|379810|QQQ" 처럼 들어오면 순서대로 시도한다.
+    기존 단일 코드가 실패하면 전 기간 CASH:100%로 떨어지는 문제가 있어서
+    국내 ETF 대체코드 + 해외 ETF 티커까지 같이 시도한다.
+    """
+    raw = str(code_expr or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"[|,;/\\]+", raw)
+    out = []
+    for x in parts:
+        x = str(x or "").strip()
+        if not x:
+            continue
+        if x not in out:
+            out.append(x)
+    return out
+
+
 def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
     """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열.
 
-    기존 버전은 ETF 데이터 로딩 실패 시 조용히 빈 시리즈를 반환했고,
-    그 결과 듀얼모멘텀을 선택해도 전 기간 CASH:100%로 떨어지는 문제가 있었다.
-    이 버전은 FDR 원본 Close 컬럼을 우선 사용하고, 실패 시에만 보조 변환을 쓴다.
+    국내 ETF는 6자리 코드로, 해외 ETF/환율 대체값은 원문 코드로 시도한다.
+    실패하면 빈 시리즈를 반환한다.
     """
     try:
         raw_code = str(code or "").strip()
         if not raw_code:
             return pd.Series(dtype=float)
-        # 국내 ETF/종목은 6자리. 해외 지수/티커 확장 가능성을 위해 비숫자 코드는 zfill하지 않는다.
-        code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
-        if code == "000000":
+        code2 = raw_code.zfill(6) if raw_code.isdigit() else raw_code
+        if code2 == "000000":
             return pd.Series(dtype=float)
-        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 80)).strftime("%Y%m%d")
+        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 120)).strftime("%Y%m%d")
         end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
-        raw = get_ohlcv_fdr_cached(code, start_pad, end_pad)
+
+        # 1차: 앱 공통 FDR 캐시. 국내 ETF/해외 티커 모두 우선 이 경로로 시도한다.
+        raw = get_ohlcv_fdr_cached(code2, start_pad, end_pad)
+        if raw is None or len(raw) == 0:
+            # 2차: FDR 직접 호출. get_ohlcv_fdr_cached가 6자리 zfill을 강제하므로
+            # QQQ/GLD 같은 비숫자 티커는 직접 호출 백업이 필요하다.
+            try:
+                start = pd.to_datetime(str(start_pad)).strftime("%Y-%m-%d")
+                end = pd.to_datetime(str(end_pad)).strftime("%Y-%m-%d")
+                raw = fdr.DataReader(code2, start, end)
+            except Exception:
+                raw = pd.DataFrame()
         if raw is None or len(raw) == 0:
             return pd.Series(dtype=float)
 
-        # 1순위: FDR 원본 Close/close/종가를 그대로 사용
         close = _ohlcv_close_series(raw)
         if close is None or len(close) == 0:
-            # 2순위: 앱 내부 보조 정규화
             df = _bt_prepare_single_price_df(raw)
             if df is None or len(df) == 0 or "close" not in df.columns:
                 return pd.Series(dtype=float)
             close = pd.to_numeric(df.get("close", np.nan), errors="coerce").dropna()
         close.index = pd.to_datetime(close.index)
         close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
-        close.name = code
+        close.name = code2
         return close
     except Exception:
         return pd.Series(dtype=float)
 
 
+def _bt_load_bunker_close_series_any(code_expr, start_date, end_date, lookback_days=260):
+    """여러 대체코드를 순서대로 시도하고 첫 성공 시리즈와 실제 사용코드를 반환한다."""
+    tried = []
+    for code in _split_bunker_code_candidates(code_expr):
+        tried.append(code)
+        s = _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            return s, code, tried
+    return pd.Series(dtype=float), "", tried
+
+
 def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=False):
     """방공호 후보 자산의 종가 테이블. 날짜는 대장주 백테스트 거래일에 맞춘다.
 
-    return_status=True이면 후보별 로딩 상태를 함께 반환한다.
+    후보 자산별로 여러 ETF/티커 대체코드를 시도한다. 실패 시 어떤 코드를 시도했는지
+    상태표에 남겨 CASH:100% 원인을 바로 볼 수 있게 한다.
     """
     status = []
     try:
         date_index = pd.to_datetime(pd.Series(dates).dropna().unique()).sort_values()
         price_df = pd.DataFrame(index=date_index)
         for item in candidates:
-            code = str(item.get("code", "")).strip()
-            name = str(item.get("name", code)).strip()
+            code_expr = str(item.get("code", "")).strip()
+            name = str(item.get("name", code_expr)).strip()
             if str(item.get("type", "asset")) == "cash":
                 continue
-            s = _bt_load_bunker_close_series(code, start_date, end_date)
+            s, used_code, tried = _bt_load_bunker_close_series_any(code_expr, start_date, end_date)
             if len(s) == 0:
-                status.append({"자산": name, "코드": code, "상태": "실패", "원본행수": 0, "사용가능일수": 0})
+                status.append({"자산": name, "코드": code_expr, "사용코드": "", "시도코드": "/".join(tried), "상태": "실패", "원본행수": 0, "사용가능일수": 0})
                 continue
             aligned = s.reindex(price_df.index, method="ffill")
             aligned = pd.to_numeric(aligned, errors="coerce")
+            # 시작 이전 패딩 구간만 있고 실제 검증일엔 값이 없으면 실패 처리한다.
+            usable_days = int(aligned.notna().sum())
+            if usable_days <= 0:
+                status.append({"자산": name, "코드": code_expr, "사용코드": used_code, "시도코드": "/".join(tried), "상태": "실패", "원본행수": int(len(s)), "사용가능일수": 0})
+                continue
             price_df[name] = aligned
             status.append({
                 "자산": name,
-                "코드": code,
-                "상태": "성공" if int(aligned.notna().sum()) > 0 else "실패",
+                "코드": code_expr,
+                "사용코드": used_code,
+                "시도코드": "/".join(tried),
+                "상태": "성공",
                 "원본행수": int(len(s)),
-                "사용가능일수": int(aligned.notna().sum()),
+                "사용가능일수": usable_days,
                 "첫데이터일": s.index.min().strftime("%Y-%m-%d") if len(s) else "",
                 "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if len(s) else "",
             })
@@ -5764,7 +5811,7 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
         return price_df
     except Exception as e:
         if return_status:
-            status.append({"자산": "전체", "코드": "", "상태": f"오류:{e}", "원본행수": 0, "사용가능일수": 0})
+            status.append({"자산": "전체", "코드": "", "사용코드": "", "시도코드": "", "상태": f"오류:{e}", "원본행수": 0, "사용가능일수": 0})
             return pd.DataFrame(), pd.DataFrame(status)
         return pd.DataFrame()
 
@@ -5813,6 +5860,18 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
                 rows.append(d)
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         picks = [r["asset"] for r in rows[:int(max_assets)]]
+
+        # 듀얼모멘텀 현실 보정:
+        # MA 조건 때문에 전 자산이 탈락하면 전 기간 CASH가 될 수 있다.
+        # 데이터는 있는데 추세선 조건만 애매한 경우에는 점수 양수 상위 자산을 보조 선택한다.
+        if len(picks) == 0:
+            fallback = []
+            for d in detail_rows:
+                sc = d.get("score", np.nan)
+                if not pd.isna(sc) and float(sc) > 0:
+                    fallback.append(d)
+            fallback = sorted(fallback, key=lambda x: x.get("score", -999), reverse=True)
+            picks = [r["asset"] for r in fallback[:int(max_assets)]]
     except Exception:
         picks = []
     if return_detail:
@@ -5849,11 +5908,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         end_date = df["기준일"].iloc[-1]
         dates = list(df["기준일"])
         candidates = [
-            {"name": "KODEX200", "code": kodex200_code, "type": "asset"},
-            {"name": "KOSDAQ150", "code": kosdaq150_code, "type": "asset"},
-            {"name": "NASDAQ100", "code": nasdaq_code, "type": "asset"},
-            {"name": "GOLD", "code": gold_code, "type": "asset"},
-            {"name": "DOLLAR", "code": dollar_code, "type": "asset"},
+            {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset"},
+            {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset"},
+            {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170|QQQ", "type": "asset"},
+            {"name": "GOLD", "code": f"{gold_code}|132030|319640|GLD", "type": "asset"},
+            {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset"},
             {"name": "CASH", "code": "", "type": "cash"},
         ]
         price_df, bunker_price_status_df = _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=True)
@@ -10847,6 +10906,16 @@ elif menu == "6. 섹터전략 백테스트":
                                 zf.writestr(f"magic_split_bunker_7030_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_daily_df) > 0:
                                 zf.writestr(f"magic_split_bunker_7030_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                                try:
+                                    # 방공호 데이터 로딩 상태를 별도 파일로도 저장
+                                    if len(bunker_summary_df) > 0 and "방공호데이터상태" in bunker_summary_df.columns:
+                                        status_text = str(bunker_summary_df["방공호데이터상태"].iloc[0])
+                                        rows_status = []
+                                        for part in status_text.split(" | "):
+                                            rows_status.append({"상태": part})
+                                        zf.writestr(f"magic_split_bunker_7030_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                                except Exception:
+                                    pass
                         export_buffer.seek(0)
 
                         st.download_button(
