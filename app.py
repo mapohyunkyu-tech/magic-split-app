@@ -26,7 +26,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_EMERGENCY_RISK_20260629"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_HOLDING_LEDGER_20260629"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -198,7 +198,7 @@ def _ensure_sector_flow_text_columns(df):
 # 섹터전략 백테스트 전용 컬럼.
 # 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
 SECTOR_BACKTEST_DAILY_COLUMNS = [
-    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "긴급위험모드", "긴급위험발동", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
+    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
     "누적실현손익", "일일손익", "최대낙폭", "보유종목수", "매수건수", "매도건수", "메모"
 ]
 
@@ -4751,61 +4751,6 @@ def _build_sector_rotation_flow_from_map(active, price_map, asof_date, dynamic_r
     result_df = result_df[SECTOR_FLOW_RESULT_COLUMNS]
     return result_df, stock_df, {"대표주": int(len(stock_df)), "거래대금계산대표주": int(len(valid)), "섹터": int(sector_n)}
 
-
-def _bt_benchmark_row_on_date(benchmark_df, asof_date):
-    """KODEX200 기준 해당일 벤치마크 행을 반환한다."""
-    try:
-        if benchmark_df is None or len(benchmark_df) == 0:
-            return None
-        target = pd.to_datetime(asof_date)
-        part = benchmark_df[benchmark_df.index <= target].copy()
-        if len(part) == 0:
-            return None
-        return part.iloc[-1]
-    except Exception:
-        return None
-
-
-def _bt_emergency_risk_state(benchmark_df, asof_date, market_regime, mode="OFF"):
-    """긴급위험모드: 매도는 유지하고 신규/추가매수만 차단한다.
-
-    백테스트는 결과를 보고 악재 날짜를 빼는 방식이 아니라, 신호일에 이미 알 수 있는 KODEX200 일간/20일 수익률과 장세만 사용한다.
-    """
-    mode = str(mode or "OFF")
-    if mode in {"OFF", "사용안함", "없음"}:
-        return False, 1.0, ""
-    row = _bt_benchmark_row_on_date(benchmark_df, asof_date)
-    day_ret = 0.0
-    ret20 = np.nan
-    try:
-        if row is not None:
-            day_ret = float(row.get("day_ret", 0) or 0)
-            ret20 = float(row.get("ret20", np.nan))
-    except Exception:
-        day_ret = 0.0
-        ret20 = np.nan
-    regime = str(market_regime or "장세불명")
-    active = False
-    reason = ""
-    if mode == "급락일만 차단":
-        active = (regime == "급락일") or (day_ret <= -3.5)
-        reason = f"급락일 조건 day_ret={day_ret:.2f}% 장세={regime}"
-    elif mode == "지수쇼크 차단":
-        active = (day_ret <= -2.0) or (regime == "급락일")
-        reason = f"지수쇼크 day_ret={day_ret:.2f}% 장세={regime}"
-    elif mode == "강한위험 차단":
-        active = (day_ret <= -1.5) or (regime in {"급락일", "하락장"}) or (pd.notna(ret20) and ret20 <= -8 and day_ret <= -0.5)
-        reason = f"강한위험 day_ret={day_ret:.2f}% ret20={(0 if pd.isna(ret20) else ret20):.2f}% 장세={regime}"
-    elif mode == "초강한위험 차단":
-        active = (day_ret <= -1.0) or (regime in {"급락일", "하락장", "조정장"})
-        reason = f"초강한위험 day_ret={day_ret:.2f}% ret20={(0 if pd.isna(ret20) else ret20):.2f}% 장세={regime}"
-    else:
-        active = False
-        reason = ""
-    if active:
-        return True, 0.0, reason
-    return False, 1.0, "정상"
-
 def run_sector_strategy_backtest(
     leader_df,
     start_date,
@@ -4846,7 +4791,6 @@ def run_sector_strategy_backtest(
     sector_weight_mode="OFF",
     account_defense_mode="OFF",
     loss_cooldown_mode="OFF",
-    emergency_risk_mode="OFF",
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
 
@@ -4949,10 +4893,6 @@ def run_sector_strategy_backtest(
     sector_cooldown_weight_map = {}
     sector_cooldown_reason_map = {}
     symbol_cooldown_block_map = {}
-    emergency_risk_mode = str(emergency_risk_mode or "OFF")
-    emergency_active = False
-    emergency_note = ""
-    emergency_buy_multiplier = 1.0
 
     def _bt_eval_value(asof_date):
         total = 0.0
@@ -5105,9 +5045,6 @@ def run_sector_strategy_backtest(
         next_trade_date = dates[i + 1]
         current_market_regime = _bt_regime_on_date(benchmark_regime_df, signal_date)
         current_buy_multiplier = _bt_regime_multiplier(current_market_regime, regime_filter_mode, regime_custom_multipliers)
-        emergency_active, emergency_buy_multiplier, emergency_note = _bt_emergency_risk_state(benchmark_regime_df, signal_date, current_market_regime, emergency_risk_mode)
-        if emergency_active:
-            current_buy_multiplier = 0.0
         if progress_callback:
             progress_callback(i + 1, len(dates) - 1, signal_date)
 
@@ -5118,7 +5055,7 @@ def run_sector_strategy_backtest(
                 sector_df, stock_df, _diag = build_sector_rotation_flow(active, save_to_sheet=False, asof_date=signal_date, lookback_days=lookback_days, dynamic_roles=True)
         except Exception as e:
             daily_rows.append({
-                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "긴급위험모드": str(emergency_risk_mode), "긴급위험발동": str("ON" if emergency_active else "OFF"), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
+                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
                 "현금": round(cash, 0), "평가금액": 0, "총자산": round(cash, 0), "누적실현손익": round(realized, 0),
                 "일일손익": 0, "최대낙폭": round(max_drawdown, 2), "보유종목수": len([p for p in positions.values() if p.get("qty", 0) > 0]),
                 "매수건수": 0, "매도건수": 0, "메모": f"신호 계산 실패: {e}"
@@ -5375,13 +5312,12 @@ def run_sector_strategy_backtest(
         sells_today = len([t for t in trade_rows if t["구분"] == "매도"]) - sell_count_before
         signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
         daily_rows.append({
-            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "긴급위험모드": str(emergency_risk_mode), "긴급위험발동": str("ON" if emergency_active else "OFF"), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
+            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
             "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": " / ".join([x for x in [
                 _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else "",
                 account_defense_note if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_note not in {"", "정상"} else "",
-                ("긴급위험 " + emergency_note) if emergency_active else "",
                 ("손실쿨다운 " + ", ".join([f"{k}:{float(v):.1f}" for k, v in list(sector_cooldown_weight_map.items())[:4]])) if loss_cooldown_mode not in {"OFF", "사용안함", "없음"} and sector_cooldown_weight_map else "",
             ] if x])
         })
@@ -5438,8 +5374,7 @@ def run_sector_strategy_backtest(
         "섹터자동가중": str(sector_weight_mode),
         "계좌MDD브레이크": str(account_defense_mode),
         "손실쿨다운": str(loss_cooldown_mode),
-        "긴급위험모드": str(emergency_risk_mode),
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode} / 긴급위험모드:{emergency_risk_mode}"
+        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -8695,7 +8630,7 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 실전 보유장부", "9. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -10065,19 +10000,6 @@ elif menu == "6. 섹터전략 백테스트":
             )
             st.caption("최근 전량회수/손실축소가 나온 섹터는 10~20일 동안 0.5배 또는 신규금지합니다. 종목+섹터는 같은 종목 재진입도 잠깐 막습니다.")
 
-        st.subheader("4-3) 긴급위험모드")
-        er1, er2 = st.columns([1, 3])
-        with er1:
-            emergency_risk_mode = st.selectbox(
-                "긴급위험모드",
-                options=["OFF", "급락일만 차단", "지수쇼크 차단", "강한위험 차단", "초강한위험 차단"],
-                index=0,
-                key="bt_emergency_risk_mode",
-            )
-        with er2:
-            st.caption("백테스트용 긴급위험모드는 결과 보고 악재 날짜를 빼는 기능이 아닙니다. 신호일에 이미 알 수 있는 KODEX200 일간/20일 수익률과 장세로만 신규/추가매수를 차단합니다.")
-            st.caption("발동 시: 사라 신호는 전부 차단, 대기/사지마 유지, 줄여라/팔아라 신호는 그대로 실행합니다. 추천 비교는 지수쇼크 차단부터입니다.")
-
         st.subheader("5) 역할보호 손실축소 설정")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -10149,7 +10071,6 @@ elif menu == "6. 섹터전략 백테스트":
                 "섹터자동가중": sector_weight_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
-                "긴급위험모드": emergency_risk_mode,
             }
         ]), use_container_width=True, hide_index=True)
 
@@ -10205,7 +10126,6 @@ elif menu == "6. 섹터전략 백테스트":
                         sector_weight_mode=sector_weight_mode,
                         account_defense_mode=account_defense_mode,
                         loss_cooldown_mode=loss_cooldown_mode,
-                        emergency_risk_mode=emergency_risk_mode,
                     )
                     prog.empty()
                     status.empty()
@@ -10251,7 +10171,6 @@ elif menu == "6. 섹터전략 백테스트":
                             "섹터자동가중": sector_weight_mode,
                             "MDD브레이크": account_defense_mode,
                             "손실쿨다운": loss_cooldown_mode,
-                            "긴급위험모드": emergency_risk_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
@@ -10285,7 +10204,6 @@ elif menu == "6. 섹터전략 백테스트":
                             "2등대표주전량회수손실률": second_loss_cut,
                             "빠른백테스트": fast_mode,
                             "검증종목범위": universe_mode,
-                            "긴급위험모드": emergency_risk_mode,
                         }])
                         fail_df = trade_df.copy()
                         if len(fail_df) > 0 and "실현손익" in fail_df.columns:
@@ -10442,7 +10360,6 @@ elif menu == "7. 실전 운영판":
         {"항목": "섹터자동가중", "값": "표준형", "실전 의미": "좋은 섹터 1.2배, 보통 1.0배, 약한 섹터 0.5배, D급 0배"},
         {"항목": "MDD브레이크", "값": live_brake, "실전 의미": "계좌가 흔들릴 때만 신규/추가매수 축소"},
         {"항목": "손실쿨다운", "값": "완만쿨다운", "실전 의미": "전량회수 손실 섹터/종목은 잠깐 축소"},
-        {"항목": "긴급위험모드", "값": "OFF/수동ON", "실전 의미": "ON이면 신규매수 사라를 전부 사지마로 바꿈"},
         {"항목": "총자본", "값": f"{int(live_total_cash):,}원", "실전 의미": "실전 운영 기준 자본"},
         {"항목": "최저현금", "값": f"{int(live_defense_cash):,}원", "실전 의미": "이 금액 아래로 내려가면 신규/추가매수 제한"},
         {"항목": "운용가능금", "값": f"{int(live_available_cash):,}원", "실전 의미": "총자본 - 최저현금"},
@@ -10461,9 +10378,6 @@ elif menu == "7. 실전 운영판":
     else:
         asof_live = st.date_input("신호 기준일", value=datetime.now().date(), key="live_asof_date")
         lookback_live = st.selectbox("신호 계산용 일봉 기간", options=[120, 190, 260], index=1, key="live_lookback")
-        live_emergency_mode = st.selectbox("긴급위험모드", options=["OFF", "수동ON"], index=0, key="live_emergency_mode")
-        if live_emergency_mode == "수동ON":
-            st.warning("긴급위험모드 ON: 신규매수 사라 신호는 전부 사지마로 바꾸고, 줄여라/팔아라만 유지합니다.")
         if st.button("오늘 섹터 신호 계산", type="primary", key="run_live_operation_board"):
             with st.spinner("대표주 거래대금/역할/순환매 신호 계산 중..."):
                 result_df, stock_df, diag = build_sector_rotation_flow(
@@ -10488,15 +10402,6 @@ elif menu == "7. 실전 운영판":
                     _action = str(_row.get("오늘행동", "대기") or "대기")
                     _cur_role = str(_row.get("현재역할", "") or "")
                     _reason = str(_row.get("행동사유", "") or "")
-
-                    if live_emergency_mode == "수동ON" and _action == "사기":
-                        _action = "신규금지"
-                        _reason = (_reason + " / 긴급위험모드 신규매수 차단").strip(" /")
-                        stock_df.at[_idx, "오늘행동"] = _action
-                        if "매수허용" in stock_df.columns:
-                            stock_df.at[_idx, "매수허용"] = "N"
-                        if "대장주예외허용" in stock_df.columns:
-                            stock_df.at[_idx, "대장주예외허용"] = "N"
 
                     if _action == "사기" and "현재회전형" in _cur_role:
                         _action = "신규금지"
@@ -10600,7 +10505,6 @@ elif menu == "7. 실전 운영판":
                     "2등대표주익절": "+5%",
                     "증액투자": "ON",
                     "회전형": "OFF",
-                    "긴급위험모드": live_emergency_mode,
                 }])
                 with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     zf.writestr(f"magic_split_live_sector_action_{today_str()}.csv", result_df.to_csv(index=False).encode("utf-8-sig"))
@@ -10624,16 +10528,313 @@ elif menu == "7. 실전 운영판":
 - 대장주는 +10% 1차익절, +18% 전량익절 기준입니다.
 - 2등대표주는 +5% 익절 기준입니다.
 - 회전형은 실전 기본 OFF입니다. 현재회전형은 신규매수 `사기`가 떠도 `신규금지/사지마`로 보정합니다.
-- 긴급위험모드 ON이면 모든 신규매수 `사라`가 `사지마`로 바뀌고, `줄여라/팔아라`만 그대로 실행합니다.
 - 계좌 MDD가 커지면 브레이크가 먼저입니다. 수익형은 완만브레이크, 균형형은 표준브레이크입니다.
 """)
 
+
 # =====================================================
-# 8. 도움말
+# 8. 실전 보유장부
+# =====================================================
+
+elif menu == "8. 실전 보유장부":
+    st.header("8. 실전 보유장부")
+    st.caption("실제로 산 종목의 차수, 매수가, 매수금액, 주수와 오늘 신호에 따른 팔아라/줄여라를 관리합니다.")
+
+    HOLDING_COLS = ["매수일", "코드", "종목", "섹터", "매수역할", "차수", "매수가", "매수금액", "보유주수", "메모"]
+    SELL_COLS = ["매도일", "코드", "종목", "구분", "매도단가", "매도주수", "매도금액", "매수평균단가", "실현손익", "메모"]
+
+    def _empty_holdings_df():
+        return pd.DataFrame(columns=HOLDING_COLS)
+
+    def _empty_sell_df():
+        return pd.DataFrame(columns=SELL_COLS)
+
+    def _clean_holdings_df(df):
+        if df is None or len(df) == 0:
+            return _empty_holdings_df()
+        df = df.copy()
+        for c in HOLDING_COLS:
+            if c not in df.columns:
+                df[c] = "" if c not in ["차수", "매수가", "매수금액", "보유주수"] else 0
+        df = df[HOLDING_COLS]
+        for c in ["차수", "매수가", "매수금액", "보유주수"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df["차수"] = df["차수"].astype(int)
+        df["보유주수"] = df["보유주수"].astype(int)
+        for c in ["매수일", "코드", "종목", "섹터", "매수역할", "메모"]:
+            df[c] = df[c].astype(str).replace("nan", "")
+        return df
+
+    def _clean_sell_df(df):
+        if df is None or len(df) == 0:
+            return _empty_sell_df()
+        df = df.copy()
+        for c in SELL_COLS:
+            if c not in df.columns:
+                df[c] = "" if c not in ["매도단가", "매도주수", "매도금액", "매수평균단가", "실현손익"] else 0
+        df = df[SELL_COLS]
+        for c in ["매도단가", "매도주수", "매도금액", "매수평균단가", "실현손익"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df["매도주수"] = df["매도주수"].astype(int)
+        return df
+
+    def _holding_summary(df):
+        df = _clean_holdings_df(df)
+        df = df[df["보유주수"] > 0].copy()
+        if len(df) == 0:
+            return pd.DataFrame(columns=["코드", "종목", "섹터", "최고차수", "총매수금액", "총보유주수", "평균단가", "매수역할", "보유상태"])
+        g = df.groupby(["코드", "종목"], dropna=False).agg(
+            섹터=("섹터", "last"),
+            최고차수=("차수", "max"),
+            총매수금액=("매수금액", "sum"),
+            총보유주수=("보유주수", "sum"),
+            매수역할=("매수역할", "last"),
+        ).reset_index()
+        g["평균단가"] = np.where(g["총보유주수"] > 0, (g["총매수금액"] / g["총보유주수"]).round(0), 0)
+        g["보유상태"] = "보유중"
+        return g
+
+    def _map_action(raw_action):
+        a = str(raw_action or "")
+        if a == "사기":
+            return "사라"
+        if a == "대기":
+            return "대기"
+        if a == "일부팔기":
+            return "줄여라"
+        if a == "전량회수":
+            return "팔아라"
+        if a == "추가매수금지":
+            return "추가매수 하지마"
+        if a == "신규금지":
+            return "사지마"
+        return a if a else "대기"
+
+    if "live_holdings_df" not in st.session_state:
+        st.session_state["live_holdings_df"] = _empty_holdings_df()
+    if "live_sell_df" not in st.session_state:
+        st.session_state["live_sell_df"] = _empty_sell_df()
+
+    st.subheader("1) 장부 불러오기/저장")
+    up_c1, up_c2 = st.columns(2)
+    with up_c1:
+        holding_upload = st.file_uploader("기존 보유장부 CSV 불러오기", type=["csv"], key="holding_ledger_upload")
+        if holding_upload is not None and st.button("보유장부 불러오기", key="load_holding_ledger"):
+            try:
+                st.session_state["live_holdings_df"] = _clean_holdings_df(pd.read_csv(holding_upload))
+                st.success("보유장부를 불러왔습니다.")
+            except Exception as e:
+                st.error(f"보유장부 불러오기 실패: {e}")
+    with up_c2:
+        sell_upload = st.file_uploader("매도기록 CSV 불러오기", type=["csv"], key="sell_history_upload")
+        if sell_upload is not None and st.button("매도기록 불러오기", key="load_sell_history"):
+            try:
+                st.session_state["live_sell_df"] = _clean_sell_df(pd.read_csv(sell_upload))
+                st.success("매도기록을 불러왔습니다.")
+            except Exception as e:
+                st.error(f"매도기록 불러오기 실패: {e}")
+
+    st.subheader("2) 매수 기록 추가")
+    st.caption("오늘 산 종목은 여기 입력합니다. 예: 삼성SDI / 1차 / 매수가 / 900만원 / 몇 주")
+    with st.form("add_live_buy_form", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            buy_date = st.date_input("매수일", value=datetime.now().date(), key="ledger_buy_date")
+            buy_code = st.text_input("코드", value="", placeholder="006400", key="ledger_buy_code")
+        with c2:
+            buy_name = st.text_input("종목", value="", placeholder="삼성SDI", key="ledger_buy_name")
+            buy_sector = st.text_input("섹터", value="", placeholder="2차전지", key="ledger_buy_sector")
+        with c3:
+            buy_role = st.selectbox("매수역할", ["현재대장", "현재2등대표", "대장주", "2등대표주", "기타"], key="ledger_buy_role")
+            buy_round = st.number_input("차수", min_value=1, max_value=10, value=1, step=1, key="ledger_buy_round")
+        with c4:
+            buy_price = st.number_input("매수가", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="ledger_buy_price")
+            buy_amount = st.number_input("매수금액", min_value=0, value=0, step=100_000, format="%d", key="ledger_buy_amount")
+        auto_qty = int(buy_amount // buy_price) if buy_price and buy_price > 0 else 0
+        c5, c6 = st.columns([1, 3])
+        with c5:
+            buy_qty = st.number_input("매수주수", min_value=0, value=auto_qty, step=1, key="ledger_buy_qty")
+        with c6:
+            buy_memo = st.text_input("메모", value="", placeholder="예: 실전 운영판 사라 신호", key="ledger_buy_memo")
+        submitted = st.form_submit_button("매수 기록 추가", type="primary")
+        if submitted:
+            if not buy_name.strip():
+                st.error("종목명은 필수입니다.")
+            elif buy_qty <= 0:
+                st.error("매수주수는 1주 이상이어야 합니다.")
+            else:
+                actual_amount = int(round(float(buy_price) * int(buy_qty))) if buy_price > 0 else int(buy_amount)
+                new_row = pd.DataFrame([{
+                    "매수일": str(buy_date),
+                    "코드": str(buy_code).strip(),
+                    "종목": str(buy_name).strip(),
+                    "섹터": str(buy_sector).strip(),
+                    "매수역할": str(buy_role),
+                    "차수": int(buy_round),
+                    "매수가": float(buy_price),
+                    "매수금액": int(actual_amount),
+                    "보유주수": int(buy_qty),
+                    "메모": str(buy_memo),
+                }])
+                st.session_state["live_holdings_df"] = _clean_holdings_df(pd.concat([st.session_state["live_holdings_df"], new_row], ignore_index=True))
+                st.success(f"{buy_name} {buy_round}차 {buy_qty}주 기록 완료")
+
+    holdings_df = _clean_holdings_df(st.session_state["live_holdings_df"])
+    sell_df = _clean_sell_df(st.session_state["live_sell_df"])
+    summary_df = _holding_summary(holdings_df)
+
+    st.subheader("3) 현재 보유 요약")
+    if len(summary_df) == 0:
+        st.info("아직 보유 기록이 없습니다. 위에서 매수 기록을 추가하세요.")
+    else:
+        show_pinned_dataframe(summary_df, height=260, pin_rank=False)
+
+    st.markdown("##### 보유 원장 수정/삭제")
+    edit_df = holdings_df.copy()
+    if len(edit_df) > 0:
+        edit_df.insert(0, "삭제", False)
+        edited = st.data_editor(edit_df, use_container_width=True, height=300, key="holding_ledger_editor", column_config=pinned_stock_column_config(edit_df, pin_action=True))
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if st.button("수정 내용 저장", key="save_edited_holdings"):
+                st.session_state["live_holdings_df"] = _clean_holdings_df(edited.drop(columns=["삭제"], errors="ignore"))
+                st.success("수정 내용을 저장했습니다.")
+        with cc2:
+            if st.button("삭제 체크 행 제거", key="delete_checked_holdings"):
+                if "삭제" in edited.columns:
+                    kept = edited[edited["삭제"] != True].drop(columns=["삭제"], errors="ignore")
+                    st.session_state["live_holdings_df"] = _clean_holdings_df(kept)
+                    st.success("삭제했습니다.")
+
+    st.subheader("4) 오늘 신호와 보유 종목 매칭")
+    st.caption("7번 실전 운영판에서 받은 `magic_split_live_stock_action_날짜.csv`를 올리면, 보유 중인 종목만 팔아라/줄여라/대기 형태로 보여줍니다.")
+    signal_upload = st.file_uploader("실전 운영판 stock_action CSV 업로드", type=["csv"], key="holding_signal_upload")
+    if signal_upload is not None:
+        try:
+            sig = pd.read_csv(signal_upload)
+            sig_cols = sig.columns.tolist()
+            if "백테스트행동" not in sig.columns:
+                if "오늘행동" in sig.columns:
+                    sig["백테스트행동"] = sig["오늘행동"].apply(_map_action)
+                else:
+                    sig["백테스트행동"] = "대기"
+            match = summary_df.copy()
+            if len(match) > 0:
+                # 코드 우선, 없으면 종목명 매칭
+                sig_small_cols = [c for c in ["코드", "종목", "섹터", "현재역할", "오늘행동", "백테스트행동", "적용매수금액", "행동사유"] if c in sig.columns]
+                sig_small = sig[sig_small_cols].copy()
+                if "코드" in sig_small.columns:
+                    sig_small["코드"] = sig_small["코드"].astype(str).str.zfill(6)
+                    match["코드"] = match["코드"].astype(str).str.zfill(6)
+                merged = match.merge(sig_small, on="코드", how="left", suffixes=("", "_신호")) if "코드" in sig_small.columns else match.copy()
+                if "백테스트행동" not in merged.columns or merged["백테스트행동"].isna().all():
+                    merged = match.merge(sig_small, on="종목", how="left", suffixes=("", "_신호")) if "종목" in sig_small.columns else match.copy()
+                if "백테스트행동" not in merged.columns:
+                    merged["백테스트행동"] = "대기"
+                merged["백테스트행동"] = merged["백테스트행동"].fillna("대기")
+                merged["실전처리"] = merged["백테스트행동"].map(lambda x: "전량 매도" if x == "팔아라" else ("50% 줄이기" if x == "줄여라" else "보유/대기"))
+                show_cols = [c for c in ["백테스트행동", "실전처리", "코드", "종목", "섹터", "현재역할", "최고차수", "총보유주수", "평균단가", "오늘행동", "행동사유"] if c in merged.columns]
+                show_pinned_dataframe(merged[show_cols], height=360, pin_rank=False)
+            else:
+                st.info("보유 종목이 없어 신호 매칭할 대상이 없습니다.")
+        except Exception as e:
+            st.error(f"신호 CSV 읽기 실패: {e}")
+
+    st.subheader("5) 팔아라/줄여라 기록")
+    if len(summary_df) == 0:
+        st.info("보유 종목이 있어야 매도/축소 기록을 만들 수 있습니다.")
+    else:
+        opt_names = (summary_df["종목"].astype(str) + " / " + summary_df["코드"].astype(str)).tolist()
+        with st.form("sell_reduce_form", clear_on_submit=True):
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            with sc1:
+                sell_date = st.date_input("매도일", value=datetime.now().date(), key="ledger_sell_date")
+                selected = st.selectbox("종목", opt_names, key="ledger_sell_stock")
+            sel_name = selected.split(" / ")[0] if selected else ""
+            selected_row = summary_df[summary_df["종목"].astype(str) == sel_name].head(1)
+            max_qty = int(selected_row["총보유주수"].iloc[0]) if len(selected_row) > 0 else 0
+            avg_price = float(selected_row["평균단가"].iloc[0]) if len(selected_row) > 0 else 0.0
+            code_sel = str(selected_row["코드"].iloc[0]) if len(selected_row) > 0 else ""
+            with sc2:
+                sell_type = st.selectbox("구분", ["전량매도", "50%줄이기", "직접입력"], key="ledger_sell_type")
+                sell_price = st.number_input("매도단가", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="ledger_sell_price")
+            if sell_type == "전량매도":
+                default_sell_qty = max_qty
+            elif sell_type == "50%줄이기":
+                default_sell_qty = max(1, max_qty // 2)
+            else:
+                default_sell_qty = 0
+            with sc3:
+                sell_qty = st.number_input("매도주수", min_value=0, max_value=max_qty, value=default_sell_qty, step=1, key="ledger_sell_qty")
+                sell_memo = st.text_input("메모", value="", placeholder="예: 팔아라 신호 / 줄여라 신호", key="ledger_sell_memo")
+            with sc4:
+                est_sell_amount = int(round(float(sell_price) * int(sell_qty))) if sell_price > 0 else 0
+                est_pnl = int(round((float(sell_price) - avg_price) * int(sell_qty))) if sell_price > 0 else 0
+                st.metric("예상 매도금액", f"{est_sell_amount:,.0f}원")
+                st.metric("예상 실현손익", f"{est_pnl:,.0f}원")
+            sell_submitted = st.form_submit_button("매도/축소 기록", type="primary")
+            if sell_submitted:
+                if sell_qty <= 0:
+                    st.error("매도주수는 1주 이상이어야 합니다.")
+                elif sell_price <= 0:
+                    st.error("매도단가를 입력하세요.")
+                else:
+                    # FIFO처럼 전체 보유주수를 줄이되, 행 단위는 오래된 매수부터 차감
+                    h = _clean_holdings_df(st.session_state["live_holdings_df"])
+                    target_idx = h[h["종목"].astype(str) == sel_name].sort_values(["매수일", "차수"]).index.tolist()
+                    remain_to_sell = int(sell_qty)
+                    for i in target_idx:
+                        if remain_to_sell <= 0:
+                            break
+                        row_qty = int(h.at[i, "보유주수"])
+                        take = min(row_qty, remain_to_sell)
+                        if take > 0:
+                            h.at[i, "보유주수"] = row_qty - take
+                            remain_to_sell -= take
+                    # 남은 주수 기준 매수금액도 대략 평균단가로 재계산
+                    for i in h.index:
+                        if int(h.at[i, "보유주수"]) <= 0:
+                            h.at[i, "매수금액"] = 0
+                        else:
+                            h.at[i, "매수금액"] = int(round(float(h.at[i, "매수가"]) * int(h.at[i, "보유주수"])))
+                    st.session_state["live_holdings_df"] = _clean_holdings_df(h[h["보유주수"] > 0])
+                    new_sell = pd.DataFrame([{
+                        "매도일": str(sell_date),
+                        "코드": code_sel,
+                        "종목": sel_name,
+                        "구분": sell_type,
+                        "매도단가": float(sell_price),
+                        "매도주수": int(sell_qty),
+                        "매도금액": int(est_sell_amount),
+                        "매수평균단가": float(avg_price),
+                        "실현손익": int(est_pnl),
+                        "메모": str(sell_memo),
+                    }])
+                    st.session_state["live_sell_df"] = _clean_sell_df(pd.concat([st.session_state["live_sell_df"], new_sell], ignore_index=True))
+                    st.success(f"{sel_name} {sell_type} {sell_qty}주 기록 완료")
+
+    st.subheader("6) 다운로드")
+    holdings_df = _clean_holdings_df(st.session_state["live_holdings_df"])
+    sell_df = _clean_sell_df(st.session_state["live_sell_df"])
+    summary_df = _holding_summary(holdings_df)
+    dl_buf = io.BytesIO()
+    with zipfile.ZipFile(dl_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"magic_split_live_holding_ledger_{today_str()}.csv", holdings_df.to_csv(index=False).encode("utf-8-sig"))
+        zf.writestr(f"magic_split_live_holding_summary_{today_str()}.csv", summary_df.to_csv(index=False).encode("utf-8-sig"))
+        zf.writestr(f"magic_split_live_sell_history_{today_str()}.csv", sell_df.to_csv(index=False).encode("utf-8-sig"))
+    dl_buf.seek(0)
+    st.download_button("보유장부 CSV 묶음 다운로드", data=dl_buf.getvalue(), file_name=f"magic_split_live_holding_book_{today_str()}.zip", mime="application/zip", key="download_holding_book_zip")
+
+    if len(sell_df) > 0:
+        st.markdown("##### 매도기록")
+        show_pinned_dataframe(sell_df, height=260, pin_rank=False)
+
+# =====================================================
+# 9. 도움말
 # =====================================================
 
 else:
-    st.header("8. 도움말")
+    st.header("9. 도움말")
     st.markdown(f"""
 ### 버전
 
@@ -10644,6 +10845,7 @@ else:
 - `5. 섹터 순환매 판단기` 독립 메뉴를 추가했습니다.
 - `6. 섹터전략 백테스트` 메뉴는 현재 1등 실전 세팅을 기본값으로 시작합니다. 720거래일 스트레스 검증과 월별/장세별 결과표를 제공합니다.
 - `7. 실전 운영판` 메뉴를 추가했습니다. 최종 후보 세팅과 오늘 섹터/대표주 행동값을 한 화면에서 확인합니다.
+- `8. 실전 보유장부` 메뉴를 추가했습니다. 실제 매수 차수/매수가/매수금액/주수와 팔아라/줄여라 기록을 관리합니다.
 - 2026-06-29 기준 섹터별 대표주 기본 유니버스를 조사 기반으로 채웠습니다. 버튼 한 번으로 20개 이상 섹터의 대장주/2등대표주/회전형중형주를 등록할 수 있습니다.
 - 기존 TOP50/보유종목 판단기에는 새 컬럼/필터를 끼워 넣지 않았습니다.
 - 새 메뉴에서만 `대표주유니버스` 입력, 섹터별 거래대금 쏠림점수, 순환매 유입, 자금이탈, 고점 발빼기 신호를 계산합니다.
@@ -10671,7 +10873,8 @@ else:
 5. 섹터 순환매 판단기에서 어느 섹터에 돈이 몰렸는지, 어디로 이동하는지, 발빼기 신호가 있는지 확인
 6. 섹터전략 백테스트에서 최종 후보 세팅 재검증
 7. 실전 운영판에서 오늘 사기/대기/회수 신호 확인
-8. TOP50은 기존 신규 후보 출력용으로 별도 사용
+8. 실전 보유장부에서 실제 매수 차수/매수가/주수 기록 및 팔아라/줄여라 처리
+9. TOP50은 기존 신규 후보 출력용으로 별도 사용
 
 ### 묶음수동입력 예시
 
