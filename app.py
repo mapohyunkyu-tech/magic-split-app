@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_ONE_EXPORT_FIX_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_COLLAPSE_FILTER_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -199,7 +199,7 @@ def _ensure_sector_flow_text_columns(df):
 # 섹터전략 백테스트 전용 컬럼.
 # 신호는 당일 장마감 기준으로 계산하고, 실제 매매는 다음 거래일 시가로 처리한다.
 SECTOR_BACKTEST_DAILY_COLUMNS = [
-    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
+    "기준일", "다음매매일", "장세", "장세매수배율", "장세매수필터", "시장붕괴필터", "성장주붕괴필터", "보유섹터", "오늘신호섹터", "현금", "평가금액", "총자산",
     "누적실현손익", "일일손익", "최대낙폭", "보유종목수", "매수건수", "매도건수", "메모"
 ]
 
@@ -4857,6 +4857,8 @@ def run_sector_strategy_backtest(
     sector_weight_mode="OFF",
     account_defense_mode="OFF",
     loss_cooldown_mode="OFF",
+    market_collapse_mode="OFF",
+    growth_collapse_mode="OFF",
 ):
     """섹터 순환매 신호 + 역할별 차수 + 자금방어 백테스트.
 
@@ -4869,6 +4871,8 @@ def run_sector_strategy_backtest(
     - 전량회수까지 기다리기 전에 대장주/2등대표주 손실축소 규칙을 적용한다.
     - 증액투자 모드가 켜지면 차수 금액과 섹터 한도가 현재 총자산/초기자금 비율만큼 자동 확대·축소된다.
     - 장세별 매수필터가 켜지면 매도는 그대로 두고 신규/추가매수 예산만 장세배율로 줄이거나 차단한다.
+    - 시장붕괴 차단 필터는 뉴스/수동판단 없이 KODEX200 10일/20일/당일 수익률로 코로나급 붕괴장 신규·추가매수만 막는다.
+    - 성장주/코스닥 보조필터는 KODEX 코스닥150(229200) 기준으로 코스닥형 섹터의 신규·추가매수만 막는다.
     """
     leader_df = normalize_sector_leader_df(leader_df)
     active = leader_df[leader_df["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")].copy()
@@ -4890,7 +4894,8 @@ def run_sector_strategy_backtest(
             progress_callback(0, max(1, len(dates) - 1), "가격데이터 캐시/병렬 로딩")
         price_map = _bt_preload_price_map(active, start_date, end_date, lookback_days=lookback_days)
 
-    benchmark_regime_df = _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=lookback_days)
+    benchmark_regime_df = _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=lookback_days, code="069500")
+    growth_regime_df = _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=lookback_days, code="229200")
     regime_custom_multipliers = dict(regime_custom_multipliers or {})
     current_market_regime = "장세불명"
     current_buy_multiplier = 1.0
@@ -4956,6 +4961,12 @@ def run_sector_strategy_backtest(
     account_defense_multiplier = 1.0
     account_defense_core_only = False
     account_defense_note = ""
+    market_collapse_mode = str(market_collapse_mode or "OFF")
+    market_collapse_multiplier = 1.0
+    market_collapse_note = ""
+    growth_collapse_mode = str(growth_collapse_mode or "OFF")
+    growth_collapse_multiplier = 1.0
+    growth_collapse_note = ""
     sector_cooldown_weight_map = {}
     sector_cooldown_reason_map = {}
     symbol_cooldown_block_map = {}
@@ -5013,12 +5024,14 @@ def run_sector_strategy_backtest(
             return 0
         sector_auto_weight = float(sector_weight_map.get(sector, 1.0))
         sector_loss_weight = float(sector_cooldown_weight_map.get(sector, 1.0))
-        total_sector_weight = max(0.0, sector_auto_weight * sector_loss_weight)
+        sector_growth_block = (growth_collapse_multiplier <= 0) and _bt_is_growth_sensitive_sector(sector)
+        growth_sector_weight = 0.0 if sector_growth_block else 1.0
+        total_sector_weight = max(0.0, sector_auto_weight * sector_loss_weight * growth_sector_weight)
         sector_budget_limit = _bt_scaled_budget(max_sector_budget, signal_date) * total_sector_weight
         if sector_invested(sector) >= sector_budget_limit:
             return 0
         budget = _bt_scaled_budget(float(budget), signal_date)
-        budget = float(budget) * float(current_buy_multiplier) * total_sector_weight * float(account_defense_multiplier)
+        budget = float(budget) * float(current_buy_multiplier) * total_sector_weight * float(account_defense_multiplier) * float(market_collapse_multiplier)
         if budget <= 0:
             return 0
         budget = min(float(budget), max(0.0, sector_budget_limit - sector_invested(sector)))
@@ -5067,6 +5080,10 @@ def run_sector_strategy_backtest(
             smemo += f" / 손실쿨다운 {cw:.1f}"
         if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_multiplier < 1.0:
             smemo += f" / MDD브레이크 {account_defense_multiplier:.1f}"
+        if market_collapse_mode not in {"OFF", "사용안함", "없음"} and market_collapse_multiplier <= 0:
+            smemo += " / 시장붕괴필터 차단"
+        if growth_collapse_mode not in {"OFF", "사용안함", "없음"} and (growth_collapse_multiplier <= 0) and _bt_is_growth_sensitive_sector(sector):
+            smemo += " / 성장주붕괴필터 차단"
         record_trade(actual_date or trade_date, signal_date, "매수", reason, row, role, step, qty, price, fee, 0.0, smemo)
         return qty
 
@@ -5111,6 +5128,10 @@ def run_sector_strategy_backtest(
         next_trade_date = dates[i + 1]
         current_market_regime = _bt_regime_on_date(benchmark_regime_df, signal_date)
         current_buy_multiplier = _bt_regime_multiplier(current_market_regime, regime_filter_mode, regime_custom_multipliers)
+        market_collapse_block, market_collapse_note = _bt_market_collapse_state(benchmark_regime_df, signal_date, market_collapse_mode)
+        market_collapse_multiplier = 0.0 if market_collapse_block else 1.0
+        growth_collapse_block, growth_collapse_note = _bt_growth_collapse_state(growth_regime_df, signal_date, growth_collapse_mode)
+        growth_collapse_multiplier = 0.0 if growth_collapse_block else 1.0
         if progress_callback:
             progress_callback(i + 1, len(dates) - 1, signal_date)
 
@@ -5121,7 +5142,7 @@ def run_sector_strategy_backtest(
                 sector_df, stock_df, _diag = build_sector_rotation_flow(active, save_to_sheet=False, asof_date=signal_date, lookback_days=lookback_days, dynamic_roles=True)
         except Exception as e:
             daily_rows.append({
-                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
+                "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "시장붕괴필터": market_collapse_note if market_collapse_note else str(market_collapse_mode), "성장주붕괴필터": growth_collapse_note if growth_collapse_note else str(growth_collapse_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": "계산실패",
                 "현금": round(cash, 0), "평가금액": 0, "총자산": round(cash, 0), "누적실현손익": round(realized, 0),
                 "일일손익": 0, "최대낙폭": round(max_drawdown, 2), "보유종목수": len([p for p in positions.values() if p.get("qty", 0) > 0]),
                 "매수건수": 0, "매도건수": 0, "메모": f"신호 계산 실패: {e}"
@@ -5378,13 +5399,15 @@ def run_sector_strategy_backtest(
         sells_today = sum(1 for t in _new_trades if t["구분"] == "매도")
         signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
         daily_rows.append({
-            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
+            "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "시장붕괴필터": market_collapse_note if market_collapse_note else str(market_collapse_mode), "성장주붕괴필터": growth_collapse_note if growth_collapse_note else str(growth_collapse_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
             "현금": round(cash, 0), "평가금액": round(eval_value, 0), "총자산": round(total_asset, 0),
             "누적실현손익": round(realized, 0), "일일손익": round(daily_pnl, 0), "최대낙폭": round(max_drawdown, 2),
             "보유종목수": pos_count, "매수건수": buys_today, "매도건수": sells_today, "메모": " / ".join([x for x in [
                 _bt_format_sector_weight_memo(sector_weight_map, sector_grade_map) if sector_weight_mode not in {"OFF", "사용안함", "없음"} else "",
                 account_defense_note if account_defense_mode not in {"OFF", "사용안함", "없음"} and account_defense_note not in {"", "정상"} else "",
                 ("손실쿨다운 " + ", ".join([f"{k}:{float(v):.1f}" for k, v in list(sector_cooldown_weight_map.items())[:4]])) if loss_cooldown_mode not in {"OFF", "사용안함", "없음"} and sector_cooldown_weight_map else "",
+                market_collapse_note if market_collapse_mode not in {"OFF", "사용안함", "없음"} and market_collapse_note else "",
+                growth_collapse_note if growth_collapse_mode not in {"OFF", "사용안함", "없음"} and growth_collapse_note else "",
             ] if x])
         })
 
@@ -5455,7 +5478,9 @@ def run_sector_strategy_backtest(
         "섹터자동가중": str(sector_weight_mode),
         "계좌MDD브레이크": str(account_defense_mode),
         "손실쿨다운": str(loss_cooldown_mode),
-        "메모": (("초고속모드 수익확대+역할보호+증액투자ON: 가격캐시/신호행 최적화 + 현재총자산 비율 증액" if compound_mode else "초고속모드 수익확대+역할보호: 가격캐시/신호행 최적화 + 동시2섹터/역할보호/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
+        "시장붕괴필터": str(market_collapse_mode),
+        "성장주붕괴필터": str(growth_collapse_mode),
+        "메모": (("초고속모드 수익확대+역할보호+증액투자ON: 가격캐시/신호행 최적화 + 현재총자산 비율 증액" if compound_mode else "초고속모드 수익확대+역할보호: 가격캐시/신호행 최적화 + 동시2섹터/역할보호/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode} / 시장붕괴필터:{market_collapse_mode} / 성장주붕괴필터:{growth_collapse_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -5567,19 +5592,25 @@ def _bt_classify_market_regime(ret20, day_ret):
 
 
 
-def _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=120):
-    """백테스트 매수필터용 KODEX200(069500) 장세 데이터를 1회 로딩한다."""
+def _bt_preload_benchmark_regime_df(start_date, end_date, lookback_days=120, code="069500"):
+    """백테스트 매수필터용 지수/ETF 장세 데이터를 1회 로딩한다. 기본은 KODEX200(069500)."""
     try:
         start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 60) + 30)).strftime("%Y%m%d")
         end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
-        raw = get_ohlcv_fdr_cached("069500", start_pad, end_pad)
+        raw = get_ohlcv_fdr_cached(str(code).zfill(6), start_pad, end_pad)
         df = _bt_prepare_single_price_df(raw)
         if df is None or len(df) == 0:
             return pd.DataFrame()
         df = df.copy().sort_index()
-        df["day_ret"] = pd.to_numeric(df.get("close", 0), errors="coerce").pct_change() * 100
+        close_s = pd.to_numeric(df.get("close", 0), errors="coerce")
+        df["day_ret"] = close_s.pct_change() * 100
+        df["ret5"] = close_s.pct_change(5) * 100
+        df["ret10"] = close_s.pct_change(10) * 100
         if "ret20" not in df.columns:
-            df["ret20"] = pd.to_numeric(df.get("close", 0), errors="coerce").pct_change(20) * 100
+            df["ret20"] = close_s.pct_change(20) * 100
+        df["ma5"] = close_s.rolling(5).mean()
+        df["up_day"] = (close_s.diff() > 0).astype(int)
+        df["up3"] = df["up_day"].rolling(3).sum()
         return df
     except Exception:
         return pd.DataFrame()
@@ -5598,6 +5629,110 @@ def _bt_regime_on_date(benchmark_df, asof_date):
         return _bt_classify_market_regime(row.get("ret20", np.nan), row.get("day_ret", 0))
     except Exception:
         return "장세불명"
+
+
+
+
+
+def _bt_is_growth_sensitive_sector(sector):
+    """KOSDAQ150 보조 붕괴필터를 적용할 성장주/코스닥 민감 섹터."""
+    s = str(sector or "")
+    growth_keywords = [
+        "바이오", "로봇", "엔터", "게임", "인터넷", "소프트웨어",
+        "2차전지", "반도체", "PCB", "화장품"
+    ]
+    return any(k in s for k in growth_keywords)
+
+
+def _bt_growth_collapse_state(growth_df, asof_date, mode="OFF"):
+    """KODEX 코스닥150(229200) 숫자 기반 성장주/코스닥 보조 차단 필터.
+
+    전체 시장을 모두 막는 필터가 아니라, 바이오/로봇/엔터/게임/인터넷/2차전지/반도체/PCB 등
+    코스닥·성장주 민감 섹터의 신규·추가매수 예산만 0으로 만든다. 매도/줄이기 신호에는 영향 없다.
+    반환: (block_growth_sector_buy, note)
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return False, ""
+    try:
+        if growth_df is None or len(growth_df) == 0:
+            return False, "성장주붕괴필터:KOSDAQ150데이터없음"
+        target = pd.to_datetime(asof_date)
+        part = growth_df[growth_df.index <= target]
+        if len(part) == 0:
+            return False, "성장주붕괴필터:기준일없음"
+        row = part.iloc[-1]
+        ret20 = float(pd.to_numeric(row.get("ret20", np.nan), errors="coerce"))
+        ret10 = float(pd.to_numeric(row.get("ret10", np.nan), errors="coerce"))
+        day_ret = float(pd.to_numeric(row.get("day_ret", 0), errors="coerce"))
+    except Exception:
+        return False, "성장주붕괴필터:계산실패"
+
+    if mode == "코스닥급락만 차단":
+        # KODEX200은 버티는데 성장주/코스닥만 무너지는 구간을 보조 차단.
+        t20, t10, td = -15.0, -10.0, -4.5
+    elif mode == "강한성장주차단":
+        t20, t10, td = -12.0, -8.0, -4.0
+    elif mode == "초강한성장주차단":
+        t20, t10, td = -10.0, -6.0, -3.5
+    else:
+        return False, ""
+
+    reasons = []
+    if not pd.isna(ret20) and ret20 <= t20:
+        reasons.append(f"KOSDAQ150 20일 {ret20:.2f}%")
+    if not pd.isna(ret10) and ret10 <= t10:
+        reasons.append(f"KOSDAQ150 10일 {ret10:.2f}%")
+    if not pd.isna(day_ret) and day_ret <= td:
+        reasons.append(f"KOSDAQ150 당일 {day_ret:.2f}%")
+    if reasons:
+        return True, "성장주/코스닥 신규차단(" + ", ".join(reasons) + ")"
+    return False, ""
+
+def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
+    """KODEX200 숫자 기반 시장붕괴 차단 필터.
+
+    긴급위험/뉴스 판단이 아니라 코로나급 지수 붕괴 구간에서만
+    신규·추가매수 예산을 0으로 만든다. 매도/줄이기 신호에는 영향 없다.
+    반환: (block_buy, note)
+    """
+    mode = str(mode or "OFF")
+    if mode in {"OFF", "사용안함", "없음"}:
+        return False, ""
+    try:
+        if benchmark_df is None or len(benchmark_df) == 0:
+            return False, "시장붕괴필터:지수데이터없음"
+        target = pd.to_datetime(asof_date)
+        part = benchmark_df[benchmark_df.index <= target]
+        if len(part) == 0:
+            return False, "시장붕괴필터:기준일없음"
+        row = part.iloc[-1]
+        ret20 = float(pd.to_numeric(row.get("ret20", np.nan), errors="coerce"))
+        ret10 = float(pd.to_numeric(row.get("ret10", np.nan), errors="coerce"))
+        day_ret = float(pd.to_numeric(row.get("day_ret", 0), errors="coerce"))
+    except Exception:
+        return False, "시장붕괴필터:계산실패"
+
+    if mode == "코로나급만 차단":
+        # 평소 조정은 놔두고, 2020년 3월 같은 급격한 시장 붕괴만 차단.
+        t20, t10, td = -12.0, -8.0, -4.0
+    elif mode == "강한차단":
+        t20, t10, td = -10.0, -7.0, -4.0
+    elif mode == "초강한차단":
+        t20, t10, td = -8.0, -5.0, -3.5
+    else:
+        return False, ""
+
+    reasons = []
+    if not pd.isna(ret20) and ret20 <= t20:
+        reasons.append(f"20일 {ret20:.2f}%")
+    if not pd.isna(ret10) and ret10 <= t10:
+        reasons.append(f"10일 {ret10:.2f}%")
+    if not pd.isna(day_ret) and day_ret <= td:
+        reasons.append(f"당일 {day_ret:.2f}%")
+    if reasons:
+        return True, "시장붕괴 신규차단(" + ", ".join(reasons) + ")"
+    return False, ""
 
 
 def _bt_regime_preset_table(mode="OFF", custom_multipliers=None):
@@ -10078,6 +10213,26 @@ elif menu == "6. 섹터전략 백테스트":
         else:
             st.caption("장세별 매수필터 OFF: 기존 섹터 신호만으로 매수합니다.")
 
+        st.subheader("4-0) 시장붕괴 / 성장주 보조 차단 필터")
+        mc1, mc2 = st.columns([1, 3])
+        with mc1:
+            market_collapse_mode = st.selectbox(
+                "시장붕괴 필터(KODEX200)",
+                options=["OFF", "코로나급만 차단", "강한차단", "초강한차단"],
+                index=1,
+                key="bt_market_collapse_mode",
+            )
+            growth_collapse_mode = st.selectbox(
+                "성장주 보조필터(KOSDAQ150)",
+                options=["OFF", "코스닥급락만 차단", "강한성장주차단", "초강한성장주차단"],
+                index=1,
+                key="bt_growth_collapse_mode",
+            )
+        with mc2:
+            st.caption("KODEX200은 전체시장 붕괴 차단용입니다. 매도는 그대로 두고, 붕괴장에서는 신규·추가매수만 막습니다.")
+            st.caption("KOSDAQ150 보조필터는 바이오/로봇/엔터/게임/인터넷/2차전지/반도체/PCB 등 성장주 민감 섹터에만 적용됩니다.")
+            st.caption("기본 비교값: KODEX200 코로나급만 차단 + KOSDAQ150 코스닥급락만 차단")
+
         st.subheader("4-1) 섹터신뢰도 자동가중")
         wg1, wg2 = st.columns([1, 3])
         with wg1:
@@ -10182,6 +10337,8 @@ elif menu == "6. 섹터전략 백테스트":
                 "섹터자동가중": sector_weight_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
+                "시장붕괴필터": market_collapse_mode,
+                "성장주붕괴필터": growth_collapse_mode,
             }
         ]), use_container_width=True, hide_index=True)
 
@@ -10237,6 +10394,8 @@ elif menu == "6. 섹터전략 백테스트":
                         sector_weight_mode=sector_weight_mode,
                         account_defense_mode=account_defense_mode,
                         loss_cooldown_mode=loss_cooldown_mode,
+                        market_collapse_mode=market_collapse_mode,
+                        growth_collapse_mode=growth_collapse_mode,
                     )
                     prog.empty()
                     status.empty()
@@ -10268,6 +10427,8 @@ elif menu == "6. 섹터전략 백테스트":
                         summary["대장주TP1"] = eff_leader_tp1
                         summary["대장주TP2"] = eff_leader_tp2
                         summary["대장주TP3"] = eff_leader_tp3 if eff_leader_tp_mode == "3단계추세익절" else "미사용"
+                        summary["시장붕괴필터"] = market_collapse_mode
+                        summary["성장주붕괴필터"] = growth_collapse_mode
                         summary_df = pd.DataFrame([summary])
                         settings_df = pd.DataFrame([{
                             "APP_VERSION": APP_VERSION,
@@ -10286,6 +10447,8 @@ elif menu == "6. 섹터전략 백테스트":
                             "섹터자동가중": sector_weight_mode,
                             "MDD브레이크": account_defense_mode,
                             "손실쿨다운": loss_cooldown_mode,
+                            "시장붕괴필터": market_collapse_mode,
+                            "성장주붕괴필터": growth_collapse_mode,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
