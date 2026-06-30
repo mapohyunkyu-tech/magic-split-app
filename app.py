@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_NAVER_FALLBACK_FIX_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_DUAL_LOOKBACK_INDEX_FIX_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5858,29 +5858,67 @@ def _bt_load_bunker_close_series_any(code_expr, start_date, end_date, lookback_d
 
 
 def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_status=False):
-    """방공호 후보 자산의 종가 테이블. 날짜는 대장주 백테스트 거래일에 맞춘다.
+    """방공호 후보 자산의 종가 테이블.
 
-    후보 자산별로 여러 ETF/티커 대체코드를 시도한다. 실패 시 어떤 코드를 시도했는지
-    상태표에 남겨 CASH:100% 원인을 바로 볼 수 있게 한다.
+    핵심 수정:
+    - 기존 버전은 price_df 인덱스를 '백테스트 검증일'만으로 만들었다.
+      그래서 60일 빠른검증/2020 시작 직후에는 듀얼모멘텀 계산에 필요한
+      45/63/126거래일 과거 데이터가 잘려 전 기간 CASH:100%로 떨어졌다.
+    - 수정 버전은 ETF 원본 시계열의 lookback 날짜까지 price_df 인덱스에 포함한다.
+      출력 daily는 기존 백테스트 날짜만 쓰지만, 모멘텀 계산은 과거 lookback을 볼 수 있다.
     """
     status = []
     try:
-        date_index = pd.DatetimeIndex(pd.to_datetime(pd.Series(dates).dropna().unique())).sort_values()
-        price_df = pd.DataFrame(index=date_index)
+        test_dates_series = pd.Series(pd.to_datetime(pd.Series(dates), errors="coerce")).dropna().drop_duplicates().sort_values()
+        test_index = pd.DatetimeIndex(test_dates_series.to_list())
+        if len(test_index) == 0:
+            if return_status:
+                status.append({"자산": "전체", "코드": "", "사용코드": "", "시도코드": "", "상태": "오류:검증일 없음", "원본행수": 0, "사용가능일수": 0})
+                return pd.DataFrame(), pd.DataFrame(status)
+            return pd.DataFrame()
+
+        loaded = []
+        # 1) 먼저 자산별 원본 시계열을 전부 로딩한다. 이때 lookback 구간이 포함되어 있어야 한다.
         for item in candidates:
             code_expr = str(item.get("code", "")).strip()
             name = str(item.get("name", code_expr)).strip()
             if str(item.get("type", "asset")) == "cash":
                 continue
             s, used_code, tried = _bt_load_bunker_close_series_any(code_expr, start_date, end_date)
-            if len(s) == 0:
+            if s is None or len(s) == 0:
                 status.append({"자산": name, "코드": code_expr, "사용코드": "", "시도코드": "/".join(tried), "상태": "실패", "원본행수": 0, "사용가능일수": 0})
                 continue
+            s = pd.to_numeric(s, errors="coerce").dropna()
+            s.index = pd.to_datetime(s.index, errors="coerce")
+            s = s[~pd.isna(s.index)].sort_index()
+            s = s[~s.index.duplicated(keep="last")]
+            if len(s) == 0:
+                status.append({"자산": name, "코드": code_expr, "사용코드": used_code, "시도코드": "/".join(tried), "상태": "실패", "원본행수": 0, "사용가능일수": 0})
+                continue
+            loaded.append((name, code_expr, used_code, tried, s))
+
+        if not loaded:
+            if return_status:
+                return pd.DataFrame(index=test_index), pd.DataFrame(status)
+            return pd.DataFrame(index=test_index)
+
+        # 2) 모멘텀 계산용 전체 인덱스 = 검증일 + 각 ETF lookback 원본 날짜.
+        #    시작일 이전 260거래일 정도의 원본 날짜가 여기에 포함되어야 60일 검증도 듀얼이 작동한다.
+        all_idx = test_index
+        for _, _, _, _, s in loaded:
+            all_idx = all_idx.union(pd.DatetimeIndex(s.index))
+        # 너무 먼 미래/과거 잡음을 제한한다. 원본 로더가 이미 lookback을 넣지만 한 번 더 방어.
+        sd_pad = pd.to_datetime(start_date) - pd.DateOffset(days=520)
+        ed_pad = pd.to_datetime(end_date) + pd.DateOffset(days=30)
+        all_idx = pd.DatetimeIndex([x for x in all_idx if (x >= sd_pad and x <= ed_pad)]).sort_values().drop_duplicates()
+        price_df = pd.DataFrame(index=all_idx)
+
+        # 3) 각 ETF를 전체 인덱스에 맞춰 ffill. 검증일에서 사용 가능한 값이 있어야 성공 처리.
+        for name, code_expr, used_code, tried, s in loaded:
             aligned = s.reindex(price_df.index, method="ffill")
             aligned = pd.to_numeric(aligned, errors="coerce")
-            # 시작 이전 패딩 구간만 있고 실제 검증일엔 값이 없으면 실패 처리한다.
-            usable_days = int(aligned.notna().sum())
-            if usable_days <= 0:
+            usable_on_test = aligned.reindex(test_index).notna().sum()
+            if int(usable_on_test) <= 0:
                 status.append({"자산": name, "코드": code_expr, "사용코드": used_code, "시도코드": "/".join(tried), "상태": "실패", "원본행수": int(len(s)), "사용가능일수": 0})
                 continue
             price_df[name] = aligned
@@ -5891,10 +5929,12 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
                 "시도코드": "/".join(tried),
                 "상태": "성공",
                 "원본행수": int(len(s)),
-                "사용가능일수": usable_days,
+                "사용가능일수": int(usable_on_test),
+                "모멘텀계산일수": int(aligned.notna().sum()),
                 "첫데이터일": s.index.min().strftime("%Y-%m-%d") if len(s) else "",
                 "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if len(s) else "",
             })
+
         if return_status:
             return price_df, pd.DataFrame(status)
         return price_df
@@ -5903,7 +5943,6 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
             status.append({"자산": "전체", "코드": "", "사용코드": "", "시도코드": "", "상태": f"오류:{e}", "원본행수": 0, "사용가능일수": 0})
             return pd.DataFrame(), pd.DataFrame(status)
         return pd.DataFrame()
-
 
 def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False):
     """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 추세선 위, 점수 양수인 자산 상위 N개.
@@ -10966,7 +11005,7 @@ elif menu == "6. 섹터전략 백테스트":
                                     bm3.metric("통합MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
                                     bm4.metric("방공호최종", fmt_won(bunker_summary.get("최종방공호", 0)))
                                     if "듀얼" in str(bunker_mode) and int(bunker_summary.get("비현금방공호일수", 0) or 0) == 0:
-                                        st.error("방공호 듀얼모멘텀이 실제 적용되지 않았습니다. 전 기간 CASH:100%입니다. 방공호가격데이터자산수/데이터상태를 확인하세요.")
+                                        st.error("방공호 듀얼모멘텀이 실제 적용되지 않았습니다. 전 기간 CASH:100%입니다. 방공호가격데이터자산수/데이터상태/모멘텀계산일수를 확인하세요.")
                                     else:
                                         st.caption(f"방공호 데이터자산 {bunker_summary.get('방공호가격데이터자산수', 0)}개 / 비현금 방공호일수 {bunker_summary.get('비현금방공호일수', 0)}일 / 마지막보유 {bunker_summary.get('마지막방공호보유', '')}")
                                     with st.expander("70/30 방공호 통합 결과", expanded=False):
