@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_COLLAPSE_FILTER_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_30_BACKTEST_20260630"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5689,6 +5689,229 @@ def _bt_growth_collapse_state(growth_df, asof_date, mode="OFF"):
         return True, "성장주/코스닥 신규차단(" + ", ".join(reasons) + ")"
     return False, ""
 
+
+
+
+def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
+    """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열."""
+    try:
+        code = str(code or "").strip().zfill(6)
+        if not code or code == "000000":
+            return pd.Series(dtype=float)
+        start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 40)).strftime("%Y%m%d")
+        end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=20)).strftime("%Y%m%d")
+        raw = get_ohlcv_fdr_cached(code, start_pad, end_pad)
+        df = _bt_prepare_single_price_df(raw)
+        if df is None or len(df) == 0:
+            return pd.Series(dtype=float)
+        close = pd.to_numeric(df.get("close", np.nan), errors="coerce").dropna()
+        close.name = code
+        return close.sort_index()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _bt_bunker_asset_prices(candidates, dates, start_date, end_date):
+    """방공호 후보 자산의 종가 테이블. 날짜는 대장주 백테스트 거래일에 맞춘다."""
+    try:
+        date_index = pd.to_datetime(pd.Series(dates).dropna().unique()).sort_values()
+        price_df = pd.DataFrame(index=date_index)
+        for item in candidates:
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", code)).strip()
+            if str(item.get("type", "asset")) == "cash":
+                continue
+            s = _bt_load_bunker_close_series(code, start_date, end_date)
+            if len(s) == 0:
+                continue
+            aligned = s.reindex(price_df.index, method="ffill")
+            price_df[name] = pd.to_numeric(aligned, errors="coerce")
+        return price_df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2):
+    """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 200일선 위, 점수 양수인 자산 상위 N개."""
+    picks = []
+    try:
+        if price_df is None or len(price_df) == 0:
+            return picks
+        target = pd.to_datetime(asof_date)
+        hist = price_df[price_df.index <= target].copy()
+        if len(hist) < 30:
+            return picks
+        row = hist.iloc[-1]
+        rows = []
+        for col in hist.columns:
+            ser = pd.to_numeric(hist[col], errors="coerce").dropna()
+            ser = ser[ser.index <= target]
+            if len(ser) < 70:
+                continue
+            close = float(ser.iloc[-1])
+            ret63 = (close / float(ser.iloc[-64]) - 1.0) * 100 if len(ser) >= 64 and float(ser.iloc[-64]) > 0 else np.nan
+            ret126 = (close / float(ser.iloc[-127]) - 1.0) * 100 if len(ser) >= 127 and float(ser.iloc[-127]) > 0 else np.nan
+            ma200 = float(ser.tail(min(200, len(ser))).mean()) if len(ser) >= 120 else np.nan
+            score = np.nanmean([ret63, ret126])
+            if pd.isna(score) or pd.isna(ma200):
+                continue
+            if close > ma200 and score > 0:
+                rows.append({"asset": col, "score": float(score), "ret63": float(ret63) if not pd.isna(ret63) else np.nan, "ret126": float(ret126) if not pd.isna(ret126) else np.nan})
+        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        picks = [r["asset"] for r in rows[:int(max_assets)]]
+    except Exception:
+        picks = []
+    return picks
+
+
+def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", gold_code="132030", dollar_code="261240"):
+    """대장주 엔진 + 방공호 엔진 70/30 통합 백테스트.
+
+    - 대장주 엔진은 현재 실행한 섹터전략 백테스트 총자산 곡선을 leader_ratio만큼 스케일한다.
+    - 방공호 엔진은 현금/금/달러/나스닥/시장 ETF를 월간 리밸런싱한다.
+    - 목적은 전략 과최적화가 아니라 전체 계좌 MDD 완충 효과를 보는 것이다.
+    """
+    try:
+        if daily_df is None or len(daily_df) == 0:
+            return pd.DataFrame(), {"오류": "대장주 백테스트 일별자금흐름이 없습니다."}
+        df = daily_df.copy()
+        if "기준일" not in df.columns or "총자산" not in df.columns:
+            return pd.DataFrame(), {"오류": "daily_df에 기준일/총자산 컬럼이 없습니다."}
+        df["기준일"] = pd.to_datetime(df["기준일"])
+        df = df.sort_values("기준일").reset_index(drop=True)
+        total_initial = float(total_initial or 100_000_000)
+        leader_ratio = float(leader_ratio or 0.70)
+        leader_ratio = min(0.95, max(0.05, leader_ratio))
+        bunker_ratio = 1.0 - leader_ratio
+        leader_initial = total_initial * leader_ratio
+        bunker_initial = total_initial * bunker_ratio
+        daily_total = pd.to_numeric(df["총자산"], errors="coerce").ffill().fillna(total_initial)
+        base = float(daily_total.iloc[0]) if float(daily_total.iloc[0]) > 0 else total_initial
+        df["대장주엔진평가금액"] = (daily_total / base) * leader_initial
+
+        start_date = df["기준일"].iloc[0]
+        end_date = df["기준일"].iloc[-1]
+        dates = list(df["기준일"])
+        candidates = [
+            {"name": "KODEX200", "code": kodex200_code, "type": "asset"},
+            {"name": "KOSDAQ150", "code": kosdaq150_code, "type": "asset"},
+            {"name": "NASDAQ100", "code": nasdaq_code, "type": "asset"},
+            {"name": "GOLD", "code": gold_code, "type": "asset"},
+            {"name": "DOLLAR", "code": dollar_code, "type": "asset"},
+            {"name": "CASH", "code": "", "type": "cash"},
+        ]
+        price_df = _bt_bunker_asset_prices(candidates, dates, start_date, end_date)
+        daily_rate = (1.0 + float(cash_annual_rate or 0.0) / 100.0) ** (1.0 / 252.0) - 1.0
+        mode = str(mode or "월간 듀얼모멘텀 상위2")
+        static_weights = {
+            "CASH": max(0.0, float(static_cash_weight or 0.0)),
+            "GOLD": max(0.0, float(static_gold_weight or 0.0)),
+            "NASDAQ100": max(0.0, float(static_nasdaq_weight or 0.0)),
+        }
+        sw_sum = sum(static_weights.values())
+        if sw_sum <= 0:
+            static_weights = {"CASH": 100.0}
+            sw_sum = 100.0
+        static_weights = {k: v / sw_sum for k, v in static_weights.items() if v > 0}
+
+        cash_value = bunker_initial
+        shares = {}
+        current_weights = {"CASH": 1.0}
+        last_month = None
+        rows = []
+        peak = total_initial
+        max_dd = 0.0
+        prev_date = None
+        rebalance_count = 0
+
+        def current_bunker_value(date):
+            val = float(cash_value)
+            if price_df is not None and len(price_df) > 0:
+                for asset, qty in shares.items():
+                    if asset in price_df.columns:
+                        part = price_df.loc[price_df.index <= pd.to_datetime(date), asset].dropna()
+                        if len(part) > 0:
+                            val += float(qty) * float(part.iloc[-1])
+            return val
+
+        for i, date in enumerate(dates):
+            date = pd.to_datetime(date)
+            if i > 0:
+                cash_value *= (1.0 + daily_rate)
+            month_key = date.strftime("%Y-%m")
+            need_rebalance = (last_month != month_key)
+            if need_rebalance:
+                # 리밸런싱 직전 평가 후 현재가로 새 비중 편성
+                total_bunker_before = current_bunker_value(date)
+                shares = {}
+                cash_value = 0.0
+                if mode == "정적 50/30/20":
+                    current_weights = dict(static_weights)
+                elif mode == "현금/단기채만":
+                    current_weights = {"CASH": 1.0}
+                else:
+                    asof = prev_date if prev_date is not None else date
+                    picks = _bt_pick_bunker_dual_momentum(price_df, asof, max_assets=2)
+                    if len(picks) == 0:
+                        current_weights = {"CASH": 1.0}
+                    else:
+                        w = 1.0 / len(picks)
+                        current_weights = {p: w for p in picks}
+                for asset, w in current_weights.items():
+                    alloc = float(total_bunker_before) * float(w)
+                    if asset == "CASH" or asset not in price_df.columns:
+                        cash_value += alloc
+                    else:
+                        pxs = price_df.loc[price_df.index <= date, asset].dropna()
+                        if len(pxs) == 0 or float(pxs.iloc[-1]) <= 0:
+                            cash_value += alloc
+                        else:
+                            shares[asset] = alloc / float(pxs.iloc[-1])
+                last_month = month_key
+                rebalance_count += 1
+            bunker_val = current_bunker_value(date)
+            leader_val = float(df.loc[i, "대장주엔진평가금액"])
+            combined = leader_val + bunker_val
+            peak = max(float(peak), float(combined))
+            dd = (combined / peak - 1.0) * 100.0 if peak > 0 else 0.0
+            max_dd = min(float(max_dd), float(dd))
+            rows.append({
+                "기준일": date.strftime("%Y-%m-%d"),
+                "대장주엔진평가금액": round(leader_val),
+                "방공호평가금액": round(bunker_val),
+                "통합총자산": round(combined),
+                "통합수익률": round((combined / total_initial - 1.0) * 100.0, 2),
+                "통합MDD": round(dd, 2),
+                "방공호보유": ",".join([f"{k}:{round(v*100)}%" for k, v in current_weights.items()]),
+            })
+            prev_date = date
+        out = pd.DataFrame(rows)
+        if len(out) == 0:
+            return out, {"오류": "방공호 결과가 없습니다."}
+        final_total = float(out["통합총자산"].iloc[-1])
+        bunker_final = float(out["방공호평가금액"].iloc[-1])
+        leader_final = float(out["대장주엔진평가금액"].iloc[-1])
+        summary = {
+            "방공호전략": mode,
+            "초기총자금": round(total_initial),
+            "대장주비중": round(leader_ratio * 100, 1),
+            "방공호비중": round(bunker_ratio * 100, 1),
+            "대장주초기금액": round(leader_initial),
+            "방공호초기금액": round(bunker_initial),
+            "최종대장주엔진": round(leader_final),
+            "최종방공호": round(bunker_final),
+            "최종통합총자산": round(final_total),
+            "통합총수익률": round((final_total / total_initial - 1.0) * 100.0, 2),
+            "통합최대낙폭": round(float(out["통합MDD"].min()), 2),
+            "리밸런싱횟수": rebalance_count,
+            "현금연수익률가정": float(cash_annual_rate or 0.0),
+            "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}",
+            "메모": "대장주 엔진 일별 총자산 곡선을 70%로 스케일하고, 30% 방공호를 별도 월간 리밸런싱으로 합산한 통합 백테스트입니다.",
+        }
+        return out, summary
+    except Exception as e:
+        return pd.DataFrame(), {"오류": str(e)}
+
 def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
     """KODEX200 숫자 기반 시장붕괴 차단 필터.
 
@@ -10117,6 +10340,19 @@ elif menu == "6. 섹터전략 백테스트":
         if compound_mode:
             st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
 
+        st.subheader("1-0) 70/30 방공호 통합 백테스트")
+        bk1, bk2, bk3 = st.columns(3)
+        with bk1:
+            enable_bunker_backtest = st.checkbox("70/30 방공호 같이 계산", value=False, key="bt_enable_bunker_7030")
+            leader_alloc_ratio = st.number_input("대장주 엔진 비중(%)", min_value=10.0, max_value=95.0, value=70.0, step=5.0, key="bt_leader_alloc_ratio")
+        with bk2:
+            bunker_mode = st.selectbox("방공호 방식", options=["월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
+            bunker_cash_rate = st.number_input("현금/단기채 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="bt_bunker_cash_rate")
+        with bk3:
+            st.caption("시작 원금 1억을 대장주 70% + 방공호 30%로 나눠 통합자산/MDD를 계산합니다.")
+            st.caption("방공호 기본 후보: KODEX200, KOSDAQ150, 나스닥100 ETF, 금 ETF, 달러 ETF, 현금")
+            st.caption("대장주 엔진은 현재 백테스트 총자산 곡선을 비중만큼 스케일합니다.")
+
         st.subheader("1-1) MDD -10% 수익확대 프리셋")
         profit_expand_preset = st.selectbox(
             "수익확대 프리셋",
@@ -10449,6 +10685,10 @@ elif menu == "6. 섹터전략 백테스트":
                             "손실쿨다운": loss_cooldown_mode,
                             "시장붕괴필터": market_collapse_mode,
                             "성장주붕괴필터": growth_collapse_mode,
+                            "방공호통합백테스트": enable_bunker_backtest,
+                            "대장주엔진비중": leader_alloc_ratio,
+                            "방공호방식": bunker_mode,
+                            "방공호현금연수익률": bunker_cash_rate,
                 "MDD브레이크": account_defense_mode,
                 "손실쿨다운": loss_cooldown_mode,
                             "장세배율_강한상승장": regime_custom_multipliers.get("강한상승장", ""),
@@ -10483,6 +10723,32 @@ elif menu == "6. 섹터전략 백테스트":
                             "빠른백테스트": fast_mode,
                             "검증종목범위": universe_mode,
                         }])
+                        bunker_daily_df = pd.DataFrame()
+                        bunker_summary_df = pd.DataFrame()
+                        if bool(enable_bunker_backtest):
+                            try:
+                                bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
+                                    daily_df,
+                                    total_initial=float(initial_cash),
+                                    leader_ratio=float(leader_alloc_ratio) / 100.0,
+                                    mode=bunker_mode,
+                                    cash_annual_rate=bunker_cash_rate,
+                                )
+                                if bunker_summary.get("오류"):
+                                    st.warning(f"방공호 통합 백테스트 계산 실패: {bunker_summary.get('오류')}")
+                                else:
+                                    bunker_summary_df = pd.DataFrame([bunker_summary])
+                                    bm1, bm2, bm3, bm4 = st.columns(4)
+                                    bm1.metric("통합수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
+                                    bm2.metric("통합최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
+                                    bm3.metric("통합MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
+                                    bm4.metric("방공호최종", fmt_won(bunker_summary.get("최종방공호", 0)))
+                                    with st.expander("70/30 방공호 통합 결과", expanded=False):
+                                        show_pinned_dataframe(bunker_summary_df, height=120)
+                                        show_pinned_dataframe(bunker_daily_df.tail(80), height=300, pin_rank=False)
+                            except Exception as e:
+                                st.warning(f"방공호 통합 백테스트 계산 중 오류: {e}")
+
                         fail_df = trade_df.copy()
                         if len(fail_df) > 0 and "실현손익" in fail_df.columns:
                             fail_df["실현손익"] = pd.to_numeric(fail_df["실현손익"], errors="coerce").fillna(0)
@@ -10499,6 +10765,10 @@ elif menu == "6. 섹터전략 백테스트":
                             zf.writestr(f"magic_split_sector_backtest_monthly_{today_str()}.csv", monthly_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_regime_{today_str()}.csv", regime_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_regime_daily_{today_str()}.csv", regime_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                            if bool(enable_bunker_backtest) and len(bunker_summary_df) > 0:
+                                zf.writestr(f"magic_split_bunker_7030_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                            if bool(enable_bunker_backtest) and len(bunker_daily_df) > 0:
+                                zf.writestr(f"magic_split_bunker_7030_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
                         export_buffer.seek(0)
 
                         st.download_button(
