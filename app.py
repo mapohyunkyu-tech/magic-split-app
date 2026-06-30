@@ -9853,8 +9853,17 @@ elif menu == "6. 섹터전략 백테스트":
         with c0:
             period_preset = st.selectbox(
                 "백테스트 기간",
-                options=["빠른검증 60거래일", "기본검증 120거래일", "실전검증 240거래일", "장세검증 480거래일", "스트레스검증 720거래일", "사용자지정"],
-                index=4,
+                options=[
+                    "빠른검증 60거래일",
+                    "기본검증 120거래일",
+                    "실전검증 240거래일",
+                    "장세검증 480거래일",
+                    "스트레스검증 720거래일",
+                    "2021부터 전체검증",
+                    "2020부터 전체검증",
+                    "사용자지정",
+                ],
+                index=6,
                 key="bt_period_preset",
             )
         preset_days_map = {
@@ -9863,16 +9872,35 @@ elif menu == "6. 섹터전략 백테스트":
             "실전검증 240거래일": 240,
             "장세검증 480거래일": 480,
             "스트레스검증 720거래일": 720,
+            "2021부터 전체검증": 1500,
+            "2020부터 전체검증": 1800,
+        }
+        preset_start_map = {
+            "2021부터 전체검증": datetime(2021, 1, 4).date(),
+            "2020부터 전체검증": datetime(2020, 1, 2).date(),
         }
         default_signal_days = preset_days_map.get(period_preset, 240)
+        default_start_date = preset_start_map.get(
+            period_preset,
+            (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
+        )
         with c1:
-            start_date = st.date_input("시작일", value=(datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(), key="bt_start_date")
+            start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date")
         with c2:
             end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
         with c3:
-            max_signal_days = st.number_input("최대 검증 거래일", min_value=5, max_value=720, value=int(default_signal_days), step=5, key="bt_max_days")
+            max_signal_days = st.number_input(
+                "최대 검증 거래일",
+                min_value=5,
+                max_value=3000,
+                value=int(default_signal_days),
+                step=5,
+                key="bt_max_days",
+            )
+        if period_preset in ["2020부터 전체검증", "2021부터 전체검증"]:
+            st.info("장기검증 모드: 시작일은 2020/2021년으로 잡고, 최대 검증 거래일 상한을 3000일까지 열었습니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
         if max_signal_days <= 60:
-            st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일로 확인하세요.")
+            st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
         st.subheader("1) 자금 설정")
         c1, c2, c3, c4, c5 = st.columns(5)
