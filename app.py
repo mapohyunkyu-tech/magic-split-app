@@ -4380,22 +4380,60 @@ def _bt_price_frame(code, start_date, end_date):
 
 
 def _bt_trading_dates_from_universe(leader_df, start_date, end_date):
-    """대표주 중 데이터가 잡히는 첫 종목으로 거래일 배열을 만든다."""
+    """백테스트 거래일 배열을 만든다.
+
+    2020 장기검증 보정:
+    - 예전 방식은 대표주 중 첫 번째로 데이터가 잡힌 종목의 날짜를 캘린더로 삼았다.
+      그 종목이 2022년 이후 데이터만 있으면, 시작일을 2020으로 넣어도 실제 검증이 2022부터 시작되는 문제가 있었다.
+    - 이제는 KODEX200(069500) 거래일을 우선 캘린더로 사용한다.
+    - 개별 종목은 해당 날짜에 데이터가 없으면 그날 계산에서 0 처리되고, 데이터가 생기는 날부터 자동 편입된다.
+    - KODEX200 로딩이 실패하면 대표주 전체 날짜의 합집합을 사용하고, 그것도 실패하면 평일 달력으로 fallback한다.
+    """
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    start_pad = (start_ts - pd.DateOffset(days=20)).strftime("%Y-%m-%d")
+    end_pad = (end_ts + pd.DateOffset(days=10)).strftime("%Y-%m-%d")
+
+    def _normalize_dates_from_df(df):
+        if df is None or len(df) == 0:
+            return []
+        out = []
+        for x in df.index:
+            try:
+                d = pd.to_datetime(x)
+                if start_ts <= d <= end_ts:
+                    out.append(d.strftime("%Y-%m-%d"))
+            except Exception:
+                continue
+        return sorted(list(dict.fromkeys(out)))
+
+    # 1) 시장 캘린더: KODEX200을 우선 사용.
+    try:
+        bench = _bt_price_frame("069500", start_pad, end_pad)
+        dates = _normalize_dates_from_df(bench)
+        if dates:
+            return dates
+    except Exception:
+        pass
+
+    # 2) fallback: 대표주 전체 날짜 합집합. 특정 종목의 상장일/데이터 시작일에 끌려가지 않게 한다.
     try:
         active = normalize_sector_leader_df(leader_df)
-        codes = active[active["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")]["코드"].astype(str).str.zfill(6).tolist()
+        codes = active[active["사용여부"].apply(lambda x: _sector_use_yn(x) != "N")]["코드"].astype(str).str.zfill(6).drop_duplicates().tolist()
     except Exception:
         codes = []
-    start_pad = (pd.to_datetime(start_date) - pd.DateOffset(days=20)).strftime("%Y-%m-%d")
-    end_pad = (pd.to_datetime(end_date) + pd.DateOffset(days=10)).strftime("%Y-%m-%d")
-    for code in codes[:20]:
-        df = _bt_price_frame(code, start_pad, end_pad)
-        if df is not None and len(df) > 0:
-            dates = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in df.index]
-            dates = [d for d in dates if pd.to_datetime(start_date) <= pd.to_datetime(d) <= pd.to_datetime(end_pad)]
-            if dates:
-                return dates
-    # 데이터가 없으면 평일 달력으로라도 화면이 죽지 않게 한다.
+    date_set = set()
+    for code in codes:
+        try:
+            df = _bt_price_frame(code, start_pad, end_pad)
+            for d in _normalize_dates_from_df(df):
+                date_set.add(d)
+        except Exception:
+            continue
+    if date_set:
+        return sorted(date_set)
+
+    # 3) 데이터가 없으면 평일 달력으로라도 화면이 죽지 않게 한다.
     return [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
 
 
@@ -4552,7 +4590,9 @@ def _bt_preload_price_map_cached(codes_tuple, start_date, end_date, lookback_day
         except Exception:
             return code, pd.DataFrame()
 
-    max_workers = min(8, max(1, len(codes)))
+    # 장기검증(2020~)에서는 첫 실행 데이터 로딩이 병목이다.
+    # FDR 호출은 I/O 대기가 많으므로 작업자 수를 조금 더 늘려 첫 로딩 시간을 줄인다.
+    max_workers = min(16, max(1, len(codes)))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_load_one, code) for code in codes]
         for fut in as_completed(futs):
@@ -4608,45 +4648,49 @@ def _bt_close_on_or_before_from_map(price_map, code, asof_date):
 
 
 def _bt_stock_flow_row_from_map(row, price_map, asof_date):
+    """price_map에서 기준일 행만 O(1)에 가깝게 꺼내 백테스트 신호행을 만든다.
+
+    FAST_OPT:
+    기존 버전은 매 날짜·종목마다 df.iloc[:pos]를 복사하고 dropna를 수행했다.
+    2020 장기검증에서는 이 복사가 누적되어 느려지므로,
+    미리 계산된 rolling 컬럼(amount_ma5/ret20 등)을 기준일 행에서 바로 읽는다.
+    신호 값은 기존과 동일하게 기준일 당일까지의 마지막 거래일을 사용한다.
+    """
     code = str(row.get("코드", "")).replace(".0", "").strip().zfill(6)
     name = str(row.get("종목", "")).strip()
     sector = str(row.get("섹터", "기타") or "기타").strip()
     role = str(row.get("섹터역할", "회전형중형주") or "회전형중형주").strip()
     rank = _safe_int_value(row.get("대표순위", 99), 99)
     memo = str(row.get("메모", ""))
+
+    base_empty = {
+        "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
+        "현재가": 0, "오늘거래대금억": 0, "전일거래대금억": 0,
+        "5일평균거래대금억": 0, "20일평균거래대금억": 0,
+        "전일대비거래대금증감률": 0, "5일대비거래대금증감률": 0,
+        "5일수익률": 0, "20일수익률": 0, "60일수익률": 0, "120일고점대비눌림률": 0,
+        "고점위험": "데이터부족", "대표주판정": "계산불가", "발빼기신호": "대기",
+        "데이터기준일": "", "메모": memo
+    }
+
     df = price_map.get(code, pd.DataFrame())
-    if df is None or len(df) == 0:
-        df = pd.DataFrame()
-    else:
-        try:
-            _pos = int(df.index.searchsorted(pd.to_datetime(asof_date), side="right"))
-            df = df.iloc[:_pos]
-        except Exception:
-            df = df[df.index <= pd.to_datetime(asof_date)]
     if df is None or len(df) < 25:
-        return {
-            "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
-            "현재가": 0, "오늘거래대금억": 0, "전일거래대금억": 0,
-            "5일평균거래대금억": 0, "20일평균거래대금억": 0,
-            "전일대비거래대금증감률": 0, "5일대비거래대금증감률": 0,
-            "5일수익률": 0, "20일수익률": 0, "60일수익률": 0, "120일고점대비눌림률": 0,
-            "고점위험": "데이터부족", "대표주판정": "계산불가", "발빼기신호": "대기",
-            "데이터기준일": "", "메모": memo
-        }
-    valid_close = df.dropna(subset=["close"])
-    if len(valid_close) < 2:
-        return {
-            "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
-            "현재가": 0, "오늘거래대금억": 0, "전일거래대금억": 0,
-            "5일평균거래대금억": 0, "20일평균거래대금억": 0,
-            "전일대비거래대금증감률": 0, "5일대비거래대금증감률": 0,
-            "5일수익률": 0, "20일수익률": 0, "60일수익률": 0, "120일고점대비눌림률": 0,
-            "고점위험": "데이터부족", "대표주판정": "계산불가", "발빼기신호": "대기",
-            "데이터기준일": "", "메모": memo
-        }
-    last = valid_close.iloc[-1]
-    prev = valid_close.iloc[-2]
+        return base_empty
+
+    try:
+        # 기준일 이하 마지막 거래일 위치. 데이터가 늦게 시작한 종목은 자동 제외된다.
+        pos = int(df.index.searchsorted(pd.to_datetime(asof_date), side="right")) - 1
+    except Exception:
+        pos = -1
+    if pos < 1:
+        return base_empty
+
+    last = df.iloc[pos]
+    prev = df.iloc[pos - 1]
+
     price = int(_safe_float_value(last.get("close", 0), 0))
+    if price <= 0:
+        return base_empty
     amount_today = _safe_float_value(last.get("amount", 0), 0)
     amount_prev = _safe_float_value(prev.get("amount", 0), 0)
     amount_ma5 = _safe_float_value(last.get("amount_ma5", 0), 0)
@@ -4655,6 +4699,7 @@ def _bt_stock_flow_row_from_map(row, price_map, asof_date):
     ret20 = _safe_float_value(last.get("ret20", 0), 0)
     ret60 = _safe_float_value(last.get("ret60", 0), 0)
     pullback = _safe_float_value(last.get("pullback120", 0), 0)
+
     amount_vs_prev = _pct_change_safe(amount_today, amount_prev)
     amount_vs5 = _pct_change_safe(amount_today, amount_ma5)
     high_risk, exit_signal = _sector_flow_risk_state(ret5, ret20, ret60, pullback, amount_vs5)
@@ -4668,10 +4713,12 @@ def _bt_stock_flow_row_from_map(row, price_map, asof_date):
         stock_judge = "이탈주의"
     else:
         stock_judge = "중립"
+
     try:
-        data_date = pd.to_datetime(valid_close.index[-1]).strftime("%Y-%m-%d")
+        data_date = pd.to_datetime(df.index[pos]).strftime("%Y-%m-%d")
     except Exception:
         data_date = str(asof_date)
+
     return {
         "섹터": sector, "섹터역할": role, "대표순위": rank, "코드": code, "종목": name,
         "현재가": price,
@@ -5094,8 +5141,7 @@ def run_sector_strategy_backtest(
             sector_df, trade_rows, signal_date, mode=sector_weight_mode, initial_cash=initial_cash
         )
         stock_by_code = {str(r.get("코드", "")).zfill(6): r for _, r in stock_df.iterrows()} if len(stock_df) else {}
-        buy_count_before = len([t for t in trade_rows if t["구분"] == "매수"])
-        sell_count_before = len([t for t in trade_rows if t["구분"] == "매도"])
+        trade_len_before = len(trade_rows)
         sold_today_codes.clear()
 
         # 0) 목표 익절 먼저 확인한다. 신호일 종가 기준으로 목표 도달을 확인하고, 실제 매도는 다음 거래일 시가로 처리한다.
@@ -5327,8 +5373,9 @@ def run_sector_strategy_backtest(
         max_drawdown = min(max_drawdown, dd)
         prev_total = daily_rows[-1]["총자산"] if daily_rows else initial_cash
         daily_pnl = total_asset - float(prev_total)
-        buys_today = len([t for t in trade_rows if t["구분"] == "매수"]) - buy_count_before
-        sells_today = len([t for t in trade_rows if t["구분"] == "매도"]) - sell_count_before
+        _new_trades = trade_rows[trade_len_before:]
+        buys_today = sum(1 for t in _new_trades if t["구분"] == "매수")
+        sells_today = sum(1 for t in _new_trades if t["구분"] == "매도")
         signal_sector = ",".join(buy_candidates.head(3)["섹터"].astype(str).tolist()) if len(buy_candidates) else ""
         daily_rows.append({
             "기준일": signal_date, "다음매매일": next_trade_date, "장세": current_market_regime, "장세매수배율": round(float(current_buy_multiplier), 2), "장세매수필터": str(regime_filter_mode), "보유섹터": ",".join(active_sectors()), "오늘신호섹터": signal_sector,
@@ -5376,7 +5423,22 @@ def run_sector_strategy_backtest(
     trade_count = len(trade_df)
     wins = int((pd.to_numeric(trade_df.get("실현손익", pd.Series(dtype=float)), errors="coerce").fillna(0) > 0).sum()) if len(trade_df) else 0
     sells = int((trade_df["구분"].eq("매도")).sum()) if len(trade_df) else 0
+    requested_start_date = str(start_date)
+    requested_end_date = str(end_date)
+    actual_start_date = str(daily_df.iloc[0]["기준일"]) if len(daily_df) > 0 else ""
+    actual_end_date = str(daily_df.iloc[-1]["기준일"]) if len(daily_df) > 0 else ""
+    first_trade_date = ""
+    try:
+        if len(trade_df) > 0:
+            first_trade_date = str(trade_df.iloc[0]["매매일"])
+    except Exception:
+        first_trade_date = ""
     summary = {
+        "요청시작일": requested_start_date,
+        "요청종료일": requested_end_date,
+        "실제검증시작일": actual_start_date,
+        "실제검증종료일": actual_end_date,
+        "첫매매일": first_trade_date,
         "초기자금": round(float(initial_cash), 0),
         "최종총자산": round(float(final_asset), 0),
         "총수익률": round(float(total_return), 2),
@@ -5393,7 +5455,7 @@ def run_sector_strategy_backtest(
         "섹터자동가중": str(sector_weight_mode),
         "계좌MDD브레이크": str(account_defense_mode),
         "손실쿨다운": str(loss_cooldown_mode),
-        "메모": (("빠른모드 수익확대+역할보호+증액투자ON: 현재총자산 비율로 차수금액 자동 확대/축소" if compound_mode else "빠른모드 수익확대+역할보호: 동시2섹터/대장주1차1000만/2등1차500만/역할이탈시에만 손실축소/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
+        "메모": (("초고속모드 수익확대+역할보호+증액투자ON: 가격캐시/신호행 최적화 + 현재총자산 비율 증액" if compound_mode else "초고속모드 수익확대+역할보호: 가격캐시/신호행 최적화 + 동시2섹터/역할보호/회전형OFF") if bool(fast_mode) else "신호일 다음 거래일 시가 체결 기준") + f" / 장세매수필터:{regime_filter_mode} / 섹터자동가중:{sector_weight_mode} / MDD브레이크:{account_defense_mode} / 손실쿨다운:{loss_cooldown_mode}"
     }
     return daily_df, trade_df, pos_df, summary
 
@@ -9898,7 +9960,7 @@ elif menu == "6. 섹터전략 백테스트":
                 key="bt_max_days",
             )
         if period_preset in ["2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: 시작일은 2020/2021년으로 잡고, 최대 검증 거래일 상한을 3000일까지 열었습니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
+            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2020/2021년부터 검증합니다. 개별 종목은 데이터가 생기는 날부터 자동 편입됩니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -9968,6 +10030,8 @@ elif menu == "6. 섹터전략 백테스트":
         with c4:
             fast_mode = st.checkbox("빠른 백테스트", value=True, key="bt_fast_mode")
             universe_mode = st.selectbox("검증 종목 범위", options=["핵심만", "전체"], index=0, key="bt_universe_mode")
+            if fast_mode:
+                st.caption("FAST_OPT 적용: 가격데이터 병렬로딩 + 일별 신호행 복사 제거")
 
         st.subheader("4) 장세별 매수차단/축소 설정")
         mf1, mf2, mf3, mf4 = st.columns(4)
@@ -10197,6 +10261,7 @@ elif menu == "6. 섹터전략 백테스트":
                         m6, m7 = st.columns(2)
                         m6.metric("단순 연환산", f"{summary.get('단순연환산수익률', 0)}%")
                         m7.metric("복리 연환산", f"{summary.get('복리연환산수익률', 0)}%")
+                        st.caption(f"요청기간 {summary.get('요청시작일', start_date)} ~ {summary.get('요청종료일', end_date)} / 실제검증 {summary.get('실제검증시작일', '')} ~ {summary.get('실제검증종료일', '')} / 첫매매일 {summary.get('첫매매일', '')}")
 
                         summary["수익확대프리셋"] = eff_profit_preset_note
                         summary["대장주익절방식"] = eff_leader_tp_mode
@@ -10210,6 +10275,9 @@ elif menu == "6. 섹터전략 백테스트":
                             "시작일": str(start_date),
                             "종료일": str(end_date),
                             "최대검증거래일": max_signal_days,
+                            "실제검증시작일": summary.get("실제검증시작일", ""),
+                            "실제검증종료일": summary.get("실제검증종료일", ""),
+                            "첫매매일": summary.get("첫매매일", ""),
                             "총자금": initial_cash,
                             "방어예수금": defense_cash,
                             "최저현금기준": defense_preset,
