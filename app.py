@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v38_TURBO_ONLY_2010_SAFE_RUN_20260701"
+APP_VERSION = "v39_T100_PROXY_EXTENDED_BACKTEST_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5786,6 +5786,188 @@ def _bt_load_stooq_close_series(ticker, start_date, end_date, lookback_days=260)
         return pd.Series(dtype=float)
 
 
+def _bt_load_yahoo_close_series(symbol, start_date, end_date, lookback_days=260):
+    """Yahoo download 백업 로더. NDX/GC=F/USDKRW=X 같은 장기 프록시용."""
+    try:
+        sym = str(symbol or "").strip()
+        if not sym:
+            return pd.Series(dtype=float)
+        sd = pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)
+        ed = pd.to_datetime(end_date) + pd.DateOffset(days=35)
+        p1 = int(sd.timestamp())
+        p2 = int(ed.timestamp())
+        url = f"https://query1.finance.yahoo.com/v7/finance/download/{sym}?period1={p1}&period2={p2}&interval=1d&events=history&includeAdjustedClose=true"
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200 or "Date" not in r.text:
+            return pd.Series(dtype=float)
+        df = pd.read_csv(io.StringIO(r.text))
+        close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+        if "Date" not in df.columns or close_col not in df.columns:
+            return pd.Series(dtype=float)
+        ser = pd.Series(pd.to_numeric(df[close_col], errors="coerce").values, index=pd.to_datetime(df["Date"], errors="coerce"), dtype=float).dropna().sort_index()
+        ser.name = sym
+        return ser[ser > 0]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _bt_load_naver_index_series(symbol, start_date, end_date, lookback_days=260):
+    """네이버 지수 JSON 백업 로더. 예: KPI200, KOSDAQ."""
+    try:
+        sym = str(symbol or "").strip()
+        if not sym:
+            return pd.Series(dtype=float)
+        sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)).strftime("%Y%m%d")
+        ed = (pd.to_datetime(end_date) + pd.DateOffset(days=35)).strftime("%Y%m%d")
+        url = f"https://api.finance.naver.com/siseJson.naver?symbol={sym}&requestType=1&startTime={sd}&endTime={ed}&timeframe=day"
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200 or not r.text:
+            return pd.Series(dtype=float)
+        text = r.text
+        rows = []
+        # 네이버 siseJson은 ["날짜", "시가", "고가", "저가", "종가", ...] 형태의 JS 배열 텍스트다.
+        for m in re.finditer(r'\[\s*"?(\d{8})"?\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)', text):
+            dt = pd.to_datetime(m.group(1), format="%Y%m%d", errors="coerce")
+            if pd.isna(dt):
+                continue
+            try:
+                close = float(m.group(5))
+            except Exception:
+                continue
+            if close > 0:
+                rows.append((dt, close))
+        if not rows:
+            return pd.Series(dtype=float)
+        ser = pd.Series([x[1] for x in rows], index=pd.DatetimeIndex([x[0] for x in rows]), dtype=float).sort_index()
+        ser.name = sym
+        return ser[ser > 0]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _bt_try_fdr_symbols(symbols, start_date, end_date, lookback_days=260):
+    """FDR 후보 심볼을 순서대로 시도한다."""
+    for sym in list(symbols or []):
+        try:
+            sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)).strftime("%Y-%m-%d")
+            ed = (pd.to_datetime(end_date) + pd.DateOffset(days=35)).strftime("%Y-%m-%d")
+            raw = fdr.DataReader(str(sym), sd, ed)
+            if raw is None or len(raw) == 0:
+                continue
+            close = _ohlcv_close_series(raw)
+            if close is None or len(close) == 0:
+                close_col = next((c for c in ["Close", "close", "종가", "Adj Close"] if c in raw.columns), None)
+                if close_col is None:
+                    continue
+                close = pd.to_numeric(raw[close_col], errors="coerce").dropna()
+            close.index = pd.to_datetime(close.index, errors="coerce")
+            close = close[~pd.isna(close.index)].sort_index()
+            close = pd.to_numeric(close, errors="coerce").dropna()
+            close = close[close > 0]
+            if len(close) > 0:
+                close.name = str(sym)
+                return close
+        except Exception:
+            continue
+    return pd.Series(dtype=float)
+
+
+def _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=260):
+    """USD/KRW 환율 프록시. FDR → Yahoo → Stooq 순서."""
+    s = _bt_try_fdr_symbols(["USD/KRW", "USDKRW", "KRW=X"], start_date, end_date, lookback_days=lookback_days)
+    if s is not None and len(s) > 0:
+        s.name = "USDKRW"
+        return s
+    for sym in ["KRW=X", "USDKRW=X"]:
+        s = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            s.name = "USDKRW"
+            return s
+    for sym in ["usdkrw", "usdkrw.us"]:
+        s = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            s.name = "USDKRW"
+            return s
+    return pd.Series(dtype=float)
+
+
+def _bt_multiply_with_fx(base, fx, name):
+    try:
+        if base is None or len(base) == 0:
+            return pd.Series(dtype=float)
+        if fx is None or len(fx) == 0:
+            out = pd.to_numeric(base, errors="coerce").dropna().sort_index()
+            out.name = name
+            return out
+        idx = pd.DatetimeIndex(base.index).union(pd.DatetimeIndex(fx.index)).sort_values()
+        b = pd.to_numeric(base, errors="coerce").reindex(idx).ffill()
+        f = pd.to_numeric(fx, errors="coerce").reindex(idx).ffill()
+        out = (b * f).dropna()
+        out = out[out > 0]
+        out.name = name
+        return out
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _bt_load_proxy_close_series(proxy_key, start_date, end_date, lookback_days=260):
+    """2010 장기검증용 지수/환율 프록시 로더.
+
+    목적: ETF 상장/데이터 시작 전 구간이 CASH 100%로 비는 문제를 줄이기 위해
+    KOSPI200/KOSDAQ/NASDAQ100+USDKRW/GOLD+USDKRW/USDKRW를 사용한다.
+    """
+    key = str(proxy_key or "").strip().upper()
+    try:
+        if key in {"KODEX200", "KOSPI200", "KS200"}:
+            s = _bt_try_fdr_symbols(["KS200", "KOSPI200"], start_date, end_date, lookback_days=lookback_days)
+            if s is None or len(s) == 0:
+                s = _bt_load_naver_index_series("KPI200", start_date, end_date, lookback_days=lookback_days)
+            s.name = "KODEX200"
+            return s
+        if key in {"KOSDAQ150", "KOSDAQ", "KQ11", "KQ150"}:
+            # 2010 전 구간 검증 우선: KOSDAQ150 지수가 안 잡히면 KOSDAQ 종합을 대체 사용한다.
+            s = _bt_try_fdr_symbols(["KQ150", "KOSDAQ150", "KQ11", "KOSDAQ"], start_date, end_date, lookback_days=lookback_days)
+            if s is None or len(s) == 0:
+                s = _bt_load_naver_index_series("KOSDAQ", start_date, end_date, lookback_days=lookback_days)
+            s.name = "KOSDAQ150"
+            return s
+        if key in {"NASDAQ100", "NASDAQ", "NDX"}:
+            base = _bt_try_fdr_symbols(["NDX", "NASDAQ100", "IXIC"], start_date, end_date, lookback_days=lookback_days)
+            if base is None or len(base) == 0:
+                for sym in ["^NDX", "QQQ"]:
+                    base = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+                    if base is not None and len(base) > 0:
+                        break
+            if base is None or len(base) == 0:
+                for sym in ["ndx", "qqq.us"]:
+                    base = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+                    if base is not None and len(base) > 0:
+                        break
+            fx = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
+            return _bt_multiply_with_fx(base, fx, "NASDAQ100")
+        if key in {"GOLD", "XAU", "XAUUSD"}:
+            base = _bt_try_fdr_symbols(["GC=F", "XAU/USD", "GOLD"], start_date, end_date, lookback_days=lookback_days)
+            if base is None or len(base) == 0:
+                for sym in ["GC=F", "XAUUSD=X"]:
+                    base = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+                    if base is not None and len(base) > 0:
+                        break
+            if base is None or len(base) == 0:
+                for sym in ["xauusd", "gc.f"]:
+                    base = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
+                    if base is not None and len(base) > 0:
+                        break
+            fx = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
+            return _bt_multiply_with_fx(base, fx, "GOLD")
+        if key in {"DOLLAR", "USDKRW", "USD"}:
+            s = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
+            s.name = "DOLLAR"
+            return s
+    except Exception:
+        return pd.Series(dtype=float)
+    return pd.Series(dtype=float)
+
+
 def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
     """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열.
 
@@ -5855,7 +6037,11 @@ def _bt_load_bunker_close_series_any(code_expr, start_date, end_date, lookback_d
     tried = []
     for code in _split_bunker_code_candidates(code_expr):
         tried.append(code)
-        s = _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=lookback_days)
+        if str(code).upper().startswith("PROXY:"):
+            proxy_key = str(code).split(":", 1)[1]
+            s = _bt_load_proxy_close_series(proxy_key, start_date, end_date, lookback_days=lookback_days)
+        else:
+            s = _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=lookback_days)
         if s is not None and len(s) > 0:
             return s, code, tried
     return pd.Series(dtype=float), "", tried
@@ -6110,6 +6296,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         mode_upper = mode.upper()
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
+        proxy_extended = ("프록시" in str(mode)) or ("PROXY" in mode_upper)
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
         split_turbo_t70_defense = split_turbo and ("T70" in mode_upper)
@@ -6189,15 +6376,28 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         # 기본 073/064 자산은 국내 상장 ETF만 사용한다.
         # 해외 ETF는 CTA 보완재(DBMF/KMLM/CTA)에만 허용한다.
         # CASH는 CD금리/KOFR/단기금리 ETF를 대체하는 연수익률 가정으로 복리 계산한다.
-        candidates = [
-            {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
-            {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
-            {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
-            {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
-            {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
-            {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
-            {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
-        ]
+        if proxy_extended:
+            # 2010 장기검증 프록시: ETF 상장/데이터 시작 전 CASH 대기 문제를 줄이기 위해
+            # 지수와 환율 프록시를 사용한다. 이름은 기존 로직과 맞추기 위해 동일하게 둔다.
+            candidates = [
+                {"name": "KODEX200", "code": "PROXY:KOSPI200", "type": "asset", "market": "PROXY_INDEX_KR"},
+                {"name": "KOSDAQ150", "code": "PROXY:KOSDAQ150|PROXY:KOSDAQ", "type": "asset", "market": "PROXY_INDEX_KR"},
+                {"name": "NASDAQ100", "code": "PROXY:NASDAQ100", "type": "asset", "market": "PROXY_INDEX_USD_KRW"},
+                {"name": "GOLD", "code": "PROXY:GOLD", "type": "asset", "market": "PROXY_GOLD_USD_KRW"},
+                {"name": "DOLLAR", "code": "PROXY:USDKRW", "type": "asset", "market": "PROXY_FX"},
+                {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
+                {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
+            ]
+        else:
+            candidates = [
+                {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
+                {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
+                {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
+                {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
+                {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
+                {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
+                {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
+            ]
         cta_uploaded_series = _bt_prepare_external_close_series(cta_close_df, "CTA")
         if cta_ratio > 0 and len(cta_uploaded_series) == 0:
             # CTA는 국내 대체 ETF가 아니라 미국 상장 관리선물 ETF 후보만 사용한다.
@@ -6732,7 +6932,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "최종방어구역비중": round((defense_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
             "최종수익부스터비중": round((booster_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
             "현금연수익률가정": float(cash_annual_rate or 0.0),
-            "기본자산시장": "국내상장ETF/국내현금성프록시",
+            "기본자산시장": "지수/환율 프록시" if proxy_extended else "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
             "CTA역할": "Turbo전략완충재" if split_turbo else "방공호내보완재_부스터아님",
             "Turbo엔진허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR" if split_turbo else "",
@@ -6749,6 +6949,9 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "비현금방공호일수": noncash_days,
             "마지막방공호보유": str(out["방공호보유"].iloc[-1]) if len(out) else "",
             "방공호데이터상태": status_text,
+            "자산별데이터기간": data_start_text,
+            "자산별사용가능일수": data_usable_text,
+            "백테스트데이터방식": "지수/환율 프록시 확장" if proxy_extended else "ETF 실제 상장/조회 데이터 기준",
             "메모": memo_text,
         }
         return out, summary
@@ -11249,6 +11452,7 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T10/T100 Turbo 공격ETF 100% NO CTA - 지수/환율 프록시",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
@@ -11268,7 +11472,7 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
-            st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
+            st.caption("Turbo 모드는 방공호가 아닙니다. T10/T100은 Turbo 공격 ETF 100% / CTA 0%이며, 2010 검증용 지수/환율 프록시 옵션을 별도로 제공합니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
@@ -11559,7 +11763,9 @@ elif menu == "6. 섹터전략 백테스트":
                         show_pinned_dataframe(bunker_summary_df, height=180)
                         show_pinned_dataframe(bunker_daily_df.tail(120), height=320, pin_rank=False)
                         mode_text = str(bunker_mode)
-                        if "T100" in mode_text:
+                        if "T100" in mode_text and ("프록시" in mode_text or "PROXY" in mode_text.upper()):
+                            tag = "T10_T100_TURBO_NO_CTA_PROXY"
+                        elif "T100" in mode_text:
                             tag = "T10_T100_TURBO_NO_CTA"
                         elif "T90" in mode_text:
                             tag = "T90_C10_TURBO_CTA"
@@ -11708,7 +11914,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "대장주엔진비중": leader_alloc_ratio,
                             "방공호방식": bunker_mode,
                             "방공호현금연수익률": bunker_cash_rate,
-                            "기본자산시장": "국내상장ETF/국내현금성프록시",
+                            "기본자산시장": "지수/환율 프록시" if proxy_extended else "국내상장ETF/국내현금성프록시",
                             "CTA시장": "미국상장관리선물ETF",
                             "CTA역할": "방공호내보완재_부스터아님",
                             "CTA코드후보": cta_code,
@@ -11785,7 +11991,9 @@ elif menu == "6. 섹터전략 백테스트":
                             fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
 
                         bunker_mode_text = str(bunker_mode)
-                        if "T100" in bunker_mode_text:
+                        if "T100" in bunker_mode_text and ("프록시" in bunker_mode_text or "PROXY" in bunker_mode_text.upper()):
+                            bunker_file_tag = "T10_T100_TURBO_NO_CTA_PROXY"
+                        elif "T100" in bunker_mode_text:
                             bunker_file_tag = "T10_T100_TURBO_NO_CTA"
                         elif "T90" in bunker_mode_text:
                             bunker_file_tag = "T90_C10_TURBO_CTA"
