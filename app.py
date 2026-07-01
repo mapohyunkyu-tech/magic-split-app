@@ -37,7 +37,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v56_T100_HYBRID_13_LIVE_MAGIC_CLEAN_20260701"
+APP_VERSION = "v57_T100_HYBRID_13_LIVE_NO_MAGIC_TERNARY_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -12841,9 +12841,15 @@ elif menu == "7-1. T100 하이브리드 운용모드":
                 st.warning(f"6310은 아직 못 움직임: 목표 {float(row.get('6310전환목표금액', 0)):,.0f}원 / 남은 {float(row.get('6310전환까지남은금액', 0)):,.0f}원")
             st.info(f"판정사유: {row.get('판정사유', '')}")
             st.markdown("##### 오늘 목표 자산배분")
-            show_pinned_dataframe(live_target_df, height=260, pin_rank=False) if 'show_pinned_dataframe' in globals() else st.dataframe(live_target_df, use_container_width=True)
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(live_target_df, height=260, pin_rank=False)
+            else:
+                _ = st.dataframe(live_target_df, use_container_width=True)
             st.markdown("##### 현재금액 대비 리밸런싱")
-            show_pinned_dataframe(live_rebalance_df, height=180, pin_rank=False) if 'show_pinned_dataframe' in globals() else st.dataframe(live_rebalance_df, use_container_width=True)
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(live_rebalance_df, height=180, pin_rank=False)
+            else:
+                _ = st.dataframe(live_rebalance_df, use_container_width=True)
             st.markdown("##### T100 월간 선택/위험 신호")
             show_cols = [c for c in ["기준일", "오늘판정", "목표모드", "T100월간보유", "T100일수익률%", "T100_5일누적%", "T100고점대비%", "T100_20MA회복", "CAP5신호", "5일누적방어신호", "리밸런싱규칙"] if c in live_summary_df.columns]
             st.dataframe(live_summary_df[show_cols], use_container_width=True)
