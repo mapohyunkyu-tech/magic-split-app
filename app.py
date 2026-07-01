@@ -6741,6 +6741,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
+            "2010장기검증주의": "2010 시작은 일부 ETF 상장 전 구간이 포함됩니다. 데이터가 있는 자산부터 자동 편입되는 프록시 성격이며, CTA 포함형은 DBMF/KMLM/CTA 상장 이후 구간부터 CTA가 반영됩니다.",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -11122,6 +11123,7 @@ elif menu == "6. 섹터전략 백테스트":
                     "실전검증 240거래일",
                     "장세검증 480거래일",
                     "스트레스검증 720거래일",
+                    "2010부터 장기검증",
                     "2021부터 전체검증",
                     "2020부터 전체검증",
                     "사용자지정",
@@ -11135,10 +11137,12 @@ elif menu == "6. 섹터전략 백테스트":
             "실전검증 240거래일": 240,
             "장세검증 480거래일": 480,
             "스트레스검증 720거래일": 720,
+            "2010부터 장기검증": 4300,
             "2021부터 전체검증": 1500,
             "2020부터 전체검증": 1800,
         }
         preset_start_map = {
+            "2010부터 장기검증": datetime(2010, 1, 4).date(),
             "2021부터 전체검증": datetime(2021, 1, 4).date(),
             "2020부터 전체검증": datetime(2020, 1, 2).date(),
         }
@@ -11155,13 +11159,13 @@ elif menu == "6. 섹터전략 백테스트":
             max_signal_days = st.number_input(
                 "최대 검증 거래일",
                 min_value=5,
-                max_value=3000,
+                max_value=5000,
                 value=int(default_signal_days),
                 step=5,
                 key="bt_max_days",
             )
-        if period_preset in ["2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2020/2021년부터 검증합니다. 개별 종목은 데이터가 생기는 날부터 자동 편입됩니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
+        if period_preset in ["2010부터 장기검증", "2020부터 전체검증", "2021부터 전체검증"]:
+            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2010/2020/2021년부터 검증합니다. 2010 모드는 ETF 상장 전 구간이 섞일 수 있어, 데이터가 생긴 자산부터 자동 편입되는 장기 프록시 검증으로 해석하세요. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -11220,6 +11224,7 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
             st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
+            st.caption("2010부터 장기검증은 ETF 상장일 제약 때문에 완전 동일 실전형이 아니라 데이터 가능 자산부터 편입되는 장기 프록시 검증입니다. T100 NO CTA 장기검증에 우선 사용하세요.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
