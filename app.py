@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v51_KANG_MDD5_MA_PORTFOLIO_BACKTEST_20260701"
+APP_VERSION = "v52_KANG_MDD5_MODE_COLUMN_HOTFIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10988,6 +10988,7 @@ def _kang_v51_generate_signals(prices, profile_name):
             "구분": profile.get("구분", ""),
             "설명": profile.get("설명", ""),
             "MA조건": "/".join(map(str, windows)) + (" 모두 위" if require == "all" else " 하나라도 위"),
+            "모드": profile_name,
             "보유자산": hold_text,
             "weights": weights,
             "현금슬롯수": int(sum(1 for x in signal_bits if x.endswith(':CASH'))),
