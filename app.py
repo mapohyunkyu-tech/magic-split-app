@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v33_TURBO10_NO_CTA_BACKTEST_20260701"
+APP_VERSION = "v36_TURBO10_2010_FORCED_START_5000_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -11151,21 +11151,34 @@ elif menu == "6. 섹터전략 백테스트":
             period_preset,
             (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
         )
+        # v36 핵심 수정:
+        # Streamlit은 같은 key의 date_input/number_input 값을 세션에 계속 보관한다.
+        # 그래서 2010 장기검증을 선택해도 예전 "최근 3000거래일" 기준 시작일(대략 2014년)이
+        # bt_start_date에 남아 있으면 실제 백테스트가 2014년부터 시작되는 문제가 있었다.
+        # 장기검증 프리셋은 시작일을 프리셋 날짜로 강제 고정하고, key도 프리셋별로 분리한다.
+        period_key = re.sub(r"[^0-9A-Za-z가-힣]+", "_", str(period_preset))
+        fixed_start_date = preset_start_map.get(period_preset)
         with c1:
-            start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date")
+            if fixed_start_date is not None:
+                start_date = fixed_start_date
+                st.metric("시작일", str(start_date))
+                st.caption("프리셋 고정 시작일입니다. 예전 3000거래일 세션값을 사용하지 않습니다.")
+            else:
+                start_date = st.date_input("시작일", value=default_start_date, key=f"bt_start_date_v36_{period_key}")
         with c2:
-            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
+            end_date = st.date_input("종료일", value=datetime.now().date(), key=f"bt_end_date_v36_{period_key}")
         with c3:
             max_signal_days = st.number_input(
-                "최대 검증 거래일",
+                "최대 검증 거래일 (2010용 최대 5000)",
                 min_value=5,
                 max_value=5000,
                 value=int(default_signal_days),
                 step=5,
-                key="bt_max_days",
+                key=f"bt_max_days_v36_5000_{period_key}",
             )
         if period_preset in ["2010부터 장기검증", "2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2010/2020/2021년부터 검증합니다. 2010 모드는 ETF 상장 전 구간이 섞일 수 있어, 데이터가 생긴 자산부터 자동 편입되는 장기 프록시 검증으로 해석하세요. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
+            st.info("장기검증 모드: 시작일을 프리셋 날짜로 강제 고정합니다. 2010 모드는 2010-01-04부터, 2020 모드는 2020-01-02부터, 2021 모드는 2021-01-04부터 계산합니다.")
+            st.caption("v36 확인: 2010부터 장기검증은 시작일 2010-01-04 고정 + 기본 4300거래일 + 입력 상한 5000거래일입니다. 이제 예전 3000거래일/2014년 세션값을 타지 않습니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
