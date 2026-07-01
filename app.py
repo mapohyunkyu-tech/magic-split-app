@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v29_DOMESTIC_CORE_US_CTA_BACKTEST_20260701"
+APP_VERSION = "v30_AUTO_US_CTA_FETCH_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5758,7 +5758,11 @@ def _bt_load_naver_close_series(code, start_date, end_date, lookback_days=260):
 
 
 def _bt_load_stooq_close_series(ticker, start_date, end_date, lookback_days=260):
-    """미국 ETF(QQQ/GLD 등)용 Stooq 백업 로더."""
+    """미국 ETF(DBMF/KMLM/CTA 등)용 Stooq CSV 자동 로더.
+
+    사용자가 미국 CTA CSV를 올리지 않아도 앱이 직접 Stooq 일별 CSV를 조회한다.
+    조회 URL 형식: https://stooq.com/q/d/l/?s=dbmf.us&d1=YYYYMMDD&d2=YYYYMMDD&i=d
+    """
     try:
         t = str(ticker or "").strip().lower()
         if not t or t.isdigit():
@@ -6632,9 +6636,9 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "기본자산시장": "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
             "CTA역할": "방공호내보완재_부스터아님",
-            "CTA우선순위": "DBMF>KMLM>CTA",
+            "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}, CTA {cta_code}",
-            "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else (str(cta_code) if cta_ratio > 0 else "미사용"),
+            "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
             "모멘텀계산일수": int(len(price_df)) if price_df is not None else 0,
@@ -11107,13 +11111,13 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("064: 방어구역 60% + 부스터 40%. 부스터 45% 초과는 방공호 잠금, 50% 초과는 즉시 잠금.")
             st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH 의존도를 낮춥니다.")
-            st.caption("CTA CSV는 Date, Close 컬럼이면 충분합니다. 업로드가 없으면 미국 ETF 후보 DBMF|KMLM|CTA 순서로 시도합니다.")
+            st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
-            cta_code = st.text_input("미국 CTA/관리선물 ETF 코드 후보", value="DBMF|KMLM|CTA", key="bt_cta_code", help="미국 상장 관리선물 ETF만 입력하세요. 예: DBMF|KMLM|CTA. CSV 업로드가 있으면 업로드 데이터가 우선입니다.")
+            cta_code = st.text_input("미국 CTA/관리선물 ETF 자동조회 후보", value="DBMF|KMLM|CTA", key="bt_cta_code", help="기본값 그대로 두면 DBMF → KMLM → CTA 순서로 자동 조회합니다. CSV 업로드가 있으면 업로드 데이터가 우선입니다.")
         with cta2:
-            cta_upload = st.file_uploader("미국 CTA ETF 일별 종가 CSV 업로드(Date, Close)", type=["csv"], key="bt_cta_csv_upload")
+            cta_upload = st.file_uploader("선택사항: 자동조회 실패 시만 CTA CSV 업로드(Date, Close)", type=["csv"], key="bt_cta_csv_upload")
         cta_close_df = None
         if cta_upload is not None:
             try:
