@@ -6871,6 +6871,29 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 status_text = " | ".join([f"{r.get('자산','')}:{r.get('상태','')}({r.get('사용가능일수',0)}일)" for _, r in bunker_price_status_df.iterrows()])
         except Exception:
             status_text = ""
+        # v40 hotfix: v39 프록시/빠른실행 요약에서 참조하는 데이터기간 텍스트를 항상 만든다.
+        # 일부 빠른 실행 경로에서는 이 변수가 만들어지기 전에 summary가 생성되어
+        # name 'data_start_text' is not defined 오류가 발생했다.
+        data_start_text = ""
+        data_usable_text = ""
+        try:
+            if bunker_price_status_df is not None and len(bunker_price_status_df) > 0:
+                _status_rows = bunker_price_status_df.copy()
+                for _c in ["자산", "사용코드", "첫데이터일", "마지막데이터일", "사용가능일수", "상태"]:
+                    if _c not in _status_rows.columns:
+                        _status_rows[_c] = ""
+                data_start_text = " | ".join([
+                    f"{str(r.get('자산',''))}:{str(r.get('첫데이터일',''))}~{str(r.get('마지막데이터일',''))}"
+                    for _, r in _status_rows.iterrows()
+                ])
+                data_usable_text = " | ".join([
+                    f"{str(r.get('자산',''))}:{str(r.get('사용가능일수',''))}일/{str(r.get('상태',''))}"
+                    for _, r in _status_rows.iterrows()
+                ])
+        except Exception:
+            data_start_text = ""
+            data_usable_text = ""
+
         if split_turbo:
             memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
         elif split_073:
