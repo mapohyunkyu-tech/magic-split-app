@@ -7,6 +7,7 @@
 # =====================================================
 
 import io
+import os
 import re
 import time
 import zipfile
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+# Streamlit API help table / stray magic text 출력 방지
+os.environ.setdefault("STREAMLIT_RUNNER_MAGIC_ENABLED", "false")
 import streamlit as st
 
 # v55: Streamlit magic/rendering glitch guard.
@@ -34,7 +37,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v55_T100_HYBRID_13_LIVE_OPERATION_GATE_FIX_20260701"
+APP_VERSION = "v56_T100_HYBRID_13_LIVE_MAGIC_CLEAN_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -12740,7 +12743,7 @@ elif menu == "7. 실전 운영판":
 # 7-1. T100 하이브리드 운용모드
 # =====================================================
 elif menu == "7-1. T100 하이브리드 운용모드":
-    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v55")
+    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v56")
     st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. 6310은 수익잠금 조건(+50%) 전에는 자동으로 불가 처리합니다.")
 
     st.markdown("""
