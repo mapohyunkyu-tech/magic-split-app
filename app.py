@@ -37,7 +37,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v57_T100_HYBRID_13_LIVE_NO_MAGIC_TERNARY_FIX_20260701"
+APP_VERSION = "v58_T100_HYBRID_13_LIVE_MANUAL_MODE_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10376,6 +10376,7 @@ def build_t100_hybrid_13_live_operation(
         lock_triggered = bool(gain_from_lock_base >= float(lock_gain_trigger))
         mode_text = str(current_mode or "자동판정")
         is_auto_mode = ("자동" in mode_text)
+        is_manual_attack_mode = ("1순위" in mode_text and "공격" in mode_text)
         is_lock_mode_raw = "3" in mode_text or "6310" in mode_text or "잠금" in mode_text
         is_def_mode = bool(defense_active) or "방어" in mode_text
         is_lock_allowed_now = bool(lock_triggered or lock_already_active)
@@ -10384,6 +10385,7 @@ def build_t100_hybrid_13_live_operation(
             is_lock_mode = False
             forced_lock_blocked = True
         else:
+            # 3순위 6310을 직접 선택했을 때만 수동 잠금모드로 본다.
             is_lock_mode = bool(is_lock_mode_raw and (not is_auto_mode))
             forced_lock_blocked = False
         # lock 유지일 계산
@@ -10416,11 +10418,16 @@ def build_t100_hybrid_13_live_operation(
                 action = "3순위 6310 유지"
                 reason.append("최소유지 후에도 회복조건 미충족")
         else:
-            if lock_triggered:
+            if is_auto_mode and lock_triggered:
                 target_mode = "3순위_6310_LOCK"
                 target_exposure = float(lock_exposure) / 100.0
                 action = "3순위 6310 신규 전환"
-                reason.append(f"직전 잠금기준 대비 +{gain_from_lock_base:.2f}%로 +{float(lock_gain_trigger):.0f}% 잠금조건 충족")
+                reason.append(f"자동판정: 직전 잠금기준 대비 +{gain_from_lock_base:.2f}%로 +{float(lock_gain_trigger):.0f}% 잠금조건 충족")
+            elif is_manual_attack_mode and lock_triggered:
+                target_mode = "1순위_ATTACK"
+                target_exposure = 1.0
+                action = "1순위 공격 유지"
+                reason.append(f"수동 1순위 선택: 6310 조건(+{gain_from_lock_base:.2f}%)은 가능권이지만 자동 전환하지 않음")
             elif cap_signal or ret5_signal:
                 target_mode = "1순위_DEFENSE"
                 target_exposure = float(attack_defense_exposure) / 100.0
@@ -12743,8 +12750,8 @@ elif menu == "7. 실전 운영판":
 # 7-1. T100 하이브리드 운용모드
 # =====================================================
 elif menu == "7-1. T100 하이브리드 운용모드":
-    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v56")
-    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. 6310은 수익잠금 조건(+50%) 전에는 자동으로 불가 처리합니다.")
+    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v58")
+    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. 6310은 자동판정 또는 3순위 선택 때만 전환하고, 1순위 공격모드 선택 시에는 수익조건이 충족돼도 1순위를 유지합니다.")
 
     st.markdown("""
 **운용 규칙 요약**
@@ -12767,6 +12774,7 @@ elif menu == "7-1. T100 하이브리드 운용모드":
         live_mode = st.selectbox("현재 운용모드", ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=0, key="t100_live_mode_v55")
         live_lock_entry = st.date_input("6310 진입일", value=datetime.now().date(), key="t100_live_lock_entry_v55")
         live_lock_already = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_live_lock_already_v55", help="과거에 +50% 수익잠금 조건을 충족해 이미 6310 모드로 들어간 경우에만 체크하세요.")
+    st.caption("주의: 현재 총자산은 T100 실험계좌 안의 돈만 넣으세요. 외부에서 추가 입금한 현금까지 넣으면 앱이 수익으로 오해합니다. 추가입금 600만원을 넣은 상태라면 직전 잠금 기준금액도 1,600만원으로 맞추세요.")
 
     st.subheader("2) 규칙 설정")
     c4, c5, c6, c7 = st.columns(4)
@@ -12790,6 +12798,7 @@ elif menu == "7-1. T100 하이브리드 운용모드":
         st.warning(f"6310 잠금 전환은 아직 불가: 기준 {float(live_lock_base):,.0f}원 → 목표 {lock_target_preview:,.0f}원(+{lock_profit_preview:,.0f}원). 현재 기준 남은 금액 {lock_left_preview:,.0f}원")
     else:
         st.success(f"6310 잠금 전환 가능권: 기준 {float(live_lock_base):,.0f}원 / 목표 {lock_target_preview:,.0f}원")
+        st.caption("단, 현재 운용모드를 1순위 공격모드로 직접 선택하면 v58부터 6310으로 자동 전환하지 않습니다. 자동 전환은 자동판정 또는 3순위 선택 때만 실행합니다.")
 
     with st.expander("ETF 코드 설정", expanded=False):
         cc1, cc2, cc3, cc4, cc5 = st.columns(5)
