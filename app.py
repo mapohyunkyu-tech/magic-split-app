@@ -18,6 +18,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# v55: Streamlit magic/rendering glitch guard.
+# 일부 환경에서 st 객체가 화면에 출력되며 Streamlit API 도움말표가 뜨는 현상을 막기 위한 안전장치.
+try:
+    st.set_option("runner.magicEnabled", False)
+except Exception:
+    pass
+
 from google.oauth2.service_account import Credentials
 import gspread
 import FinanceDataReader as fdr
@@ -27,7 +34,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v54_T100_HYBRID_13_LIVE_OPERATION_20260701"
+APP_VERSION = "v55_T100_HYBRID_13_LIVE_OPERATION_GATE_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10297,6 +10304,8 @@ def build_t100_hybrid_13_live_operation(
     lock_exposure=60.0,
     min_lock_days=60,
     min_defense_days=5,
+    lock_already_active=False,
+    enforce_lock_profit_gate=True,
     start_date=None,
     end_date=None,
     kodex200_code="069500",
@@ -10358,10 +10367,22 @@ def build_t100_hybrid_13_live_operation(
         ret5_signal = bool((not pd.isna(ret5)) and float(ret5) <= float(ret5_trigger))
         recovery_ok = bool((not pd.isna(t100_ma20)) and float(t100_nav) >= float(t100_ma20) and float(t100_dd) >= -5.0)
         gain_from_lock_base = (total_assets / lock_base_amount - 1.0) * 100.0 if lock_base_amount > 0 else 0.0
+        lock_target_amount = lock_base_amount * (1.0 + float(lock_gain_trigger) / 100.0)
+        lock_needed_profit = lock_target_amount - lock_base_amount
+        lock_remaining_amount = max(0.0, lock_target_amount - total_assets)
         lock_triggered = bool(gain_from_lock_base >= float(lock_gain_trigger))
-        mode_text = str(current_mode or "1순위 공격모드")
-        is_lock_mode = "3" in mode_text or "6310" in mode_text or "잠금" in mode_text
+        mode_text = str(current_mode or "자동판정")
+        is_auto_mode = ("자동" in mode_text)
+        is_lock_mode_raw = "3" in mode_text or "6310" in mode_text or "잠금" in mode_text
         is_def_mode = bool(defense_active) or "방어" in mode_text
+        is_lock_allowed_now = bool(lock_triggered or lock_already_active)
+        # 수익잠금 조건이 안 됐는데 사용자가 실수로 3순위를 고른 경우에는 자동으로 1순위 쪽으로 돌린다.
+        if bool(enforce_lock_profit_gate) and is_lock_mode_raw and not is_lock_allowed_now:
+            is_lock_mode = False
+            forced_lock_blocked = True
+        else:
+            is_lock_mode = bool(is_lock_mode_raw and (not is_auto_mode))
+            forced_lock_blocked = False
         # lock 유지일 계산
         lock_days = 0
         try:
@@ -10373,6 +10394,8 @@ def build_t100_hybrid_13_live_operation(
         target_exposure = 1.0
         action = "1순위 공격 유지"
         reason = []
+        if forced_lock_blocked:
+            reason.append(f"6310은 수익잠금 조건 전까지 불가: 목표 {lock_target_amount:,.0f}원, 현재 {total_assets:,.0f}원, 남은 {lock_remaining_amount:,.0f}원")
         if is_lock_mode:
             if lock_days < int(min_lock_days):
                 target_mode = "3순위_6310_LOCK"
@@ -10444,8 +10467,13 @@ def build_t100_hybrid_13_live_operation(
             "CAP5신호": cap_signal,
             "5일누적방어신호": ret5_signal,
             "잠금기준대비수익률%": round(float(gain_from_lock_base), 2),
+            "잠금기준금액": round(float(lock_base_amount), 0),
+            "6310전환목표금액": round(float(lock_target_amount), 0),
+            "6310전환필요수익금": round(float(lock_needed_profit), 0),
+            "6310전환까지남은금액": round(float(lock_remaining_amount), 0),
+            "6310가능여부": "가능" if is_lock_allowed_now else "불가",
             "판정사유": " / ".join(reason),
-            "리밸런싱규칙": "T100 자산선택 월 1회, CAP5/5일누적 방어 매일 체크, +50% 수익잠금 때 6310 전환",
+            "리밸런싱규칙": "T100 자산선택 월 1회, CAP5/5일누적 방어 매일 체크, +50% 수익잠금 때만 6310 전환",
         }])
         # 최근 30일 확인용
         recent_df = t100_df.tail(30).copy()
@@ -12712,8 +12740,8 @@ elif menu == "7. 실전 운영판":
 # 7-1. T100 하이브리드 운용모드
 # =====================================================
 elif menu == "7-1. T100 하이브리드 운용모드":
-    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드")
-    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다.")
+    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v55")
+    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. 6310은 수익잠금 조건(+50%) 전에는 자동으로 불가 처리합니다.")
 
     st.markdown("""
 **운용 규칙 요약**
@@ -12733,8 +12761,9 @@ elif menu == "7-1. T100 하이브리드 운용모드":
         live_current_cash = st.number_input("현재 CASH/예수금", min_value=0, value=0, step=100_000, key="t100_live_current_cash_v54")
         live_lock_base = st.number_input("직전 잠금 기준금액", min_value=1, value=10_000_000, step=100_000, key="t100_live_lock_base_v54")
     with c3:
-        live_mode = st.selectbox("현재 운용모드", ["1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=0, key="t100_live_mode_v54")
-        live_lock_entry = st.date_input("6310 진입일", value=datetime.now().date(), key="t100_live_lock_entry_v54")
+        live_mode = st.selectbox("현재 운용모드", ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=0, key="t100_live_mode_v55")
+        live_lock_entry = st.date_input("6310 진입일", value=datetime.now().date(), key="t100_live_lock_entry_v55")
+        live_lock_already = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_live_lock_already_v55", help="과거에 +50% 수익잠금 조건을 충족해 이미 6310 모드로 들어간 경우에만 체크하세요.")
 
     st.subheader("2) 규칙 설정")
     c4, c5, c6, c7 = st.columns(4)
@@ -12750,6 +12779,14 @@ elif menu == "7-1. T100 하이브리드 운용모드":
     with c7:
         live_min_lock = st.number_input("6310 최소 유지일", min_value=0, value=60, step=5, key="t100_live_min_lock_v54")
         live_cash_rate = st.number_input("CASH 연수익률 프록시(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.25, key="t100_live_cash_rate_v54")
+
+    lock_target_preview = float(live_lock_base) * (1.0 + float(live_lock_gain) / 100.0)
+    lock_profit_preview = lock_target_preview - float(live_lock_base)
+    lock_left_preview = max(0.0, lock_target_preview - float(live_total_assets))
+    if float(live_total_assets) < lock_target_preview and not bool(live_lock_already):
+        st.warning(f"6310 잠금 전환은 아직 불가: 기준 {float(live_lock_base):,.0f}원 → 목표 {lock_target_preview:,.0f}원(+{lock_profit_preview:,.0f}원). 현재 기준 남은 금액 {lock_left_preview:,.0f}원")
+    else:
+        st.success(f"6310 잠금 전환 가능권: 기준 {float(live_lock_base):,.0f}원 / 목표 {lock_target_preview:,.0f}원")
 
     with st.expander("ETF 코드 설정", expanded=False):
         cc1, cc2, cc3, cc4, cc5 = st.columns(5)
@@ -12778,6 +12815,8 @@ elif menu == "7-1. T100 하이브리드 운용모드":
                 lock_exposure=live_lock_exp,
                 min_lock_days=live_min_lock,
                 min_defense_days=5,
+                lock_already_active=live_lock_already,
+                enforce_lock_profit_gate=True,
                 kodex200_code=live_kodex200,
                 kosdaq150_code=live_kosdaq150,
                 nasdaq_code=live_nasdaq,
@@ -12789,11 +12828,14 @@ elif menu == "7-1. T100 하이브리드 운용모드":
         else:
             row = live_summary_df.iloc[0].to_dict()
             st.success(f"오늘판정: {row.get('오늘판정', '')}")
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("목표모드", str(row.get("목표모드", "")))
             m2.metric("목표 T100 노출", f"{float(row.get('목표T100노출%', 0)):.1f}%")
             m3.metric("목표 CASH", f"{float(row.get('목표CASH비중%', 0)):.1f}%")
             m4.metric("잠금기준대비", f"{float(row.get('잠금기준대비수익률%', 0)):.2f}%")
+            m5.metric("6310 가능", str(row.get("6310가능여부", "")))
+            if row.get("6310가능여부", "") == "불가":
+                st.warning(f"6310은 아직 못 움직임: 목표 {float(row.get('6310전환목표금액', 0)):,.0f}원 / 남은 {float(row.get('6310전환까지남은금액', 0)):,.0f}원")
             st.info(f"판정사유: {row.get('판정사유', '')}")
             st.markdown("##### 오늘 목표 자산배분")
             show_pinned_dataframe(live_target_df, height=260, pin_rank=False) if 'show_pinned_dataframe' in globals() else st.dataframe(live_target_df, use_container_width=True)
