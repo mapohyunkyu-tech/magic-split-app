@@ -10009,7 +10009,7 @@ def _taa_build_price_table(asset_codes, start_date, end_date, cash_annual_rate=3
 def _taa_monthly_close(prices):
     if prices is None or len(prices) == 0:
         return pd.DataFrame()
-    m = prices.resample("M").last().dropna(how="all")
+    m = prices.resample("ME").last().dropna(how="all")
     return m
 
 
