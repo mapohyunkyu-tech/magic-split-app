@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v37_TURBO10_2010_FULL_CALENDAR_NAVER_FIX_20260701"
+APP_VERSION = "v38_TURBO_ONLY_2010_SAFE_RUN_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4408,36 +4408,13 @@ def _bt_trading_dates_from_universe(leader_df, start_date, end_date):
         return sorted(list(dict.fromkeys(out)))
 
     # 1) 시장 캘린더: KODEX200을 우선 사용.
-    # v37 보정:
-    # 일부 실행환경에서 FDR/KRX가 오래된 구간을 잘라 최근 약 3000거래일만 반환하면
-    # 2010 시작을 넣어도 실제 캘린더가 2014년부터 시작되는 문제가 있었다.
-    # 그래서 KODEX200 캘린더가 요청 시작일보다 90일 이상 늦게 시작하면
-    # 네이버 장기 차트 로더로 한 번 더 시도하고, 그래도 늦으면 평일 캘린더를 사용한다.
     try:
         bench = _bt_price_frame("069500", start_pad, end_pad)
         dates = _normalize_dates_from_df(bench)
         if dates:
-            first_dt = pd.to_datetime(dates[0])
-            if first_dt <= start_ts + pd.DateOffset(days=90):
-                return dates
-    except Exception:
-        dates = []
-
-    try:
-        nav_s = _bt_load_naver_close_series("069500", start_date, end_date, lookback_days=260)
-        nav_df = pd.DataFrame({"close": nav_s}) if nav_s is not None and len(nav_s) > 0 else pd.DataFrame()
-        nav_dates = _normalize_dates_from_df(nav_df)
-        if nav_dates:
-            first_nav = pd.to_datetime(nav_dates[0])
-            if first_nav <= start_ts + pd.DateOffset(days=90):
-                return nav_dates
+            return dates
     except Exception:
         pass
-
-    # 1-2) 그래도 시장 캘린더가 요청 시작일을 못 덮으면,
-    # 방공호/Turbo 장기검증이 2014년부터 잘리는 것보다 평일 캘린더가 낫다.
-    if start_ts <= pd.Timestamp("2011-01-01"):
-        return [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
 
     # 2) fallback: 대표주 전체 날짜 합집합. 특정 종목의 상장일/데이터 시작일에 끌려가지 않게 한다.
     try:
@@ -5858,21 +5835,6 @@ def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
         close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
         close.name = code2
         if len(close) > 0:
-            # v37 보정:
-            # FDR가 성공처럼 보이지만 오래된 구간을 잘라 최근 3000거래일만 주는 경우가 있다.
-            # 2010 장기검증에서 첫 데이터가 요청 시작일보다 90일 이상 늦으면
-            # 국내 6자리 ETF는 네이버 장기 차트로 다시 로딩해 2010 구간을 복구한다.
-            try:
-                req_start = pd.to_datetime(start_date)
-                first_close = pd.to_datetime(close.index.min())
-                if str(code2).isdigit() and first_close > req_start + pd.DateOffset(days=90):
-                    s_nav = _bt_load_naver_close_series(code2, start_date, end_date, lookback_days=lookback_days)
-                    if s_nav is not None and len(s_nav) > 0:
-                        nav_first = pd.to_datetime(s_nav.index.min())
-                        if nav_first <= req_start + pd.DateOffset(days=90):
-                            return s_nav
-            except Exception:
-                pass
             return close
         # FDR가 비어 있지 않았지만 종가 추출이 실패한 경우도 백업 로더로 재시도한다.
         if str(code2).isdigit():
@@ -6779,7 +6741,6 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
-            "2010장기검증주의": "2010 시작은 일부 ETF 상장 전 구간이 포함됩니다. 데이터가 있는 자산부터 자동 편입되는 프록시 성격이며, CTA 포함형은 DBMF/KMLM/CTA 상장 이후 구간부터 CTA가 반영됩니다.",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -6793,6 +6754,47 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         return out, summary
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
+
+
+
+def _bt_make_bunker_only_daily_df(start_date, end_date, total_initial=100_000_000, max_signal_days=None):
+    """방공호/Turbo 전용 빠른 백테스트용 daily_df를 만든다.
+
+    섹터 개별주 백테스트를 먼저 돌리면 2010 장기검증에서 Streamlit 세션이 끊길 수 있다.
+    T100/Turbo/073/064처럼 대장주엔진 0% 구조를 볼 때는 기준일과 총자산만 있으면
+    build_bunker_7030_backtest가 자체 ETF 가격으로 결과를 계산할 수 있으므로, 이 경량 daily_df를 사용한다.
+    """
+    try:
+        sd = pd.to_datetime(start_date)
+        ed = pd.to_datetime(end_date)
+        if sd >= ed:
+            return pd.DataFrame(columns=["기준일", "총자산"])
+        dates = []
+        # 1) KODEX200 네이버 장기차트로 실제 국내 거래일을 우선 사용한다.
+        try:
+            s = _bt_load_naver_close_series("069500", sd, ed, lookback_days=5200)
+            if s is not None and len(s) > 0:
+                idx = pd.DatetimeIndex(pd.to_datetime(s.index, errors="coerce")).dropna().sort_values().drop_duplicates()
+                idx = idx[(idx >= sd) & (idx <= ed)]
+                # 2010 모드에서 네이버가 최근 구간만 주면 평일 캘린더로 보정한다.
+                if len(idx) > 0 and idx.min() <= sd + pd.DateOffset(days=45):
+                    dates = [d.strftime("%Y-%m-%d") for d in idx]
+        except Exception:
+            dates = []
+        # 2) 네이버/거래일 조회가 실패하거나 최근 3000일로 잘리면 평일 캘린더로라도 전체 기간을 만든다.
+        if not dates:
+            dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(sd, ed)]
+        if max_signal_days and len(dates) > int(max_signal_days):
+            # 2010 장기검증은 4300~5000을 넣으면 전체가 들어가고, 짧은 프리셋만 뒤에서 자른다.
+            dates = dates[-int(max_signal_days):]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
+    except Exception:
+        dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
 
 def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
     """KODEX200 숫자 기반 시장붕괴 차단 필터.
@@ -11161,13 +11163,13 @@ elif menu == "6. 섹터전략 백테스트":
                     "실전검증 240거래일",
                     "장세검증 480거래일",
                     "스트레스검증 720거래일",
-                    "2010부터 장기검증",
                     "2021부터 전체검증",
                     "2020부터 전체검증",
+                    "2010부터 장기검증",
                     "사용자지정",
                 ],
-                index=6,
-                key="bt_period_preset",
+                index=7,
+                key="bt_period_preset_v38_2010_safe",
             )
         preset_days_map = {
             "빠른검증 60거래일": 60,
@@ -11175,36 +11177,29 @@ elif menu == "6. 섹터전략 백테스트":
             "실전검증 240거래일": 240,
             "장세검증 480거래일": 480,
             "스트레스검증 720거래일": 720,
-            "2010부터 장기검증": 4300,
             "2021부터 전체검증": 1500,
             "2020부터 전체검증": 1800,
+            "2010부터 장기검증": 4300,
         }
         preset_start_map = {
-            "2010부터 장기검증": datetime(2010, 1, 4).date(),
             "2021부터 전체검증": datetime(2021, 1, 4).date(),
             "2020부터 전체검증": datetime(2020, 1, 2).date(),
+            "2010부터 장기검증": datetime(2010, 1, 4).date(),
         }
         default_signal_days = preset_days_map.get(period_preset, 240)
         default_start_date = preset_start_map.get(
             period_preset,
             (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
         )
-        # v36 핵심 수정:
-        # Streamlit은 같은 key의 date_input/number_input 값을 세션에 계속 보관한다.
-        # 그래서 2010 장기검증을 선택해도 예전 "최근 3000거래일" 기준 시작일(대략 2014년)이
-        # bt_start_date에 남아 있으면 실제 백테스트가 2014년부터 시작되는 문제가 있었다.
-        # 장기검증 프리셋은 시작일을 프리셋 날짜로 강제 고정하고, key도 프리셋별로 분리한다.
-        period_key = re.sub(r"[^0-9A-Za-z가-힣]+", "_", str(period_preset))
-        fixed_start_date = preset_start_map.get(period_preset)
+        fixed_long_period = period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]
         with c1:
-            if fixed_start_date is not None:
-                start_date = fixed_start_date
-                st.metric("시작일", str(start_date))
-                st.caption("프리셋 고정 시작일입니다. 예전 3000거래일 세션값을 사용하지 않습니다.")
+            if fixed_long_period:
+                start_date = default_start_date
+                st.text_input("시작일", value=str(start_date), disabled=True, key="bt_start_date_fixed_v38")
             else:
-                start_date = st.date_input("시작일", value=default_start_date, key=f"bt_start_date_v36_{period_key}")
+                start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date_v38")
         with c2:
-            end_date = st.date_input("종료일", value=datetime.now().date(), key=f"bt_end_date_v36_{period_key}")
+            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date_v38")
         with c3:
             max_signal_days = st.number_input(
                 "최대 검증 거래일 (2010용 최대 5000)",
@@ -11212,11 +11207,10 @@ elif menu == "6. 섹터전략 백테스트":
                 max_value=5000,
                 value=int(default_signal_days),
                 step=5,
-                key=f"bt_max_days_v36_5000_{period_key}",
+                key="bt_max_days_v38_5000_safe",
             )
-        if period_preset in ["2010부터 장기검증", "2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: 시작일을 프리셋 날짜로 강제 고정합니다. 2010 모드는 2010-01-04부터, 2020 모드는 2020-01-02부터, 2021 모드는 2021-01-04부터 계산합니다.")
-            st.caption("v37 확인: 2010부터 장기검증은 시작일 2010-01-04 고정 + 기본 4300거래일 + 입력 상한 5000거래일입니다. FDR가 3000일만 주면 네이버 장기차트/평일캘린더로 2010 구간을 복구합니다.")
+        if period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]:
+            st.info("장기검증 모드: 2010/2020/2021 시작일은 강제 고정합니다. T100/Turbo만 볼 때는 아래 '방공호/Turbo만 빠른 실행'을 누르세요. 섹터 개별주 백테스트 전체를 같이 돌리면 중간에 끊길 수 있습니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -11275,7 +11269,6 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
             st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
-            st.caption("2010부터 장기검증은 ETF 상장일 제약 때문에 완전 동일 실전형이 아니라 데이터 가능 자산부터 편입되는 장기 프록시 검증입니다. T100 NO CTA 장기검증에 우선 사용하세요.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
@@ -11520,6 +11513,89 @@ elif menu == "6. 섹터전략 백테스트":
                 "성장주붕괴필터": growth_collapse_mode,
             }
         ]), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 2010 장기검증 안전 실행")
+        st.caption("T100/Turbo/073/064만 확인할 때는 아래 버튼을 먼저 쓰세요. 섹터 개별주 백테스트를 생략하고 ETF 방공호/Turbo만 바로 계산해서 중간 끊김을 줄입니다.")
+        if st.button("방공호/Turbo만 빠른 실행", type="secondary", key="run_bunker_turbo_only_v38"):
+            if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
+                st.error("시작일은 종료일보다 앞서야 합니다.")
+            else:
+                prog_b = st.progress(0)
+                status_b = st.empty()
+                try:
+                    status_b.caption("방공호/Turbo 전용 거래일 생성 중...")
+                    stub_daily_df = _bt_make_bunker_only_daily_df(
+                        start_date=str(start_date),
+                        end_date=str(end_date),
+                        total_initial=float(initial_cash),
+                        max_signal_days=int(max_signal_days),
+                    )
+                    prog_b.progress(0.25)
+                    status_b.caption(f"ETF 가격 조회 및 {bunker_mode} 계산 중... ({len(stub_daily_df):,}행)")
+                    bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
+                        stub_daily_df,
+                        total_initial=float(initial_cash),
+                        leader_ratio=float(leader_alloc_ratio) / 100.0,
+                        mode=bunker_mode,
+                        cash_annual_rate=bunker_cash_rate,
+                        cta_code=cta_code,
+                        cta_close_df=cta_close_df,
+                    )
+                    prog_b.progress(1.0)
+                    status_b.empty()
+                    prog_b.empty()
+                    if bunker_summary.get("오류"):
+                        st.error(f"방공호/Turbo 빠른 실행 실패: {bunker_summary.get('오류')}")
+                    else:
+                        st.success("방공호/Turbo 빠른 실행 완료")
+                        bunker_summary_df = pd.DataFrame([bunker_summary])
+                        q1, q2, q3, q4, q5 = st.columns(5)
+                        q1.metric("총수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
+                        q2.metric("최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
+                        q3.metric("연복리", f"{bunker_summary.get('연복리', 'N/A')}%")
+                        q4.metric("MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
+                        q5.metric("최악 하루", f"{bunker_summary.get('최악하루손실', 'N/A')}%")
+                        st.caption(f"실제검증 {bunker_daily_df['기준일'].iloc[0] if len(bunker_daily_df) else ''} ~ {bunker_daily_df['기준일'].iloc[-1] if len(bunker_daily_df) else ''} / 행수 {len(bunker_daily_df):,}")
+                        show_pinned_dataframe(bunker_summary_df, height=180)
+                        show_pinned_dataframe(bunker_daily_df.tail(120), height=320, pin_rank=False)
+                        mode_text = str(bunker_mode)
+                        if "T100" in mode_text:
+                            tag = "T10_T100_TURBO_NO_CTA"
+                        elif "T90" in mode_text:
+                            tag = "T90_C10_TURBO_CTA"
+                        elif "T80" in mode_text:
+                            tag = "T80_C10_CASH10_TURBO"
+                        elif "T70" in mode_text:
+                            tag = "T70_D20_C10_TURBO"
+                        elif "064" in mode_text or "0/6/4" in mode_text:
+                            tag = "064_C10" if "C10" in mode_text.upper() else "064"
+                        elif "073" in mode_text or "0/7/3" in mode_text:
+                            tag = "073_C10" if "C10" in mode_text.upper() else "073"
+                        else:
+                            tag = "BUNKER_TURBO_ONLY"
+                        export_buffer = io.BytesIO()
+                        with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr(f"magic_split_bunker_{tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_bunker_{tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                            try:
+                                status_text = str(bunker_summary.get("방공호데이터상태", ""))
+                                if status_text:
+                                    rows_status = [{"상태": part} for part in status_text.split(" | ")]
+                                    zf.writestr(f"magic_split_bunker_{tag}_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                            except Exception:
+                                pass
+                        export_buffer.seek(0)
+                        st.download_button(
+                            "방공호/Turbo 빠른 실행 CSV 다운로드",
+                            data=export_buffer.getvalue(),
+                            file_name=f"magic_split_bunker_turbo_only_{tag}_{today_str()}.zip",
+                            mime="application/zip",
+                            key="download_bunker_turbo_only_v38",
+                        )
+                except Exception as e:
+                    prog_b.empty()
+                    status_b.empty()
+                    st.error(f"방공호/Turbo 빠른 실행 중 오류: {e}")
 
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
             if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
