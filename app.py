@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v36_TURBO10_2010_FORCED_START_5000_FIX_20260701"
+APP_VERSION = "v37_TURBO10_2010_FULL_CALENDAR_NAVER_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -4408,13 +4408,36 @@ def _bt_trading_dates_from_universe(leader_df, start_date, end_date):
         return sorted(list(dict.fromkeys(out)))
 
     # 1) 시장 캘린더: KODEX200을 우선 사용.
+    # v37 보정:
+    # 일부 실행환경에서 FDR/KRX가 오래된 구간을 잘라 최근 약 3000거래일만 반환하면
+    # 2010 시작을 넣어도 실제 캘린더가 2014년부터 시작되는 문제가 있었다.
+    # 그래서 KODEX200 캘린더가 요청 시작일보다 90일 이상 늦게 시작하면
+    # 네이버 장기 차트 로더로 한 번 더 시도하고, 그래도 늦으면 평일 캘린더를 사용한다.
     try:
         bench = _bt_price_frame("069500", start_pad, end_pad)
         dates = _normalize_dates_from_df(bench)
         if dates:
-            return dates
+            first_dt = pd.to_datetime(dates[0])
+            if first_dt <= start_ts + pd.DateOffset(days=90):
+                return dates
+    except Exception:
+        dates = []
+
+    try:
+        nav_s = _bt_load_naver_close_series("069500", start_date, end_date, lookback_days=260)
+        nav_df = pd.DataFrame({"close": nav_s}) if nav_s is not None and len(nav_s) > 0 else pd.DataFrame()
+        nav_dates = _normalize_dates_from_df(nav_df)
+        if nav_dates:
+            first_nav = pd.to_datetime(nav_dates[0])
+            if first_nav <= start_ts + pd.DateOffset(days=90):
+                return nav_dates
     except Exception:
         pass
+
+    # 1-2) 그래도 시장 캘린더가 요청 시작일을 못 덮으면,
+    # 방공호/Turbo 장기검증이 2014년부터 잘리는 것보다 평일 캘린더가 낫다.
+    if start_ts <= pd.Timestamp("2011-01-01"):
+        return [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
 
     # 2) fallback: 대표주 전체 날짜 합집합. 특정 종목의 상장일/데이터 시작일에 끌려가지 않게 한다.
     try:
@@ -5835,6 +5858,21 @@ def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
         close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
         close.name = code2
         if len(close) > 0:
+            # v37 보정:
+            # FDR가 성공처럼 보이지만 오래된 구간을 잘라 최근 3000거래일만 주는 경우가 있다.
+            # 2010 장기검증에서 첫 데이터가 요청 시작일보다 90일 이상 늦으면
+            # 국내 6자리 ETF는 네이버 장기 차트로 다시 로딩해 2010 구간을 복구한다.
+            try:
+                req_start = pd.to_datetime(start_date)
+                first_close = pd.to_datetime(close.index.min())
+                if str(code2).isdigit() and first_close > req_start + pd.DateOffset(days=90):
+                    s_nav = _bt_load_naver_close_series(code2, start_date, end_date, lookback_days=lookback_days)
+                    if s_nav is not None and len(s_nav) > 0:
+                        nav_first = pd.to_datetime(s_nav.index.min())
+                        if nav_first <= req_start + pd.DateOffset(days=90):
+                            return s_nav
+            except Exception:
+                pass
             return close
         # FDR가 비어 있지 않았지만 종가 추출이 실패한 경우도 백업 로더로 재시도한다.
         if str(code2).isdigit():
@@ -11178,7 +11216,7 @@ elif menu == "6. 섹터전략 백테스트":
             )
         if period_preset in ["2010부터 장기검증", "2020부터 전체검증", "2021부터 전체검증"]:
             st.info("장기검증 모드: 시작일을 프리셋 날짜로 강제 고정합니다. 2010 모드는 2010-01-04부터, 2020 모드는 2020-01-02부터, 2021 모드는 2021-01-04부터 계산합니다.")
-            st.caption("v36 확인: 2010부터 장기검증은 시작일 2010-01-04 고정 + 기본 4300거래일 + 입력 상한 5000거래일입니다. 이제 예전 3000거래일/2014년 세션값을 타지 않습니다.")
+            st.caption("v37 확인: 2010부터 장기검증은 시작일 2010-01-04 고정 + 기본 4300거래일 + 입력 상한 5000거래일입니다. FDR가 3000일만 주면 네이버 장기차트/평일캘린더로 2010 구간을 복구합니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
