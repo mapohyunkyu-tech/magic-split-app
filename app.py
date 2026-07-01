@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_70_20_10_SPLIT_FIX_20260630"
+APP_VERSION = "v27_SECTOR_LIVE_OPERATION_BOARD_BUNKER_073_FINAL_FIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6015,6 +6015,16 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
     - 정적 50/30/20: 기존 70% 대장주 + 30% 정적 방공호
     - 현금/단기채만: 기존 70% 대장주 + 30% 현금
     - 70/20/10 방공호+부스터: 70% 대장주 + 20% 진짜방공호(GOLD/DOLLAR/CASH) + 10% 공격형 듀얼부스터
+    - 0/7/3 방공호형 공격복리: 0% 대장주 + 70% 진짜방공호 + 30% 공격형 듀얼부스터.
+      매월 상위 70:30 강제 리밸런싱은 하지 않고 각 칸 안에서 복리로 굴린다.
+      분기 첫 거래일에 밴드만 점검한다.
+      방공호 65~80%, 부스터 20~35% 허용.
+      부스터 35% 초과분은 방공호로 잠그고, 방공호 65% 미만이면 70% 근처로 보충한다.
+    - 5/3/2 생존형 복리: 50% 대장주 + 30% 진짜방공호 + 20% 공격형 듀얼부스터.
+      매월 상위 5:3:2를 강제 리밸런싱하지 않고 각 칸 안에서 복리로 굴린다.
+      분기 첫 거래일에 밴드만 점검한다.
+      대장주 45~60%, 방공호 25~40%, 부스터 15~30% 허용.
+      부스터 30% 초과분/대장주 60% 초과분은 방공호로 잠그고, 방공호 25% 미만이면 30% 근처로 보충한다.
 
     목적은 대장주 엔진을 과최적화하지 않고, 전체 계좌 기준 MDD/수익률을 확인하는 것이다.
     """
@@ -6029,8 +6039,18 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         total_initial = float(total_initial or 100_000_000)
         mode = str(mode or "월간 듀얼모멘텀 상위2")
 
-        split_702010 = ("70/20/10" in mode) or ("부스터" in mode)
-        if split_702010:
+        split_073 = ("0/7/3" in mode) or ("073" in mode) or ("방공호형 공격복리" in mode)
+        split_532 = (("5/3/2" in mode) or ("532" in mode) or ("생존형" in mode)) and (not split_073)
+        split_702010 = (("70/20/10" in mode) or ("부스터" in mode)) and (not split_532) and (not split_073)
+        if split_073:
+            leader_ratio = 0.00
+            safe_ratio = 0.70
+            booster_ratio = 0.30
+        elif split_532:
+            leader_ratio = 0.50
+            safe_ratio = 0.30
+            booster_ratio = 0.20
+        elif split_702010:
             leader_ratio = 0.70
             safe_ratio = 0.20
             booster_ratio = 0.10
@@ -6045,7 +6065,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         booster_initial = total_initial * booster_ratio
         daily_total = pd.to_numeric(df["총자산"], errors="coerce").ffill().fillna(total_initial)
         base = float(daily_total.iloc[0]) if float(daily_total.iloc[0]) > 0 else total_initial
-        df["대장주엔진평가금액"] = (daily_total / base) * leader_initial
+        df["_대장주NAV"] = daily_total / base
+        df["대장주엔진평가금액"] = df["_대장주NAV"] * leader_initial
 
         start_date = df["기준일"].iloc[0]
         end_date = df["기준일"].iloc[-1]
@@ -6140,6 +6161,46 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             state["rebalances"] = int(state.get("rebalances", 0)) + 1
             return state
 
+        def withdraw_component(state, date, amount):
+            """방공호/부스터 칸에서 amount만큼 비례 매도해 현금화한다."""
+            amount = max(0.0, float(amount or 0.0))
+            total = component_value(state, date)
+            if amount <= 0 or total <= 0:
+                return 0.0
+            take = min(amount, total)
+            ratio = take / total
+            state["cash"] = float(state.get("cash", 0.0)) * (1.0 - ratio)
+            for asset in list(state.get("shares", {}).keys()):
+                state["shares"][asset] = float(state["shares"].get(asset, 0.0)) * (1.0 - ratio)
+                if abs(state["shares"].get(asset, 0.0)) < 1e-12:
+                    state["shares"].pop(asset, None)
+            return take
+
+        def deposit_component_cash(state, amount):
+            amount = max(0.0, float(amount or 0.0))
+            state["cash"] = float(state.get("cash", 0.0)) + amount
+            return state
+
+        def leader_value_from_units(leader_units, nav):
+            return float(leader_units) * float(nav if nav and nav > 0 else 1.0)
+
+        def withdraw_leader(leader_units, nav, amount):
+            amount = max(0.0, float(amount or 0.0))
+            nav = float(nav if nav and nav > 0 else 1.0)
+            current = leader_value_from_units(leader_units, nav)
+            take = min(amount, current)
+            leader_units = max(0.0, float(leader_units) - take / nav)
+            return leader_units, take
+
+        def deposit_leader(leader_units, nav, amount):
+            amount = max(0.0, float(amount or 0.0))
+            nav = float(nav if nav and nav > 0 else 1.0)
+            return float(leader_units) + amount / nav
+
+        leader_units = leader_initial / float(df["_대장주NAV"].iloc[0] if float(df["_대장주NAV"].iloc[0]) > 0 else 1.0)
+        top_rebalance_count = 0
+        last_quarter_key = None
+
         rows = []
         peak = total_initial
         max_dd = 0.0
@@ -6153,7 +6214,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             month_key = date.strftime("%Y-%m")
 
             if safe_state.get("last_month") != month_key:
-                if split_702010:
+                if split_702010 or split_532 or split_073:
                     safe_mode = "defensive_dual"
                 elif mode == "정적 50/30/20":
                     safe_mode = "static"
@@ -6168,10 +6229,99 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 booster_state = rebalance_component(booster_state, date, prev_date, "aggressive_dual")
                 booster_state["last_month"] = month_key
 
+            nav = float(df.loc[i, "_대장주NAV"]) if "_대장주NAV" in df.columns else 1.0
+            top_rebalance_note = ""
+            quarter_key = f"{date.year}-Q{((int(date.month)-1)//3)+1}"
+            if (split_532 or split_073) and i > 0 and last_quarter_key is not None and quarter_key != last_quarter_key:
+                # 532/073은 매월 강제복귀하지 않는다. 분기 첫 거래일에 밴드만 점검한다.
+                # 532 밴드: 대장주 45~60 / 방공호 25~40 / 부스터 15~30.
+                # 073 밴드: 방공호 65~80 / 부스터 20~35. 대장주는 사용하지 않는다.
+                actions = []
+                def vals_now():
+                    lv = leader_value_from_units(leader_units, nav)
+                    sv = component_value(safe_state, date)
+                    bv = component_value(booster_state, date) if booster_ratio > 0 else 0.0
+                    tv = lv + sv + bv
+                    return lv, sv, bv, tv
+
+                if split_073:
+                    leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                    if total_tmp > 0 and booster_val_tmp / total_tmp > 0.35:
+                        excess = booster_val_tmp - total_tmp * 0.35
+                        moved = withdraw_component(booster_state, date, excess)
+                        deposit_component_cash(safe_state, moved)
+                        if moved > 0:
+                            top_rebalance_count += 1
+                            actions.append(f"부스터35초과 {round(moved):,}원 방공호잠금")
+
+                    leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                    if total_tmp > 0 and safe_val_tmp / total_tmp < 0.65:
+                        need = total_tmp * 0.70 - safe_val_tmp
+                        moved = withdraw_component(booster_state, date, need)
+                        deposit_component_cash(safe_state, moved)
+                        if moved > 0:
+                            top_rebalance_count += 1
+                            actions.append(f"방공호65미만 {round(moved):,}원 보충")
+                else:
+                    leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                    if total_tmp > 0 and booster_val_tmp / total_tmp > 0.30:
+                        excess = booster_val_tmp - total_tmp * 0.30
+                        moved = withdraw_component(booster_state, date, excess)
+                        deposit_component_cash(safe_state, moved)
+                        if moved > 0:
+                            top_rebalance_count += 1
+                            actions.append(f"부스터30초과 {round(moved):,}원 방공호잠금")
+
+                    leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                    if total_tmp > 0 and leader_val_tmp / total_tmp > 0.60:
+                        excess = leader_val_tmp - total_tmp * 0.60
+                        leader_units, moved = withdraw_leader(leader_units, nav, excess)
+                        deposit_component_cash(safe_state, moved)
+                        if moved > 0:
+                            top_rebalance_count += 1
+                            actions.append(f"대장주60초과 {round(moved):,}원 방공호잠금")
+
+                    leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                    if total_tmp > 0 and safe_val_tmp / total_tmp < 0.25:
+                        need = total_tmp * 0.30 - safe_val_tmp
+                        moved_total = 0.0
+                        # 1순위: 부스터가 기본 20%를 넘긴 초과분에서 보충
+                        if need > 0 and booster_val_tmp / total_tmp > 0.20:
+                            take_cap = booster_val_tmp - total_tmp * 0.20
+                            moved = withdraw_component(booster_state, date, min(need, take_cap))
+                            deposit_component_cash(safe_state, moved)
+                            need -= moved
+                            moved_total += moved
+                        # 2순위: 대장주가 기본 50%를 넘긴 초과분에서 보충
+                        leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                        if need > 0 and leader_val_tmp / total_tmp > 0.50:
+                            take_cap = leader_val_tmp - total_tmp * 0.50
+                            leader_units, moved = withdraw_leader(leader_units, nav, min(need, take_cap))
+                            deposit_component_cash(safe_state, moved)
+                            need -= moved
+                            moved_total += moved
+                        # 그래도 방공호가 25% 밑이면 생존 우선으로 남은 금액을 비례 보충
+                        leader_val_tmp, safe_val_tmp, booster_val_tmp, total_tmp = vals_now()
+                        if need > 0 and total_tmp > 0:
+                            donor_total = leader_val_tmp + booster_val_tmp
+                            if donor_total > 0:
+                                take_b = min(booster_val_tmp, need * booster_val_tmp / donor_total)
+                                moved_b = withdraw_component(booster_state, date, take_b)
+                                leader_units, moved_l = withdraw_leader(leader_units, nav, need - moved_b)
+                                deposit_component_cash(safe_state, moved_b + moved_l)
+                                moved_total += moved_b + moved_l
+                        if moved_total > 0:
+                            top_rebalance_count += 1
+                            actions.append(f"방공호25미만 {round(moved_total):,}원 보충")
+
+                top_rebalance_note = " / ".join(actions) if actions else "분기점검_조치없음"
+            if split_532 or split_073:
+                last_quarter_key = quarter_key
+
             safe_val = component_value(safe_state, date)
             booster_val = component_value(booster_state, date) if booster_ratio > 0 else 0.0
             bunker_val = safe_val + booster_val
-            leader_val = float(df.loc[i, "대장주엔진평가금액"])
+            leader_val = leader_value_from_units(leader_units, nav) if (split_532 or split_073) else float(df.loc[i, "대장주엔진평가금액"])
             combined = leader_val + bunker_val
             peak = max(float(peak), float(combined))
             dd = (combined / peak - 1.0) * 100.0 if peak > 0 else 0.0
@@ -6190,6 +6340,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 "통합총자산": round(combined),
                 "통합수익률": round((combined / total_initial - 1.0) * 100.0, 2),
                 "통합MDD": round(dd, 2),
+                "대장주현재비중": round((leader_val / combined * 100.0) if combined > 0 else 0.0, 2),
+                "진짜방공호현재비중": round((safe_val / combined * 100.0) if combined > 0 else 0.0, 2),
+                "수익부스터현재비중": round((booster_val / combined * 100.0) if combined > 0 else 0.0, 2),
+                "532상위리밸런싱": top_rebalance_note,
+                "073상위리밸런싱": top_rebalance_note if split_073 else "",
                 "방공호보유": combined_hold,
                 "진짜방공호보유": safe_hold,
                 "수익부스터보유": booster_hold,
@@ -6231,7 +6386,14 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "최종통합총자산": round(final_total),
             "통합총수익률": round((final_total / total_initial - 1.0) * 100.0, 2),
             "통합최대낙폭": round(float(out["통합MDD"].min()), 2),
-            "리밸런싱횟수": int(safe_state.get("rebalances", 0)) + int(booster_state.get("rebalances", 0)),
+            "내부ETF리밸런싱횟수": int(safe_state.get("rebalances", 0)) + int(booster_state.get("rebalances", 0)),
+            "532상위밴드조정횟수": int(top_rebalance_count) if split_532 else 0,
+            "073상위밴드조정횟수": int(top_rebalance_count) if split_073 else 0,
+            "상위밴드조정횟수": int(top_rebalance_count),
+            "리밸런싱횟수": int(safe_state.get("rebalances", 0)) + int(booster_state.get("rebalances", 0)) + int(top_rebalance_count),
+            "최종대장주비중": round((leader_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
+            "최종진짜방공호비중": round((safe_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
+            "최종수익부스터비중": round((booster_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
             "현금연수익률가정": float(cash_annual_rate or 0.0),
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}",
             "방공호가격데이터자산수": len(loaded_assets),
@@ -6241,7 +6403,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "비현금방공호일수": noncash_days,
             "마지막방공호보유": str(out["방공호보유"].iloc[-1]) if len(out) else "",
             "방공호데이터상태": status_text,
-            "메모": "70/20/10 모드는 대장주 70%, 진짜방공호 20%(CASH 50% + GOLD/DOLLAR 방어듀얼 50%), 수익부스터 10%(KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격듀얼)를 분리 계산합니다.",
+            "메모": ("0/7/3 방공호형 공격복리 모드는 대장주를 제외하고 초기 70/30으로 나눈 뒤 매월 상위비중 강제 리밸런싱은 하지 않고, 방공호와 부스터 각 칸 안에서 복리 운용합니다. 분기마다 방공호65~80/부스터20~35 밴드만 점검하고, 부스터35초과·방공호65미만일 때만 방공호 잠금/보충을 실행합니다." if split_073 else ("5/3/2 생존형 복리 모드는 초기 50/30/20으로 나눈 뒤 매월 상위비중 강제 리밸런싱은 하지 않고, 각 칸 안에서 복리 운용합니다. 분기마다 대장주45~60/방공호25~40/부스터15~30 밴드만 점검하고, 부스터30초과·대장주60초과·방공호25미만일 때만 방공호 잠금/보충을 실행합니다." if split_532 else "70/20/10 모드는 대장주 70%, 진짜방공호 20%(CASH 50% + GOLD/DOLLAR 방어듀얼 50%), 수익부스터 10%(KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격듀얼)를 분리 계산합니다.")),
         }
         return out, summary
     except Exception as e:
@@ -10675,17 +10837,18 @@ elif menu == "6. 섹터전략 백테스트":
         if compound_mode:
             st.info("증액투자 ON: 대장주 1차 1,000만은 초기자금 1억 기준 10%로 해석됩니다. 총자산이 1.2억이면 약 1,200만으로 자동 확대됩니다.")
 
-        st.subheader("1-0) 70/20/10 방공호+부스터 통합 백테스트")
+        st.subheader("1-0) 0/7/3 · 5/3/2 · 70/20/10 방공호+부스터 통합 백테스트")
         bk1, bk2, bk3 = st.columns(3)
         with bk1:
-            enable_bunker_backtest = st.checkbox("70/20/10 방공호+부스터 같이 계산", value=False, key="bt_enable_bunker_7030")
-            leader_alloc_ratio = st.number_input("대장주 엔진 비중(%)", min_value=10.0, max_value=95.0, value=70.0, step=5.0, key="bt_leader_alloc_ratio")
+            enable_bunker_backtest = st.checkbox("0/7/3·5/3/2·70/20/10 방공호+부스터 같이 계산", value=False, key="bt_enable_bunker_7030")
+            leader_alloc_ratio = st.number_input("대장주 엔진 비중(% / 일반모드용)", min_value=10.0, max_value=95.0, value=70.0, step=5.0, key="bt_leader_alloc_ratio")
         with bk2:
-            bunker_mode = st.selectbox("방공호 방식", options=["70/20/10 방공호+부스터", "월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
+            bunker_mode = st.selectbox("방공호 방식", options=["0/7/3 방공호형 공격복리", "5/3/2 생존형 복리", "70/20/10 방공호+부스터", "월간 듀얼모멘텀 상위2", "정적 50/30/20", "현금/단기채만"], index=0, key="bt_bunker_mode")
             bunker_cash_rate = st.number_input("현금/단기채 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="bt_bunker_cash_rate")
         with bk3:
-            st.caption("시작 원금 1억을 대장주 70% + 진짜방공호 20% + 수익부스터 10%로 나눠 통합자산/MDD를 계산합니다.")
-            st.caption("진짜방공호: CASH/GOLD/DOLLAR 중심 · 수익부스터: KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR")
+            st.caption("073 모드: 대장주 0% + 진짜방공호 70% + 수익부스터 30%. 매월 강제 073 리밸런싱은 하지 않고 분기 밴드만 점검합니다.")
+            st.caption("532 모드: 시작 원금을 대장주 50% + 진짜방공호 30% + 수익부스터 20%로 나눕니다. 매월 강제 532 리밸런싱은 하지 않고 분기 밴드만 점검합니다.")
+            st.caption("진짜방공호: CASH/GOLD/DOLLAR 중심 · 수익부스터: KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR · 9·11급 갭하락 규칙은 장세/시장붕괴 필터와 함께 비교")
             st.caption("대장주 엔진은 현재 백테스트 총자산 곡선을 비중만큼 스케일합니다.")
 
         st.subheader("1-1) MDD -10% 수익확대 프리셋")
@@ -11082,7 +11245,7 @@ elif menu == "6. 섹터전략 백테스트":
                                         st.error("방공호 듀얼모멘텀이 실제 적용되지 않았습니다. 전 기간 CASH:100%입니다. 방공호가격데이터자산수/데이터상태/모멘텀계산일수를 확인하세요.")
                                     else:
                                         st.caption(f"방공호 데이터자산 {bunker_summary.get('방공호가격데이터자산수', 0)}개 / 비현금 방공호일수 {bunker_summary.get('비현금방공호일수', 0)}일 / 마지막보유 {bunker_summary.get('마지막방공호보유', '')}")
-                                    with st.expander("70/20/10 방공호+부스터 통합 결과", expanded=False):
+                                    with st.expander(f"{bunker_mode} 통합 결과", expanded=False):
                                         show_pinned_dataframe(bunker_summary_df, height=160)
                                         show_pinned_dataframe(bunker_daily_df.tail(80), height=300, pin_rank=False)
                             except Exception as e:
@@ -11093,6 +11256,7 @@ elif menu == "6. 섹터전략 백테스트":
                             fail_df["실현손익"] = pd.to_numeric(fail_df["실현손익"], errors="coerce").fillna(0)
                             fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
 
+                        bunker_file_tag = "073" if ("0/7/3" in str(bunker_mode) or "073" in str(bunker_mode) or "방공호형 공격복리" in str(bunker_mode)) else ("532" if ("5/3/2" in str(bunker_mode) or "532" in str(bunker_mode) or "생존형" in str(bunker_mode)) else ("702010" if ("70/20/10" in str(bunker_mode) or "부스터" in str(bunker_mode)) else "7030"))
                         export_buffer = io.BytesIO()
                         with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                             zf.writestr(f"magic_split_sector_backtest_summary_{today_str()}.csv", summary_df.to_csv(index=False).encode("utf-8-sig"))
@@ -11105,9 +11269,9 @@ elif menu == "6. 섹터전략 백테스트":
                             zf.writestr(f"magic_split_sector_backtest_regime_{today_str()}.csv", regime_df.to_csv(index=False).encode("utf-8-sig"))
                             zf.writestr(f"magic_split_sector_backtest_regime_daily_{today_str()}.csv", regime_daily_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_summary_df) > 0:
-                                zf.writestr(f"magic_split_bunker_702010_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                                zf.writestr(f"magic_split_bunker_{bunker_file_tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_daily_df) > 0:
-                                zf.writestr(f"magic_split_bunker_702010_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                                zf.writestr(f"magic_split_bunker_{bunker_file_tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
                                 try:
                                     # 방공호 데이터 로딩 상태를 별도 파일로도 저장
                                     if len(bunker_summary_df) > 0 and "방공호데이터상태" in bunker_summary_df.columns:
@@ -11115,7 +11279,7 @@ elif menu == "6. 섹터전략 백테스트":
                                         rows_status = []
                                         for part in status_text.split(" | "):
                                             rows_status.append({"상태": part})
-                                        zf.writestr(f"magic_split_bunker_702010_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                                        zf.writestr(f"magic_split_bunker_{bunker_file_tag}_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
                                 except Exception:
                                     pass
                         export_buffer.seek(0)
