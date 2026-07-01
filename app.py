@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v49_EXACT_BAA_VAA_US_KR_PROXY_20260701"
+APP_VERSION = "v50_BAA_VAA_YAHOO_ADJCLOSE_ONLY_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10282,7 +10282,7 @@ def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_a
 
 # =====================================================
 # v49 BAA/VAA 정확형 + 한국 ETF 프록시형 재정의
-# - 미국형: Yahoo adjusted close 우선, FDR Adj Close/Close, Stooq Close 순서
+# - 미국형: Yahoo Adj Close 전용 모드 추가. 필요 시 FDR/Stooq 백업 모드 선택 가능
 # - BAA: Canary 13612W + p0/avg(p0..p12) 상대모멘텀 + 월말 신호/다음 거래일 적용
 # - VAA-G4: 13612W breadth momentum + 월말 신호/다음 거래일 적용
 # - 한국형: 국내 ETF 프록시로 별도 전략명에 KR Proxy 표기
@@ -10365,8 +10365,9 @@ def _taa_v49_epoch(dt):
         return 0
 
 
-def _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_days=430):
-    """Yahoo chart API에서 조정가(adjclose)를 직접 가져온다. yfinance 설치 없이 사용."""
+def _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_days=430, require_adjclose=False):
+    """Yahoo chart API에서 조정가(adjclose)를 직접 가져온다. yfinance 설치 없이 사용.
+    require_adjclose=True이면 Yahoo Close 대체를 허용하지 않는다."""
     try:
         import json
         start_dt = pd.to_datetime(start_date) - pd.Timedelta(days=int(lookback_days * 1.8) + 40)
@@ -10390,6 +10391,8 @@ def _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_d
         ts = res.get("timestamp") or []
         adj = (((res.get("indicators", {}) or {}).get("adjclose", []) or [{}])[0]).get("adjclose")
         close = (((res.get("indicators", {}) or {}).get("quote", []) or [{}])[0]).get("close")
+        if require_adjclose and adj is None:
+            return pd.Series(dtype=float, name=ticker), "YahooAdjClose없음"
         vals = adj if adj is not None else close
         if not ts or not vals:
             return pd.Series(dtype=float, name=ticker), "Yahoo무데이터"
@@ -10405,18 +10408,25 @@ def _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_d
     return pd.Series(dtype=float, name=ticker), "Yahoo실패"
 
 
-def _taa_load_us_series_v49(ticker, start_date, end_date, lookback_days=430):
+def _taa_load_us_series_v49(ticker, start_date, end_date, lookback_days=430, us_data_mode="yahoo_adj_only"):
     ticker = str(ticker).strip().upper()
     if ticker in {"CASH", "BIL", "SHY_CASH", "BIL_CASH"}:
         return pd.Series(dtype=float, name="CASH"), "CASH프록시"
-    s, src = _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_days=lookback_days)
+
+    strict_yahoo = str(us_data_mode).lower() in {"yahoo_adj_only", "strict_yahoo", "adjclose_only"}
+    s, src = _taa_load_yahoo_adjclose_series_v49(
+        ticker, start_date, end_date, lookback_days=lookback_days, require_adjclose=strict_yahoo
+    )
     if len(s) > 0:
         return s, src
-    # 기존 로더 재사용: FDR Adj Close/Close, Stooq Close
+    if strict_yahoo:
+        return pd.Series(dtype=float, name=ticker), f"실패:{src}"
+
+    # 백업 모드: Yahoo 실패 시 FDR Adj Close/Close, Stooq Close 순서로 대체
     try:
         s2, src2 = _taa_load_us_close_series(ticker, start_date, end_date, lookback_days=lookback_days)
         if len(s2) > 0:
-            return s2, src2
+            return s2, "백업 " + str(src2)
     except Exception:
         pass
     return pd.Series(dtype=float, name=ticker), "실패"
@@ -10466,7 +10476,7 @@ def _taa_asset_label_v49(asset_id):
     return str(asset_id)
 
 
-def _taa_build_price_table_v49(asset_ids, start_date, end_date, cash_annual_rate=3.0):
+def _taa_build_price_table_v49(asset_ids, start_date, end_date, cash_annual_rate=3.0, us_data_mode="yahoo_adj_only"):
     start_dt = pd.to_datetime(start_date)
     end_dt = pd.to_datetime(end_date)
     all_index = None
@@ -10481,7 +10491,7 @@ def _taa_build_price_table_v49(asset_ids, start_date, end_date, cash_annual_rate
             market = "KR Proxy"
         else:
             ticker = US_TAA_ASSETS_V49.get(aid, {}).get("ticker", aid)
-            s, src = _taa_load_us_series_v49(ticker, start_dt, end_dt)
+            s, src = _taa_load_us_series_v49(ticker, start_dt, end_dt, us_data_mode=us_data_mode)
             used = ticker
             market = "US Exact"
         if len(s) > 0:
@@ -10678,7 +10688,7 @@ def _taa_v49_backtest_from_signals(prices, signals, initial_cash=100_000_000, fe
     return daily, rebal, summary
 
 
-def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, include_balanced=False, include_kr_proxy=False, include_us_exact=True):
+def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, include_balanced=False, include_kr_proxy=False, include_us_exact=True, us_data_mode="yahoo_adj_only"):
     strategies = []
     if include_us_exact:
         strategies += ["BAA Aggressive Exact US", "VAA G4 Exact US"]
@@ -10696,13 +10706,14 @@ def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_a
         for key in ["canary", "offensive", "defensive"]:
             assets |= set(prof.get(key, []))
         assets.add(prof.get("cash", "CASH"))
-    prices, status = _taa_build_price_table_v49(assets, start_date, end_date, cash_annual_rate=cash_annual_rate)
+    prices, status = _taa_build_price_table_v49(assets, start_date, end_date, cash_annual_rate=cash_annual_rate, us_data_mode=us_data_mode)
     summary_rows, daily_map, signal_map, rebal_map = [], {}, {}, {}
     for strat in strategies:
         sig = _taa_v49_generate_signals(prices, strat)
         daily, rebal, summ = _taa_v49_backtest_from_signals(prices, sig, initial_cash=initial_cash, fee_rate=fee_rate)
         summ["전략"] = strat
         summ["구분"] = "한국ETF프록시" if "KR Proxy" in strat else "미국원규칙"
+        summ["미국데이터모드"] = us_data_mode
         summ["7천만환산최종자산"] = round(summ.get("최종자산", 0) * 0.7) if not summ.get("오류") else 0
         summary_rows.append(summ)
         daily_map[strat] = daily
@@ -10710,7 +10721,7 @@ def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_a
         rebal_map[strat] = rebal
     summary = pd.DataFrame(summary_rows)
     if len(summary) > 0 and "전략" in summary.columns:
-        cols = ["구분", "전략", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "마지막보유자산", "7천만환산최종자산"]
+        cols = ["구분", "미국데이터모드", "전략", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "마지막보유자산", "7천만환산최종자산"]
         summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
     return summary, daily_map, signal_map, rebal_map, status
 
@@ -12062,10 +12073,19 @@ elif menu == "6. 섹터전략 백테스트":
             include_us_exact = st.checkbox("미국 원규칙", value=True, key="bt_baa_include_us_exact_v49")
         with bv5:
             include_kr_proxy = st.checkbox("한국 ETF 프록시", value=True, key="bt_baa_include_kr_proxy_v49")
-        st.caption("미국 원규칙은 Yahoo Adj Close를 우선 사용하고, 월말 신호를 다음 거래일부터 반영합니다. 한국 ETF 프록시는 국내 상장 ETF 대체자산이라 정확 복제본이 아니라 별도 비교용입니다.")
+        us_baa_data_mode_label = st.radio(
+            "미국 BAA/VAA 데이터 모드",
+            ["Yahoo Adj Close 전용(정확검증)", "Yahoo 우선 + FDR/Stooq 백업"],
+            index=0,
+            horizontal=True,
+            key="bt_baa_us_data_mode_v50",
+            help="정확검증은 Yahoo 조정종가가 없는 자산은 실패 처리합니다. 백업 모드는 데이터 확보용 근사값입니다.",
+        )
+        us_baa_data_mode = "yahoo_adj_only" if us_baa_data_mode_label.startswith("Yahoo Adj Close") else "fallback"
+        st.caption("미국 원규칙은 Yahoo Adj Close 전용 모드를 기본값으로 사용하고, 월말 신호를 다음 거래일부터 반영합니다. 한국 ETF 프록시는 국내 상장 ETF 대체자산이라 정확 복제본이 아니라 별도 비교용입니다.")
         st.caption("BAA: Canary(SPY/EEM/EFA/AGG) 13612W가 모두 양수면 공격자산, 하나라도 음수면 방어자산. VAA-G4: SPY/EFA/EEM/AGG breadth momentum 기준 방어 전환.")
 
-        if st.button("BAA/VAA 정확형 빠른 백테스트 실행", type="secondary", key="run_baa_vaa_backtest_fast_v49"):
+        if st.button("BAA/VAA Yahoo Adj Close 정확검증 실행", type="secondary", key="run_baa_vaa_backtest_fast_v50"):
             try:
                 with st.spinner("BAA/VAA 미국 원규칙 + 한국 ETF 프록시 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
                     bv_summary, bv_daily_map, bv_signal_map, bv_rebal_map, bv_status = run_baa_vaa_backtests(
@@ -12077,8 +12097,9 @@ elif menu == "6. 섹터전략 백테스트":
                         include_balanced=include_baa_balanced,
                         include_kr_proxy=include_kr_proxy,
                         include_us_exact=include_us_exact,
+                        us_data_mode=us_baa_data_mode,
                     )
-                st.success("BAA/VAA 정확형 백테스트 완료")
+                st.success("BAA/VAA Yahoo Adj Close 정확검증 백테스트 완료")
                 st.dataframe(bv_summary, use_container_width=True, hide_index=True)
                 with st.expander("BAA/VAA 데이터 상태", expanded=False):
                     st.dataframe(bv_status, use_container_width=True, hide_index=True)
