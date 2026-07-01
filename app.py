@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v45_MAIN_APP_MERGED_CAP5_R70_MIN5_20260701"
+APP_VERSION = "v46_CAP5_FASTRUN_COLUMN_HOTFIX_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -7057,18 +7057,78 @@ def _bt_cap5_find_col(df, candidates):
 
 
 def _bt_cap5_prepare_t100_daily(df):
-    """build_bunker_7030_backtest 결과 또는 업로드 daily에서 T100 원본 곡선을 추출한다."""
+    """build_bunker_7030_backtest 결과 또는 업로드 daily에서 T100 원본 곡선을 추출한다.
+
+    v46 HOTFIX:
+    - 빠른 실행 경로에서 daily 컬럼명이 `통합총자산`이 아니거나, 날짜가 인덱스로 들어온 경우도 자동 인식한다.
+    - 컬럼 앞뒤 공백/BOM을 제거한다.
+    - `통합총자산`, `총자산`, `수익부스터평가금액`이 모두 없으면 숫자형 자산 컬럼을 보조 탐색한다.
+    """
     if df is None or len(df) == 0:
         raise ValueError("T100 daily 데이터가 없습니다.")
     src = df.copy()
-    date_col = _bt_cap5_find_col(src, ["기준일", "Date", "date", "날짜"])
-    asset_col = _bt_cap5_find_col(src, ["통합총자산", "총자산", "수익부스터평가금액", "equity", "Equity", "Close", "close"])
-    holding_col = _bt_cap5_find_col(src, ["수익부스터보유", "마지막보유", "보유", "holding", "Holdings"])
+
+    # 컬럼명 정규화: 공백/BOM/제로폭 문자 때문에 후보 탐색이 실패하는 것을 방지
+    try:
+        src.columns = [str(c).replace("\ufeff", "").replace("\u200b", "").strip() for c in src.columns]
+    except Exception:
+        pass
+
+    # 날짜 컬럼 탐색. 없으면 DatetimeIndex를 기준일로 승격한다.
+    date_col = _bt_cap5_find_col(src, [
+        "기준일", "Date", "date", "DATE", "날짜", "일자", "datetime", "Datetime", "time", "Time", "거래일"
+    ])
+    if date_col is None:
+        try:
+            idx = pd.to_datetime(src.index, errors="coerce")
+            if int(pd.Series(idx).notna().sum()) >= max(1, int(len(src) * 0.5)):
+                src = src.reset_index(drop=False).rename(columns={src.reset_index(drop=False).columns[0]: "기준일"})
+                date_col = "기준일"
+        except Exception:
+            date_col = None
+
+    # 자산 컬럼 탐색. 통합총자산이 최우선이고, 없으면 T100/Turbo 자산 컬럼으로 보조 탐색한다.
+    asset_col = _bt_cap5_find_col(src, [
+        "통합총자산", "총자산", "수익부스터평가금액", "전략총자산", "최종총자산",
+        "T100원본총자산", "T100원본자산", "T100원본총액", "T100총자산",
+        "CAP5_R70_MIN5총자산", "equity", "Equity", "asset", "Asset", "Close", "close", "종가", "수정종가"
+    ])
+    if asset_col is None:
+        try:
+            numeric_candidates = []
+            preferred_words = ["총자산", "자산", "평가금액", "equity", "asset", "close", "종가", "통합", "부스터", "T100"]
+            for c in src.columns:
+                if c == date_col:
+                    continue
+                vals = pd.to_numeric(src[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
+                ok = int(vals.notna().sum())
+                if ok <= 0:
+                    continue
+                score = ok
+                cname = str(c).lower()
+                if any(w.lower() in cname for w in preferred_words):
+                    score += 100000
+                # 자산곡선은 보통 양수이고 값의 규모가 크다. 수익률/MDD 컬럼보다 우선하도록 보정한다.
+                med = float(vals.dropna().abs().median()) if vals.notna().any() else 0.0
+                if med > 1000:
+                    score += 10000
+                numeric_candidates.append((score, c))
+            if numeric_candidates:
+                asset_col = sorted(numeric_candidates, reverse=True)[0][1]
+        except Exception:
+            asset_col = None
+
+    holding_col = _bt_cap5_find_col(src, [
+        "수익부스터보유", "마지막보유", "보유", "T100보유", "holding", "Holdings", "보유자산"
+    ])
+
     if date_col is None or asset_col is None:
-        raise ValueError("CAP5 계산에는 기준일/통합총자산 컬럼이 필요합니다.")
+        available_cols = ", ".join([str(c) for c in list(src.columns)[:40]])
+        raise ValueError(f"CAP5 계산에는 기준일/통합총자산 계열 컬럼이 필요합니다. 현재 컬럼: {available_cols}")
+
     out = pd.DataFrame()
     out["기준일"] = pd.to_datetime(src[date_col], errors="coerce")
-    out["T100원본총자산"] = pd.to_numeric(src[asset_col], errors="coerce")
+    out["T100원본총자산"] = pd.to_numeric(src[asset_col].astype(str).str.replace(",", "", regex=False), errors="coerce")
     out["T100원본보유"] = src[holding_col].astype(str).fillna("") if holding_col is not None else ""
     out = out.dropna(subset=["기준일", "T100원본총자산"]).sort_values("기준일").reset_index(drop=True)
     out = out[out["T100원본총자산"] > 0].reset_index(drop=True)
@@ -7076,7 +7136,6 @@ def _bt_cap5_prepare_t100_daily(df):
         raise ValueError("유효 T100 daily 데이터가 너무 적습니다. 최소 30거래일 이상 필요합니다.")
     out["T100원본일수익률"] = out["T100원본총자산"].pct_change().fillna(0.0)
     return out
-
 
 def _bt_cap5_drawdown(equity):
     eq = pd.to_numeric(equity, errors="coerce").ffill().fillna(0)
