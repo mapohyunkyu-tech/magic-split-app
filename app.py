@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v46_CAP5_FASTRUN_COLUMN_HOTFIX_20260701"
+APP_VERSION = "v47_BAA_VAA_BACKTEST_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5786,188 +5786,6 @@ def _bt_load_stooq_close_series(ticker, start_date, end_date, lookback_days=260)
         return pd.Series(dtype=float)
 
 
-def _bt_load_yahoo_close_series(symbol, start_date, end_date, lookback_days=260):
-    """Yahoo download 백업 로더. NDX/GC=F/USDKRW=X 같은 장기 프록시용."""
-    try:
-        sym = str(symbol or "").strip()
-        if not sym:
-            return pd.Series(dtype=float)
-        sd = pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)
-        ed = pd.to_datetime(end_date) + pd.DateOffset(days=35)
-        p1 = int(sd.timestamp())
-        p2 = int(ed.timestamp())
-        url = f"https://query1.finance.yahoo.com/v7/finance/download/{sym}?period1={p1}&period2={p2}&interval=1d&events=history&includeAdjustedClose=true"
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200 or "Date" not in r.text:
-            return pd.Series(dtype=float)
-        df = pd.read_csv(io.StringIO(r.text))
-        close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-        if "Date" not in df.columns or close_col not in df.columns:
-            return pd.Series(dtype=float)
-        ser = pd.Series(pd.to_numeric(df[close_col], errors="coerce").values, index=pd.to_datetime(df["Date"], errors="coerce"), dtype=float).dropna().sort_index()
-        ser.name = sym
-        return ser[ser > 0]
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-def _bt_load_naver_index_series(symbol, start_date, end_date, lookback_days=260):
-    """네이버 지수 JSON 백업 로더. 예: KPI200, KOSDAQ."""
-    try:
-        sym = str(symbol or "").strip()
-        if not sym:
-            return pd.Series(dtype=float)
-        sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)).strftime("%Y%m%d")
-        ed = (pd.to_datetime(end_date) + pd.DateOffset(days=35)).strftime("%Y%m%d")
-        url = f"https://api.finance.naver.com/siseJson.naver?symbol={sym}&requestType=1&startTime={sd}&endTime={ed}&timeframe=day"
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200 or not r.text:
-            return pd.Series(dtype=float)
-        text = r.text
-        rows = []
-        # 네이버 siseJson은 ["날짜", "시가", "고가", "저가", "종가", ...] 형태의 JS 배열 텍스트다.
-        for m in re.finditer(r'\[\s*"?(\d{8})"?\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)\s*,\s*([0-9\.\-]+)', text):
-            dt = pd.to_datetime(m.group(1), format="%Y%m%d", errors="coerce")
-            if pd.isna(dt):
-                continue
-            try:
-                close = float(m.group(5))
-            except Exception:
-                continue
-            if close > 0:
-                rows.append((dt, close))
-        if not rows:
-            return pd.Series(dtype=float)
-        ser = pd.Series([x[1] for x in rows], index=pd.DatetimeIndex([x[0] for x in rows]), dtype=float).sort_index()
-        ser.name = sym
-        return ser[ser > 0]
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-def _bt_try_fdr_symbols(symbols, start_date, end_date, lookback_days=260):
-    """FDR 후보 심볼을 순서대로 시도한다."""
-    for sym in list(symbols or []):
-        try:
-            sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 220)).strftime("%Y-%m-%d")
-            ed = (pd.to_datetime(end_date) + pd.DateOffset(days=35)).strftime("%Y-%m-%d")
-            raw = fdr.DataReader(str(sym), sd, ed)
-            if raw is None or len(raw) == 0:
-                continue
-            close = _ohlcv_close_series(raw)
-            if close is None or len(close) == 0:
-                close_col = next((c for c in ["Close", "close", "종가", "Adj Close"] if c in raw.columns), None)
-                if close_col is None:
-                    continue
-                close = pd.to_numeric(raw[close_col], errors="coerce").dropna()
-            close.index = pd.to_datetime(close.index, errors="coerce")
-            close = close[~pd.isna(close.index)].sort_index()
-            close = pd.to_numeric(close, errors="coerce").dropna()
-            close = close[close > 0]
-            if len(close) > 0:
-                close.name = str(sym)
-                return close
-        except Exception:
-            continue
-    return pd.Series(dtype=float)
-
-
-def _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=260):
-    """USD/KRW 환율 프록시. FDR → Yahoo → Stooq 순서."""
-    s = _bt_try_fdr_symbols(["USD/KRW", "USDKRW", "KRW=X"], start_date, end_date, lookback_days=lookback_days)
-    if s is not None and len(s) > 0:
-        s.name = "USDKRW"
-        return s
-    for sym in ["KRW=X", "USDKRW=X"]:
-        s = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-        if s is not None and len(s) > 0:
-            s.name = "USDKRW"
-            return s
-    for sym in ["usdkrw", "usdkrw.us"]:
-        s = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-        if s is not None and len(s) > 0:
-            s.name = "USDKRW"
-            return s
-    return pd.Series(dtype=float)
-
-
-def _bt_multiply_with_fx(base, fx, name):
-    try:
-        if base is None or len(base) == 0:
-            return pd.Series(dtype=float)
-        if fx is None or len(fx) == 0:
-            out = pd.to_numeric(base, errors="coerce").dropna().sort_index()
-            out.name = name
-            return out
-        idx = pd.DatetimeIndex(base.index).union(pd.DatetimeIndex(fx.index)).sort_values()
-        b = pd.to_numeric(base, errors="coerce").reindex(idx).ffill()
-        f = pd.to_numeric(fx, errors="coerce").reindex(idx).ffill()
-        out = (b * f).dropna()
-        out = out[out > 0]
-        out.name = name
-        return out
-    except Exception:
-        return pd.Series(dtype=float)
-
-
-def _bt_load_proxy_close_series(proxy_key, start_date, end_date, lookback_days=260):
-    """2010 장기검증용 지수/환율 프록시 로더.
-
-    목적: ETF 상장/데이터 시작 전 구간이 CASH 100%로 비는 문제를 줄이기 위해
-    KOSPI200/KOSDAQ/NASDAQ100+USDKRW/GOLD+USDKRW/USDKRW를 사용한다.
-    """
-    key = str(proxy_key or "").strip().upper()
-    try:
-        if key in {"KODEX200", "KOSPI200", "KS200"}:
-            s = _bt_try_fdr_symbols(["KS200", "KOSPI200"], start_date, end_date, lookback_days=lookback_days)
-            if s is None or len(s) == 0:
-                s = _bt_load_naver_index_series("KPI200", start_date, end_date, lookback_days=lookback_days)
-            s.name = "KODEX200"
-            return s
-        if key in {"KOSDAQ150", "KOSDAQ", "KQ11", "KQ150"}:
-            # 2010 전 구간 검증 우선: KOSDAQ150 지수가 안 잡히면 KOSDAQ 종합을 대체 사용한다.
-            s = _bt_try_fdr_symbols(["KQ150", "KOSDAQ150", "KQ11", "KOSDAQ"], start_date, end_date, lookback_days=lookback_days)
-            if s is None or len(s) == 0:
-                s = _bt_load_naver_index_series("KOSDAQ", start_date, end_date, lookback_days=lookback_days)
-            s.name = "KOSDAQ150"
-            return s
-        if key in {"NASDAQ100", "NASDAQ", "NDX"}:
-            base = _bt_try_fdr_symbols(["NDX", "NASDAQ100", "IXIC"], start_date, end_date, lookback_days=lookback_days)
-            if base is None or len(base) == 0:
-                for sym in ["^NDX", "QQQ"]:
-                    base = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-                    if base is not None and len(base) > 0:
-                        break
-            if base is None or len(base) == 0:
-                for sym in ["ndx", "qqq.us"]:
-                    base = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-                    if base is not None and len(base) > 0:
-                        break
-            fx = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
-            return _bt_multiply_with_fx(base, fx, "NASDAQ100")
-        if key in {"GOLD", "XAU", "XAUUSD"}:
-            base = _bt_try_fdr_symbols(["GC=F", "XAU/USD", "GOLD"], start_date, end_date, lookback_days=lookback_days)
-            if base is None or len(base) == 0:
-                for sym in ["GC=F", "XAUUSD=X"]:
-                    base = _bt_load_yahoo_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-                    if base is not None and len(base) > 0:
-                        break
-            if base is None or len(base) == 0:
-                for sym in ["xauusd", "gc.f"]:
-                    base = _bt_load_stooq_close_series(sym, start_date, end_date, lookback_days=lookback_days)
-                    if base is not None and len(base) > 0:
-                        break
-            fx = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
-            return _bt_multiply_with_fx(base, fx, "GOLD")
-        if key in {"DOLLAR", "USDKRW", "USD"}:
-            s = _bt_load_usdkrw_proxy_series(start_date, end_date, lookback_days=lookback_days)
-            s.name = "DOLLAR"
-            return s
-    except Exception:
-        return pd.Series(dtype=float)
-    return pd.Series(dtype=float)
-
-
 def _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=260):
     """방공호 백테스트용 ETF/지수 대용 종목 종가 시계열.
 
@@ -6037,11 +5855,7 @@ def _bt_load_bunker_close_series_any(code_expr, start_date, end_date, lookback_d
     tried = []
     for code in _split_bunker_code_candidates(code_expr):
         tried.append(code)
-        if str(code).upper().startswith("PROXY:"):
-            proxy_key = str(code).split(":", 1)[1]
-            s = _bt_load_proxy_close_series(proxy_key, start_date, end_date, lookback_days=lookback_days)
-        else:
-            s = _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=lookback_days)
+        s = _bt_load_bunker_close_series(code, start_date, end_date, lookback_days=lookback_days)
         if s is not None and len(s) > 0:
             return s, code, tried
     return pd.Series(dtype=float), "", tried
@@ -6296,7 +6110,6 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         mode_upper = mode.upper()
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
-        proxy_extended = ("프록시" in str(mode)) or ("PROXY" in mode_upper)
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
         split_turbo_t70_defense = split_turbo and ("T70" in mode_upper)
@@ -6376,28 +6189,15 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         # 기본 073/064 자산은 국내 상장 ETF만 사용한다.
         # 해외 ETF는 CTA 보완재(DBMF/KMLM/CTA)에만 허용한다.
         # CASH는 CD금리/KOFR/단기금리 ETF를 대체하는 연수익률 가정으로 복리 계산한다.
-        if proxy_extended:
-            # 2010 장기검증 프록시: ETF 상장/데이터 시작 전 CASH 대기 문제를 줄이기 위해
-            # 지수와 환율 프록시를 사용한다. 이름은 기존 로직과 맞추기 위해 동일하게 둔다.
-            candidates = [
-                {"name": "KODEX200", "code": "PROXY:KOSPI200", "type": "asset", "market": "PROXY_INDEX_KR"},
-                {"name": "KOSDAQ150", "code": "PROXY:KOSDAQ150|PROXY:KOSDAQ", "type": "asset", "market": "PROXY_INDEX_KR"},
-                {"name": "NASDAQ100", "code": "PROXY:NASDAQ100", "type": "asset", "market": "PROXY_INDEX_USD_KRW"},
-                {"name": "GOLD", "code": "PROXY:GOLD", "type": "asset", "market": "PROXY_GOLD_USD_KRW"},
-                {"name": "DOLLAR", "code": "PROXY:USDKRW", "type": "asset", "market": "PROXY_FX"},
-                {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
-                {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
-            ]
-        else:
-            candidates = [
-                {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
-                {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
-                {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
-                {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
-                {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
-                {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
-                {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
-            ]
+        candidates = [
+            {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
+            {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
+            {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
+            {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
+            {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
+            {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
+            {"name": "CASH", "code": "", "type": "cash", "market": "KR_CASH_PROXY"},
+        ]
         cta_uploaded_series = _bt_prepare_external_close_series(cta_close_df, "CTA")
         if cta_ratio > 0 and len(cta_uploaded_series) == 0:
             # CTA는 국내 대체 ETF가 아니라 미국 상장 관리선물 ETF 후보만 사용한다.
@@ -6871,29 +6671,6 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 status_text = " | ".join([f"{r.get('자산','')}:{r.get('상태','')}({r.get('사용가능일수',0)}일)" for _, r in bunker_price_status_df.iterrows()])
         except Exception:
             status_text = ""
-        # v40 hotfix: v39 프록시/빠른실행 요약에서 참조하는 데이터기간 텍스트를 항상 만든다.
-        # 일부 빠른 실행 경로에서는 이 변수가 만들어지기 전에 summary가 생성되어
-        # name 'data_start_text' is not defined 오류가 발생했다.
-        data_start_text = ""
-        data_usable_text = ""
-        try:
-            if bunker_price_status_df is not None and len(bunker_price_status_df) > 0:
-                _status_rows = bunker_price_status_df.copy()
-                for _c in ["자산", "사용코드", "첫데이터일", "마지막데이터일", "사용가능일수", "상태"]:
-                    if _c not in _status_rows.columns:
-                        _status_rows[_c] = ""
-                data_start_text = " | ".join([
-                    f"{str(r.get('자산',''))}:{str(r.get('첫데이터일',''))}~{str(r.get('마지막데이터일',''))}"
-                    for _, r in _status_rows.iterrows()
-                ])
-                data_usable_text = " | ".join([
-                    f"{str(r.get('자산',''))}:{str(r.get('사용가능일수',''))}일/{str(r.get('상태',''))}"
-                    for _, r in _status_rows.iterrows()
-                ])
-        except Exception:
-            data_start_text = ""
-            data_usable_text = ""
-
         if split_turbo:
             memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
         elif split_073:
@@ -6955,7 +6732,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "최종방어구역비중": round((defense_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
             "최종수익부스터비중": round((booster_final / final_total * 100.0) if final_total > 0 else 0.0, 2),
             "현금연수익률가정": float(cash_annual_rate or 0.0),
-            "기본자산시장": "지수/환율 프록시" if proxy_extended else "국내상장ETF/국내현금성프록시",
+            "기본자산시장": "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
             "CTA역할": "Turbo전략완충재" if split_turbo else "방공호내보완재_부스터아님",
             "Turbo엔진허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR" if split_turbo else "",
@@ -6972,528 +6749,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "비현금방공호일수": noncash_days,
             "마지막방공호보유": str(out["방공호보유"].iloc[-1]) if len(out) else "",
             "방공호데이터상태": status_text,
-            "자산별데이터기간": data_start_text,
-            "자산별사용가능일수": data_usable_text,
-            "백테스트데이터방식": "지수/환율 프록시 확장" if proxy_extended else "ETF 실제 상장/조회 데이터 기준",
             "메모": memo_text,
         }
         return out, summary
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
-
-
-
-def _bt_make_bunker_only_daily_df(start_date, end_date, total_initial=100_000_000, max_signal_days=None):
-    """방공호/Turbo 전용 빠른 백테스트용 daily_df를 만든다.
-
-    섹터 개별주 백테스트를 먼저 돌리면 2010 장기검증에서 Streamlit 세션이 끊길 수 있다.
-    T100/Turbo/073/064처럼 대장주엔진 0% 구조를 볼 때는 기준일과 총자산만 있으면
-    build_bunker_7030_backtest가 자체 ETF 가격으로 결과를 계산할 수 있으므로, 이 경량 daily_df를 사용한다.
-    """
-    try:
-        sd = pd.to_datetime(start_date)
-        ed = pd.to_datetime(end_date)
-        if sd >= ed:
-            return pd.DataFrame(columns=["기준일", "총자산"])
-        dates = []
-        # 1) KODEX200 네이버 장기차트로 실제 국내 거래일을 우선 사용한다.
-        try:
-            s = _bt_load_naver_close_series("069500", sd, ed, lookback_days=5200)
-            if s is not None and len(s) > 0:
-                idx = pd.DatetimeIndex(pd.to_datetime(s.index, errors="coerce")).dropna().sort_values().drop_duplicates()
-                idx = idx[(idx >= sd) & (idx <= ed)]
-                # 2010 모드에서 네이버가 최근 구간만 주면 평일 캘린더로 보정한다.
-                if len(idx) > 0 and idx.min() <= sd + pd.DateOffset(days=45):
-                    dates = [d.strftime("%Y-%m-%d") for d in idx]
-        except Exception:
-            dates = []
-        # 2) 네이버/거래일 조회가 실패하거나 최근 3000일로 잘리면 평일 캘린더로라도 전체 기간을 만든다.
-        if not dates:
-            dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(sd, ed)]
-        if max_signal_days and len(dates) > int(max_signal_days):
-            # 2010 장기검증은 4300~5000을 넣으면 전체가 들어가고, 짧은 프리셋만 뒤에서 자른다.
-            dates = dates[-int(max_signal_days):]
-        out = pd.DataFrame({"기준일": dates})
-        out["총자산"] = float(total_initial or 100_000_000)
-        return out
-    except Exception:
-        dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
-        out = pd.DataFrame({"기준일": dates})
-        out["총자산"] = float(total_initial or 100_000_000)
-        return out
-
-
-# =====================================================
-# v45: T100-CAP5-R70-MIN5 현실형 통합 백테스트 유틸
-# - 기존 매직스플릿 앱 구조는 유지하고, 방공호/Turbo 빠른 실행 및 1-0 통합 실행에만 추가한다.
-# =====================================================
-
-def _bt_is_cap5_mode(mode):
-    m = str(mode or "").upper()
-    return ("CAP5" in m) and ("T100" in m)
-
-
-def _bt_cap5_base_mode(mode):
-    m = str(mode or "")
-    if "프록시" in m or "PROXY" in m.upper():
-        return "T10/T100 Turbo 공격ETF 100% NO CTA - 지수/환율 프록시"
-    return "T10/T100 Turbo 공격ETF 100% NO CTA"
-
-
-def _bt_cap5_find_col(df, candidates):
-    try:
-        cols = list(df.columns)
-        for c in candidates:
-            if c in cols:
-                return c
-        lower_map = {str(c).lower().strip(): c for c in cols}
-        for c in candidates:
-            key = str(c).lower().strip()
-            if key in lower_map:
-                return lower_map[key]
-    except Exception:
-        pass
-    return None
-
-
-def _bt_cap5_prepare_t100_daily(df):
-    """build_bunker_7030_backtest 결과 또는 업로드 daily에서 T100 원본 곡선을 추출한다.
-
-    v46 HOTFIX:
-    - 빠른 실행 경로에서 daily 컬럼명이 `통합총자산`이 아니거나, 날짜가 인덱스로 들어온 경우도 자동 인식한다.
-    - 컬럼 앞뒤 공백/BOM을 제거한다.
-    - `통합총자산`, `총자산`, `수익부스터평가금액`이 모두 없으면 숫자형 자산 컬럼을 보조 탐색한다.
-    """
-    if df is None or len(df) == 0:
-        raise ValueError("T100 daily 데이터가 없습니다.")
-    src = df.copy()
-
-    # 컬럼명 정규화: 공백/BOM/제로폭 문자 때문에 후보 탐색이 실패하는 것을 방지
-    try:
-        src.columns = [str(c).replace("\ufeff", "").replace("\u200b", "").strip() for c in src.columns]
-    except Exception:
-        pass
-
-    # 날짜 컬럼 탐색. 없으면 DatetimeIndex를 기준일로 승격한다.
-    date_col = _bt_cap5_find_col(src, [
-        "기준일", "Date", "date", "DATE", "날짜", "일자", "datetime", "Datetime", "time", "Time", "거래일"
-    ])
-    if date_col is None:
-        try:
-            idx = pd.to_datetime(src.index, errors="coerce")
-            if int(pd.Series(idx).notna().sum()) >= max(1, int(len(src) * 0.5)):
-                src = src.reset_index(drop=False).rename(columns={src.reset_index(drop=False).columns[0]: "기준일"})
-                date_col = "기준일"
-        except Exception:
-            date_col = None
-
-    # 자산 컬럼 탐색. 통합총자산이 최우선이고, 없으면 T100/Turbo 자산 컬럼으로 보조 탐색한다.
-    asset_col = _bt_cap5_find_col(src, [
-        "통합총자산", "총자산", "수익부스터평가금액", "전략총자산", "최종총자산",
-        "T100원본총자산", "T100원본자산", "T100원본총액", "T100총자산",
-        "CAP5_R70_MIN5총자산", "equity", "Equity", "asset", "Asset", "Close", "close", "종가", "수정종가"
-    ])
-    if asset_col is None:
-        try:
-            numeric_candidates = []
-            preferred_words = ["총자산", "자산", "평가금액", "equity", "asset", "close", "종가", "통합", "부스터", "T100"]
-            for c in src.columns:
-                if c == date_col:
-                    continue
-                vals = pd.to_numeric(src[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
-                ok = int(vals.notna().sum())
-                if ok <= 0:
-                    continue
-                score = ok
-                cname = str(c).lower()
-                if any(w.lower() in cname for w in preferred_words):
-                    score += 100000
-                # 자산곡선은 보통 양수이고 값의 규모가 크다. 수익률/MDD 컬럼보다 우선하도록 보정한다.
-                med = float(vals.dropna().abs().median()) if vals.notna().any() else 0.0
-                if med > 1000:
-                    score += 10000
-                numeric_candidates.append((score, c))
-            if numeric_candidates:
-                asset_col = sorted(numeric_candidates, reverse=True)[0][1]
-        except Exception:
-            asset_col = None
-
-    holding_col = _bt_cap5_find_col(src, [
-        "수익부스터보유", "마지막보유", "보유", "T100보유", "holding", "Holdings", "보유자산"
-    ])
-
-    if date_col is None or asset_col is None:
-        available_cols = ", ".join([str(c) for c in list(src.columns)[:40]])
-        raise ValueError(f"CAP5 계산에는 기준일/통합총자산 계열 컬럼이 필요합니다. 현재 컬럼: {available_cols}")
-
-    out = pd.DataFrame()
-    out["기준일"] = pd.to_datetime(src[date_col], errors="coerce")
-    out["T100원본총자산"] = pd.to_numeric(src[asset_col].astype(str).str.replace(",", "", regex=False), errors="coerce")
-    out["T100원본보유"] = src[holding_col].astype(str).fillna("") if holding_col is not None else ""
-    out = out.dropna(subset=["기준일", "T100원본총자산"]).sort_values("기준일").reset_index(drop=True)
-    out = out[out["T100원본총자산"] > 0].reset_index(drop=True)
-    if len(out) < 30:
-        raise ValueError("유효 T100 daily 데이터가 너무 적습니다. 최소 30거래일 이상 필요합니다.")
-    out["T100원본일수익률"] = out["T100원본총자산"].pct_change().fillna(0.0)
-    return out
-
-def _bt_cap5_drawdown(equity):
-    eq = pd.to_numeric(equity, errors="coerce").ffill().fillna(0)
-    peak = eq.cummax().replace(0, np.nan)
-    return (eq / peak - 1.0).fillna(0.0)
-
-
-def _bt_cap5_worst_rolling(equity, window):
-    eq = pd.to_numeric(equity, errors="coerce").ffill().fillna(0)
-    if len(eq) <= int(window):
-        return 0.0
-    return float((eq / eq.shift(int(window)) - 1.0).min())
-
-
-def _bt_cap5_longest_recovery(equity):
-    eq = pd.to_numeric(equity, errors="coerce").ffill().fillna(0).reset_index(drop=True)
-    peak = -np.inf
-    current = 0
-    longest = 0
-    for v in eq:
-        if float(v) >= peak:
-            peak = float(v)
-            current = 0
-        else:
-            current += 1
-            longest = max(longest, current)
-    return int(longest)
-
-
-def _bt_cap5_mdd_episode(df, equity_col):
-    eq = pd.to_numeric(df[equity_col], errors="coerce").ffill().fillna(0).reset_index(drop=True)
-    dates = pd.to_datetime(df["기준일"]).reset_index(drop=True)
-    if len(eq) == 0:
-        return {"고점일":"", "저점일":"", "회복일":"", "MDD":0, "회복까지걸린거래일":0}
-    peak_eq = eq.cummax()
-    dd = eq / peak_eq.replace(0, np.nan) - 1.0
-    trough_idx = int(dd.idxmin())
-    peak_value = peak_eq.iloc[trough_idx]
-    peak_candidates = eq.iloc[:trough_idx + 1]
-    peak_idx = int(peak_candidates[peak_candidates == peak_value].index[-1]) if len(peak_candidates) else 0
-    recovery_idx = None
-    for i in range(trough_idx + 1, len(eq)):
-        if eq.iloc[i] >= peak_value:
-            recovery_idx = i
-            break
-    return {
-        "고점일": dates.iloc[peak_idx].date().isoformat(),
-        "저점일": dates.iloc[trough_idx].date().isoformat(),
-        "회복일": dates.iloc[recovery_idx].date().isoformat() if recovery_idx is not None else "미회복",
-        "MDD": round(float(dd.iloc[trough_idx]) * 100.0, 2),
-        "회복까지걸린거래일": int(recovery_idx - peak_idx) if recovery_idx is not None else int(len(eq) - 1 - peak_idx),
-    }
-
-
-def _bt_cap5_basic_stats(df, equity_col, initial=100_000_000):
-    eq = pd.to_numeric(df[equity_col], errors="coerce").ffill().fillna(0)
-    dates = pd.to_datetime(df["기준일"])
-    start_dt, end_dt = dates.iloc[0], dates.iloc[-1]
-    final = float(eq.iloc[-1])
-    years = max((end_dt - start_dt).days / 365.25, 1e-9)
-    daily_ret = eq.pct_change().fillna(0.0)
-    out = {
-        "시작일": start_dt.date().isoformat(),
-        "종료일": end_dt.date().isoformat(),
-        "최종자산": round(final),
-        "총수익률": round((final / float(initial) - 1.0) * 100.0, 2),
-        "CAGR": round(((final / float(initial)) ** (1 / years) - 1.0) * 100.0, 2) if final > 0 and initial > 0 else "N/A",
-        "MDD": round(float(_bt_cap5_drawdown(eq).min()) * 100.0, 2),
-        "최악하루": round(float(daily_ret.min()) * 100.0, 2),
-        "최악3일": round(_bt_cap5_worst_rolling(eq, 3) * 100.0, 2),
-        "최악10일": round(_bt_cap5_worst_rolling(eq, 10) * 100.0, 2),
-        "최장회복기간": _bt_cap5_longest_recovery(eq),
-    }
-    ep = _bt_cap5_mdd_episode(df, equity_col)
-    out.update({f"MDD_{k}": v for k, v in ep.items()})
-    return out
-
-
-def _bt_cap5_simulate(base_df, initial=100_000_000, cap_trigger_pct=5.0, r_weight_pct=70.0, min_days=5, cash_rate_pct=3.0, trade_cost=0.0, rebound_ma_days=20, recover_from_peak_pct=-5.0):
-    """현실형 CAP5: 신호 당일 손실은 그대로, 다음 거래일부터 R비중 방어모드 적용."""
-    df = _bt_cap5_prepare_t100_daily(base_df).copy().reset_index(drop=True)
-    # 원본 T100 곡선을 초기자금 기준으로 리베이스한다.
-    df["T100원본총자산"] = df["T100원본총자산"] / float(df["T100원본총자산"].iloc[0]) * float(initial)
-    df["T100원본일수익률"] = df["T100원본총자산"].pct_change().fillna(0.0)
-    n = len(df)
-    cap_trigger = -abs(float(cap_trigger_pct)) / 100.0
-    r_weight = min(1.0, max(0.0, float(r_weight_pct) / 100.0))
-    recover_from_peak = float(recover_from_peak_pct) / 100.0
-    cash_daily = (1.0 + float(cash_rate_pct) / 100.0) ** (1.0 / 252.0) - 1.0
-    t100_ret = df["T100원본일수익률"].astype(float).values
-    original_equity = df["T100원본총자산"].astype(float)
-    original_ma = original_equity.rolling(int(rebound_ma_days), min_periods=int(rebound_ma_days)).mean()
-    original_peak = original_equity.cummax()
-    cap_equity = np.zeros(n)
-    cap_ret = np.zeros(n)
-    t100_weight = np.zeros(n)
-    cash_weight = np.zeros(n)
-    mode = []
-    signal = []
-    action = []
-    cap_equity[0] = float(initial)
-    in_defense = False
-    defense_days = 0
-    pending_defense = False
-    last_signal_date = None
-    entry_cost_pending = False
-    exit_cost_pending = False
-    events = []
-    active_entry_equity = None
-    for i in range(n):
-        dt = pd.to_datetime(df.loc[i, "기준일"])
-        sig_today = bool(t100_ret[i] <= cap_trigger)
-        signal.append("CAP5" if sig_today else "")
-        if i > 0 and pending_defense and not in_defense:
-            in_defense = True
-            defense_days = 0
-            entry_cost_pending = True
-            active_entry_equity = cap_equity[i - 1]
-            events.append({
-                "전략": "T100-CAP5-R70-MIN5",
-                "이벤트": "방어모드진입",
-                "일자": dt.date().isoformat(),
-                "원인신호일": last_signal_date,
-                "T100비중": round(r_weight * 100, 2),
-                "CASH비중": round((1 - r_weight) * 100, 2),
-                "비고": "전일 CAP5 신호로 다음 거래일부터 방어모드",
-            })
-            pending_defense = False
-        if in_defense:
-            w_t, w_c = r_weight, 1.0 - r_weight
-        else:
-            w_t, w_c = 1.0, 0.0
-        t100_weight[i] = w_t
-        cash_weight[i] = w_c
-        mode.append("방어" if in_defense else "공격")
-        if i == 0:
-            day_ret = 0.0
-        else:
-            day_ret = w_t * t100_ret[i] + w_c * cash_daily
-            if entry_cost_pending and trade_cost > 0:
-                day_ret -= float(trade_cost) * abs(1.0 - r_weight)
-                entry_cost_pending = False
-            if exit_cost_pending and trade_cost > 0:
-                day_ret -= float(trade_cost) * abs(1.0 - r_weight)
-                exit_cost_pending = False
-        cap_ret[i] = day_ret
-        if i > 0:
-            cap_equity[i] = cap_equity[i - 1] * (1.0 + day_ret)
-        act = ""
-        if in_defense:
-            defense_days += 1
-            can_exit = defense_days >= int(min_days)
-            ma_recovered = False
-            peak_recovered = False
-            if i < len(original_ma) and not pd.isna(original_ma.iloc[i]):
-                ma_recovered = bool(original_equity.iloc[i] >= original_ma.iloc[i])
-            if original_peak.iloc[i] > 0:
-                peak_recovered = bool((original_equity.iloc[i] / original_peak.iloc[i] - 1.0) >= recover_from_peak)
-            if can_exit and (ma_recovered or peak_recovered):
-                def_ret = (cap_equity[i] / active_entry_equity - 1.0) if active_entry_equity else 0.0
-                events.append({
-                    "전략": "T100-CAP5-R70-MIN5",
-                    "이벤트": "방어모드해제",
-                    "일자": dt.date().isoformat(),
-                    "원인신호일": last_signal_date,
-                    "방어유지일": int(defense_days),
-                    "방어모드수익률": round(def_ret * 100.0, 2),
-                    "해제조건": "20일선회복" if ma_recovered else "전고점대비-5%이내",
-                    "비고": "다음 거래일부터 T100 100% 복귀",
-                })
-                in_defense = False
-                defense_days = 0
-                exit_cost_pending = True
-                act = "방어해제"
-        if sig_today:
-            last_signal_date = dt.date().isoformat()
-            events.append({
-                "전략": "T100-CAP5-R70-MIN5",
-                "이벤트": "CAP5신호",
-                "일자": last_signal_date,
-                "T100원본일수익률": round(t100_ret[i] * 100.0, 2),
-                "처리": "다음거래일방어모드" if not in_defense else "이미방어모드",
-                "비고": "신호 당일 손실은 그대로 반영",
-            })
-            if not in_defense:
-                pending_defense = True
-                act = "CAP5신호"
-        action.append(act)
-    out = df.copy()
-    out["CAP5_R70_MIN5총자산"] = cap_equity
-    out["CAP5_R70_MIN5일수익률"] = cap_ret
-    out["T100비중"] = np.round(t100_weight * 100.0, 2)
-    out["CASH비중"] = np.round(cash_weight * 100.0, 2)
-    out["모드"] = mode
-    out["CAP5신호"] = signal
-    out["행동"] = action
-    out["CAP5_R70_MIN5수익률"] = (out["CAP5_R70_MIN5총자산"] / float(initial) - 1.0) * 100.0
-    out["CAP5_R70_MIN5_MDD"] = _bt_cap5_drawdown(out["CAP5_R70_MIN5총자산"]) * 100.0
-    out["T100원본수익률"] = (out["T100원본총자산"] / float(initial) - 1.0) * 100.0
-    out["T100원본MDD"] = _bt_cap5_drawdown(out["T100원본총자산"]) * 100.0
-    return out, pd.DataFrame(events)
-
-
-def _bt_cap5_yearly(df, strategy_cols):
-    rows = []
-    tmp = df.copy()
-    tmp["연도"] = pd.to_datetime(tmp["기준일"]).dt.year
-    for name, col in strategy_cols.items():
-        if col not in tmp.columns:
-            continue
-        for year, g in tmp.groupby("연도"):
-            eq = pd.to_numeric(g[col], errors="coerce").ffill().dropna()
-            if len(eq) < 2:
-                continue
-            rows.append({
-                "전략": name,
-                "연도": int(year),
-                "연초자산": round(float(eq.iloc[0])),
-                "연말자산": round(float(eq.iloc[-1])),
-                "연도수익률": round((float(eq.iloc[-1]) / float(eq.iloc[0]) - 1.0) * 100.0, 2),
-                "연도MDD": round(float(_bt_cap5_drawdown(eq).min()) * 100.0, 2),
-            })
-    return pd.DataFrame(rows)
-
-
-def _bt_cap5_monthly(df, strategy_cols):
-    rows = []
-    tmp = df.copy()
-    tmp["월"] = pd.to_datetime(tmp["기준일"]).dt.to_period("M").astype(str)
-    for name, col in strategy_cols.items():
-        if col not in tmp.columns:
-            continue
-        for month, g in tmp.groupby("월"):
-            eq = pd.to_numeric(g[col], errors="coerce").ffill().dropna()
-            if len(eq) < 2:
-                continue
-            rows.append({
-                "전략": name,
-                "월": month,
-                "월수익률": round((float(eq.iloc[-1]) / float(eq.iloc[0]) - 1.0) * 100.0, 2),
-                "월MDD": round(float(_bt_cap5_drawdown(eq).min()) * 100.0, 2),
-            })
-    detail = pd.DataFrame(rows)
-    summary_rows = []
-    if len(detail) > 0:
-        for name, g in detail.groupby("전략"):
-            best = g.loc[g["월수익률"].idxmax()]
-            worst = g.loc[g["월수익률"].idxmin()]
-            summary_rows.append({
-                "전략": name,
-                "월별최고월": best["월"],
-                "월별최고수익률": best["월수익률"],
-                "월별최악월": worst["월"],
-                "월별최악수익률": worst["월수익률"],
-            })
-    return detail, pd.DataFrame(summary_rows)
-
-
-def _bt_cap5_post20(daily, events, horizon=20):
-    rows = []
-    if events is None or len(events) == 0 or "이벤트" not in events.columns:
-        return pd.DataFrame()
-    exits = events[events["이벤트"].eq("방어모드해제")].copy()
-    dates = pd.to_datetime(daily["기준일"]).reset_index(drop=True)
-    eq = pd.to_numeric(daily["CAP5_R70_MIN5총자산"], errors="coerce").ffill().reset_index(drop=True)
-    for _, r in exits.iterrows():
-        dt = pd.to_datetime(r.get("일자"))
-        idxs = dates[dates == dt].index
-        if len(idxs) == 0:
-            continue
-        i = int(idxs[0]); j = min(i + int(horizon), len(eq) - 1)
-        rows.append({"방어해제일": dt.date().isoformat(), f"복귀후{horizon}거래일수익률": round((float(eq.iloc[j]) / float(eq.iloc[i]) - 1.0) * 100.0, 2), "측정종료일": dates.iloc[j].date().isoformat()})
-    return pd.DataFrame(rows)
-
-
-def _bt_cap5_build_outputs(base_t100_daily, initial=100_000_000, cash_rate_pct=3.0, cap_trigger_pct=5.0, r_weight_pct=70.0, min_days=5, cost_list=None):
-    if cost_list is None:
-        cost_list = [0.0, 0.001, 0.002]
-    base = _bt_cap5_prepare_t100_daily(base_t100_daily)
-    base["T100원본총자산"] = base["T100원본총자산"] / float(base["T100원본총자산"].iloc[0]) * float(initial)
-    base["T100원본일수익률"] = base["T100원본총자산"].pct_change().fillna(0.0)
-    summary_rows = []
-    event_frames = []
-    mdd_rows = []
-    daily_first = None
-    orig_stats = _bt_cap5_basic_stats(base.rename(columns={"T100원본총자산":"eq"}), "eq", initial)
-    orig_row = {"전략":"T100_ORIGINAL", "거래비용":0.0, **orig_stats}
-    orig_row.update({"CAP5신호횟수":0,"방어모드진입횟수":0,"방어모드총유지일":0,"방어모드평균유지일":0,"방어모드중수익률":0,"방어모드후복귀20거래일평균수익률":0,"마지막총자산":round(float(base["T100원본총자산"].iloc[-1])),"마지막T100비중":100.0,"마지막CASH비중":0.0})
-    summary_rows.append(orig_row)
-    mdd_rows.append({"전략":"T100_ORIGINAL", **_bt_cap5_mdd_episode(base.rename(columns={"T100원본총자산":"eq"}), "eq")})
-    for cost in cost_list:
-        daily, events = _bt_cap5_simulate(base, initial=initial, cap_trigger_pct=cap_trigger_pct, r_weight_pct=r_weight_pct, min_days=min_days, cash_rate_pct=cash_rate_pct, trade_cost=float(cost))
-        label = f"CAP{abs(float(cap_trigger_pct)):.0f}-R{float(r_weight_pct):.0f}-MIN{int(min_days)}_COST{float(cost)*100:.1f}%"
-        daily["전략라벨"] = label
-        if daily_first is None:
-            daily_first = daily.copy()
-        if len(events) > 0:
-            events = events.copy(); events["전략라벨"] = label; event_frames.append(events)
-        stats = _bt_cap5_basic_stats(daily.rename(columns={"CAP5_R70_MIN5총자산":"eq"}), "eq", initial)
-        defense_entries = events[events["이벤트"].eq("방어모드진입")] if len(events) > 0 and "이벤트" in events.columns else pd.DataFrame()
-        defense_exits = events[events["이벤트"].eq("방어모드해제")] if len(events) > 0 and "이벤트" in events.columns else pd.DataFrame()
-        total_defense_days = int(daily["모드"].eq("방어").sum())
-        avg_defense_days = round(total_defense_days / max(len(defense_entries), 1), 2)
-        defense_return = 0.0
-        if daily["모드"].eq("방어").any():
-            d = daily[daily["모드"].eq("방어")]
-            defense_return = float((1.0 + d["CAP5_R70_MIN5일수익률"].astype(float)).prod() - 1.0) * 100.0
-        post20 = _bt_cap5_post20(daily, events, 20)
-        post20_avg = round(float(post20.iloc[:,1].mean()), 2) if len(post20) > 0 else 0.0
-        row = {"전략":label, "거래비용":round(float(cost)*100.0,3), **stats}
-        row.update({
-            "CAP5신호횟수": int((events["이벤트"].eq("CAP5신호")).sum()) if len(events)>0 and "이벤트" in events.columns else 0,
-            "방어모드진입횟수": int(len(defense_entries)),
-            "방어모드해제횟수": int(len(defense_exits)),
-            "방어모드총유지일": total_defense_days,
-            "방어모드평균유지일": avg_defense_days,
-            "방어모드중수익률": round(defense_return,2),
-            "방어모드후복귀20거래일평균수익률": post20_avg,
-            "마지막총자산": round(float(daily["CAP5_R70_MIN5총자산"].iloc[-1])),
-            "마지막T100비중": float(daily["T100비중"].iloc[-1]),
-            "마지막CASH비중": float(daily["CASH비중"].iloc[-1]),
-        })
-        summary_rows.append(row)
-        mdd_rows.append({"전략":label, **_bt_cap5_mdd_episode(daily.rename(columns={"CAP5_R70_MIN5총자산":"eq"}), "eq")})
-    summary = pd.DataFrame(summary_rows)
-    target_labels = ["T100_ORIGINAL"] + [f"CAP{abs(float(cap_trigger_pct)):.0f}-R{float(r_weight_pct):.0f}-MIN{int(min_days)}_COST{x*100:.1f}%" for x in cost_list]
-    selected = summary[summary["전략"].isin(target_labels)].copy()
-    seventy = summary[["전략","최종자산","총수익률","CAGR","MDD","최악하루","최장회복기간"]].copy()
-    seventy["7천만원환산최종자산"] = (pd.to_numeric(seventy["최종자산"], errors="coerce") * 0.7).round(0).astype("Int64")
-    events_all = pd.concat(event_frames, ignore_index=True) if event_frames else pd.DataFrame()
-    strategies = {"T100_ORIGINAL":"T100원본총자산"}
-    if daily_first is not None:
-        strategies[f"CAP{abs(float(cap_trigger_pct)):.0f}-R{float(r_weight_pct):.0f}-MIN{int(min_days)}"] = "CAP5_R70_MIN5총자산"
-        yearly = _bt_cap5_yearly(daily_first, strategies)
-        monthly_detail, monthly_summary = _bt_cap5_monthly(daily_first, strategies)
-    else:
-        yearly = pd.DataFrame(); monthly_detail = pd.DataFrame(); monthly_summary = pd.DataFrame()
-    return {
-        "summary": summary,
-        "selected_compare": selected,
-        "daily": daily_first if daily_first is not None else pd.DataFrame(),
-        "events": events_all,
-        "mdd_episodes": pd.DataFrame(mdd_rows),
-        "yearly_returns_mdd": yearly,
-        "monthly_detail": monthly_detail,
-        "monthly_summary": monthly_summary,
-        "70m_conversion": seventy,
-    }
-
-
-def _bt_cap5_outputs_to_zip(outputs, prefix="magic_split_T100_CAP5_R70_MIN5"):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, df in outputs.items():
-            if isinstance(df, pd.DataFrame):
-                zf.writestr(f"{prefix}_{name}_{today_str()}.csv", df.to_csv(index=False).encode("utf-8-sig"))
-    buf.seek(0)
-    return buf.getvalue()
 
 def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
     """KODEX200 숫자 기반 시장붕괴 차단 필터.
@@ -10652,6 +9912,372 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
+# =====================================================
+# v47 BAA/VAA 동적자산배분 백테스트 유틸
+# - BAA Aggressive / BAA Balanced / VAA-G4를 원래 앱 안에서 빠르게 검증하기 위한 독립 유틸
+# =====================================================
+
+def _taa_safe_float(x, default=0.0):
+    try:
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _taa_stooq_symbol(code):
+    c = str(code).strip().lower()
+    if c in {"cash", "bil_cash"}:
+        return c
+    if "." not in c:
+        c = f"{c}.us"
+    return c
+
+
+def _taa_load_us_close_series(code, start_date, end_date, lookback_days=430):
+    """미국 ETF 일봉 종가 로더. FDR 우선, 실패 시 Stooq CSV 사용."""
+    code = str(code).strip().upper()
+    start_dt = pd.to_datetime(start_date) - pd.Timedelta(days=int(lookback_days * 1.7))
+    end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=5)
+    # 1) FinanceDataReader
+    try:
+        df = fdr.DataReader(code, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+        if df is not None and len(df) > 0:
+            col = "Adj Close" if "Adj Close" in df.columns else "Close"
+            s = pd.to_numeric(df[col], errors="coerce")
+            s.index = pd.to_datetime(s.index)
+            s = s.dropna().sort_index()
+            if len(s) > 0:
+                s.name = code
+                return s, "FDR"
+    except Exception:
+        pass
+    # 2) Stooq CSV
+    try:
+        d1 = start_dt.strftime("%Y%m%d")
+        d2 = end_dt.strftime("%Y%m%d")
+        sym = _taa_stooq_symbol(code)
+        url = f"https://stooq.com/q/d/l/?s={sym}&d1={d1}&d2={d2}&i=d"
+        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        if r.ok and len(r.text) > 20 and "Date" in r.text:
+            df = pd.read_csv(io.StringIO(r.text))
+            if len(df) > 0 and "Close" in df.columns:
+                s = pd.to_numeric(df["Close"], errors="coerce")
+                s.index = pd.to_datetime(df["Date"])
+                s = s.dropna().sort_index()
+                if len(s) > 0:
+                    s.name = code
+                    return s, "Stooq"
+    except Exception:
+        pass
+    return pd.Series(dtype=float, name=code), "실패"
+
+
+def _taa_build_price_table(asset_codes, start_date, end_date, cash_annual_rate=3.0):
+    """자산군 종가표 + CASH 프록시를 만든다."""
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    # 넉넉한 캘린더: 가장 먼저 잡힌 ETF 인덱스를 기준으로 하고, 없으면 평일 캘린더
+    series_map = {}
+    status_rows = []
+    all_index = None
+    for code in sorted(set([str(x).strip().upper() for x in asset_codes if str(x).strip() and str(x).strip().upper() not in {"CASH", "BIL_CASH"}])):
+        s, src = _taa_load_us_close_series(code, start_dt, end_dt)
+        if len(s) > 0:
+            series_map[code] = s
+            all_index = s.index if all_index is None else all_index.union(s.index)
+            status_rows.append({"자산": code, "상태": "성공", "소스": src, "시작일": s.index.min().date(), "종료일": s.index.max().date(), "사용가능일수": len(s)})
+        else:
+            status_rows.append({"자산": code, "상태": "실패", "소스": src, "시작일": "", "종료일": "", "사용가능일수": 0})
+    if all_index is None or len(all_index) == 0:
+        all_index = pd.date_range(start_dt, end_dt, freq="B")
+    all_index = pd.DatetimeIndex(sorted(pd.to_datetime(all_index.unique())))
+    all_index = all_index[(all_index >= start_dt) & (all_index <= end_dt)]
+    if len(all_index) == 0:
+        all_index = pd.date_range(start_dt, end_dt, freq="B")
+    prices = pd.DataFrame(index=all_index)
+    for code, s in series_map.items():
+        prices[code] = s.reindex(all_index).ffill()
+    # CASH는 연 3% 등 일복리 프록시. 모든 날짜에서 사용 가능.
+    daily_rate = (1.0 + float(cash_annual_rate) / 100.0) ** (1.0 / 252.0) - 1.0
+    cash = pd.Series(np.cumprod(np.repeat(1.0 + daily_rate, len(all_index))) * 100.0, index=all_index, name="CASH")
+    prices["CASH"] = cash
+    return prices, pd.DataFrame(status_rows)
+
+
+def _taa_monthly_close(prices):
+    if prices is None or len(prices) == 0:
+        return pd.DataFrame()
+    m = prices.resample("M").last().dropna(how="all")
+    return m
+
+
+def _taa_13612w(monthly, asof, code):
+    try:
+        s = monthly[code].dropna()
+        s = s[s.index <= asof]
+        if len(s) < 13:
+            return np.nan
+        p0 = float(s.iloc[-1])
+        p1 = float(s.iloc[-2])
+        p3 = float(s.iloc[-4])
+        p6 = float(s.iloc[-7])
+        p12 = float(s.iloc[-13])
+        if min(p1, p3, p6, p12) <= 0:
+            return np.nan
+        return (12.0 * (p0 / p1 - 1.0)) + (4.0 * (p0 / p3 - 1.0)) + (2.0 * (p0 / p6 - 1.0)) + (p0 / p12 - 1.0)
+    except Exception:
+        return np.nan
+
+
+def _taa_sma12_relative(monthly, asof, code):
+    try:
+        s = monthly[code].dropna()
+        s = s[s.index <= asof]
+        if len(s) < 13:
+            return np.nan
+        vals = s.iloc[-13:]
+        avg = float(vals.mean())
+        p0 = float(vals.iloc[-1])
+        if avg <= 0:
+            return np.nan
+        return p0 / avg - 1.0
+    except Exception:
+        return np.nan
+
+
+def _taa_weights_to_text(weights):
+    if not weights:
+        return ""
+    parts = []
+    for k, v in sorted(weights.items(), key=lambda x: (-x[1], x[0])):
+        if abs(v) > 1e-9:
+            parts.append(f"{k}:{round(v*100, 1)}%")
+    return " + ".join(parts)
+
+
+def _taa_signal_baa(monthly, asof, variant="Aggressive"):
+    canary = ["SPY", "EEM", "EFA", "AGG"]
+    if variant == "Balanced":
+        offensive = ["SPY", "QQQ", "IWM", "VGK", "EWJ", "EEM", "VNQ", "DBC", "GLD", "TLT", "HYG", "LQD"]
+        top_o = 6
+    else:
+        offensive = ["QQQ", "EEM", "EFA", "AGG"]
+        top_o = 1
+    defensive = ["TIP", "DBC", "CASH", "IEF", "TLT", "LQD", "AGG"]
+    can_mom = {c: _taa_13612w(monthly, asof, c) for c in canary}
+    risk_on = all((not pd.isna(v)) and v > 0 for v in can_mom.values())
+    rel = {}
+    if risk_on:
+        for c in offensive:
+            rel[c] = _taa_sma12_relative(monthly, asof, c)
+        ranked = [k for k, v in sorted(rel.items(), key=lambda kv: (-999 if pd.isna(kv[1]) else -kv[1], kv[0])) if not pd.isna(v)]
+        picks = ranked[:top_o]
+        if len(picks) == 0:
+            return {"CASH": 1.0}, "BAA_RISK_ON_NO_DATA", can_mom, rel
+        w = 1.0 / len(picks)
+        return {p: w for p in picks}, "BAA_RISK_ON", can_mom, rel
+    # defensive: top 3 defensive by SMA12; if lower than CASH, replace with CASH
+    cash_rel = _taa_sma12_relative(monthly, asof, "CASH")
+    for c in defensive:
+        rel[c] = _taa_sma12_relative(monthly, asof, c)
+    ranked = [k for k, v in sorted(rel.items(), key=lambda kv: (-999 if pd.isna(kv[1]) else -kv[1], kv[0])) if not pd.isna(v)]
+    picks = ranked[:3]
+    if len(picks) == 0:
+        return {"CASH": 1.0}, "BAA_DEF_NO_DATA", can_mom, rel
+    weights = {}
+    for p in picks:
+        target = p
+        if p != "CASH" and not pd.isna(cash_rel) and not pd.isna(rel.get(p)) and rel.get(p) < cash_rel:
+            target = "CASH"
+        weights[target] = weights.get(target, 0.0) + 1.0 / len(picks)
+    return weights, "BAA_DEFENSIVE", can_mom, rel
+
+
+def _taa_signal_vaa_g4(monthly, asof):
+    offensive = ["SPY", "EFA", "EEM", "AGG"]
+    defensive = ["LQD", "IEF", "CASH"]  # 원문 SHY는 앱에서는 CASH로 처리 가능하게 둔다.
+    mom_o = {c: _taa_13612w(monthly, asof, c) for c in offensive}
+    risk_on = all((not pd.isna(v)) and v > 0 for v in mom_o.values())
+    if risk_on:
+        ranked = [k for k, v in sorted(mom_o.items(), key=lambda kv: (-999 if pd.isna(kv[1]) else -kv[1], kv[0])) if not pd.isna(v)]
+        pick = ranked[0] if ranked else "CASH"
+        return {pick: 1.0}, "VAA_RISK_ON", mom_o
+    mom_d = {c: _taa_13612w(monthly, asof, c) for c in defensive}
+    ranked = [k for k, v in sorted(mom_d.items(), key=lambda kv: (-999 if pd.isna(kv[1]) else -kv[1], kv[0])) if not pd.isna(v)]
+    pick = ranked[0] if ranked else "CASH"
+    return {pick: 1.0}, "VAA_DEFENSIVE", {**mom_o, **mom_d}
+
+
+def _taa_generate_signals(prices, strategy="BAA Aggressive"):
+    monthly = _taa_monthly_close(prices)
+    rows = []
+    if monthly is None or len(monthly) < 14:
+        return pd.DataFrame()
+    for asof in monthly.index:
+        if strategy == "VAA G4":
+            weights, mode, mom = _taa_signal_vaa_g4(monthly, asof)
+        elif strategy == "BAA Balanced":
+            weights, mode, mom, rel = _taa_signal_baa(monthly, asof, variant="Balanced")
+        else:
+            weights, mode, mom, rel = _taa_signal_baa(monthly, asof, variant="Aggressive")
+        rows.append({
+            "신호일": asof,
+            "전략": strategy,
+            "모드": mode,
+            "보유자산": _taa_weights_to_text(weights),
+            "weights": weights,
+            "음수모멘텀수": int(sum(1 for v in mom.values() if (not pd.isna(v)) and v <= 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def _taa_backtest_from_signals(prices, signals, initial_cash=100_000_000, fee_rate=0.001):
+    if prices is None or len(prices) == 0:
+        return pd.DataFrame(), pd.DataFrame(), {"오류": "가격데이터 없음"}
+    if signals is None or len(signals) == 0:
+        return pd.DataFrame(), pd.DataFrame(), {"오류": "신호데이터 없음"}
+    prices = prices.copy().sort_index().ffill()
+    rets = prices.pct_change().fillna(0.0)
+    daily_index = prices.index
+    sig = signals.copy().sort_values("신호일")
+    # 신호일 종가 기준, 다음 거래일부터 적용
+    change_points = []
+    for _, r in sig.iterrows():
+        sdate = pd.to_datetime(r["신호일"])
+        pos = daily_index.searchsorted(sdate, side="right")
+        if pos < len(daily_index):
+            change_points.append((pos, r["weights"], r["보유자산"], r["모드"], sdate))
+    change_points = sorted(change_points, key=lambda x: x[0])
+    cur_weights = {"CASH": 1.0}
+    cur_hold_text = "CASH:100%"
+    cur_mode = "WAIT_LOOKBACK"
+    next_i = 0
+    asset = float(initial_cash)
+    rows = []
+    rebalance_rows = []
+    prev_weights = cur_weights.copy()
+    for i, dt in enumerate(daily_index):
+        changed = False
+        while next_i < len(change_points) and change_points[next_i][0] == i:
+            cur_weights = dict(change_points[next_i][1])
+            cur_hold_text = str(change_points[next_i][2])
+            cur_mode = str(change_points[next_i][3])
+            # 리밸런싱 비용: 턴오버/2가 아니라 단순 weight 절대 변화합 * 비용률로 보수적 반영
+            turnover = sum(abs(cur_weights.get(k, 0.0) - prev_weights.get(k, 0.0)) for k in set(cur_weights) | set(prev_weights))
+            if turnover > 0:
+                asset *= (1.0 - float(fee_rate) * turnover)
+            rebalance_rows.append({"리밸런싱일": dt, "신호일": change_points[next_i][4], "전략모드": cur_mode, "보유자산": cur_hold_text, "턴오버": round(turnover, 4)})
+            prev_weights = cur_weights.copy()
+            changed = True
+            next_i += 1
+        day_ret = 0.0
+        for code, w in cur_weights.items():
+            if code in rets.columns:
+                day_ret += float(w) * float(rets.at[dt, code])
+            elif "CASH" in rets.columns:
+                day_ret += float(w) * float(rets.at[dt, "CASH"])
+        asset *= (1.0 + day_ret)
+        rows.append({"기준일": dt.date(), "전략총자산": round(asset), "일수익률": day_ret, "보유자산": cur_hold_text, "전략모드": cur_mode, "리밸런싱": "Y" if changed else ""})
+    daily = pd.DataFrame(rows)
+    rebal = pd.DataFrame(rebalance_rows)
+    summary = _taa_summary_metrics(daily, initial_cash=initial_cash)
+    summary["리밸런싱횟수"] = int(len(rebal))
+    summary["마지막보유자산"] = str(daily["보유자산"].iloc[-1]) if len(daily) else ""
+    summary["CASH100일수"] = int(daily["보유자산"].astype(str).eq("CASH:100%").sum()) if len(daily) else 0
+    return daily, rebal, summary
+
+
+def _taa_summary_metrics(daily, initial_cash=100_000_000):
+    if daily is None or len(daily) == 0:
+        return {"오류": "일별 결과 없음"}
+    d = daily.copy()
+    d["기준일"] = pd.to_datetime(d["기준일"])
+    vals = pd.to_numeric(d["전략총자산"], errors="coerce").ffill()
+    ret = vals.pct_change().fillna(0.0)
+    peak = vals.cummax()
+    dd = vals / peak - 1.0
+    final = float(vals.iloc[-1])
+    start = pd.to_datetime(d["기준일"].iloc[0])
+    end = pd.to_datetime(d["기준일"].iloc[-1])
+    years = max((end - start).days / 365.25, 1/365.25)
+    total_return = final / float(initial_cash) - 1.0
+    cagr = (final / float(initial_cash)) ** (1.0 / years) - 1.0
+    def rolling_compound(r, n):
+        return (1.0 + r).rolling(n).apply(np.prod, raw=True) - 1.0
+    # 최장 회복기간: 고점 이후 이전 고점 회복까지 걸린 최대 거래일. 미회복이면 끝까지 카운트.
+    longest = 0
+    peak_val = -np.inf
+    peak_i = 0
+    underwater_start = None
+    for i, v in enumerate(vals.values):
+        if v >= peak_val - 1e-9:
+            if underwater_start is not None:
+                longest = max(longest, i - underwater_start)
+                underwater_start = None
+            peak_val = v
+            peak_i = i
+        else:
+            if underwater_start is None:
+                underwater_start = peak_i
+    if underwater_start is not None:
+        longest = max(longest, len(vals) - 1 - underwater_start)
+    mdd_i = int(dd.idxmin()) if len(dd) else 0
+    # pandas idx is row index, not position if RangeIndex still okay
+    trough_pos = list(d.index).index(mdd_i) if mdd_i in d.index else int(np.argmin(dd.values))
+    peak_pos = int(vals.iloc[:trough_pos+1].idxmax()) if len(vals.iloc[:trough_pos+1]) else 0
+    recover_pos = None
+    prior_peak_val = float(vals.iloc[peak_pos]) if len(vals) else 0
+    for j in range(trough_pos, len(vals)):
+        if float(vals.iloc[j]) >= prior_peak_val:
+            recover_pos = j
+            break
+    return {
+        "시작일": start.date(),
+        "종료일": end.date(),
+        "최종자산": round(final),
+        "총수익률": round(total_return * 100.0, 2),
+        "CAGR": round(cagr * 100.0, 2),
+        "MDD": round(float(dd.min()) * 100.0, 2),
+        "최악하루": round(float(ret.min()) * 100.0, 2),
+        "최악3일": round(float(rolling_compound(ret, 3).min()) * 100.0, 2),
+        "최악10일": round(float(rolling_compound(ret, 10).min()) * 100.0, 2),
+        "최장회복기간": int(longest),
+        "MDD고점일": d["기준일"].iloc[peak_pos].date() if len(d) else "",
+        "MDD저점일": d["기준일"].iloc[trough_pos].date() if len(d) else "",
+        "MDD회복일": d["기준일"].iloc[recover_pos].date() if recover_pos is not None else "미회복",
+        "MDD회복거래일": int(recover_pos - peak_pos) if recover_pos is not None else "미회복",
+    }
+
+
+def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, include_balanced=False):
+    strategies = ["BAA Aggressive", "VAA G4"] + (["BAA Balanced"] if include_balanced else [])
+    assets = set(["SPY", "EEM", "EFA", "AGG", "QQQ", "LQD", "IEF", "TIP", "DBC", "TLT", "CASH"])
+    if include_balanced:
+        assets |= set(["IWM", "VGK", "EWJ", "VNQ", "GLD", "HYG"])
+    prices, status = _taa_build_price_table(assets, start_date, end_date, cash_annual_rate=cash_annual_rate)
+    summary_rows = []
+    daily_map = {}
+    signal_map = {}
+    rebal_map = {}
+    for strat in strategies:
+        sig = _taa_generate_signals(prices, strategy=strat)
+        daily, rebal, summ = _taa_backtest_from_signals(prices, sig, initial_cash=initial_cash, fee_rate=fee_rate)
+        summ["전략"] = strat
+        summ["7천만환산최종자산"] = round(summ.get("최종자산", 0) * 0.7) if not summ.get("오류") else 0
+        summary_rows.append(summ)
+        daily_map[strat] = daily
+        signal_map[strat] = sig.drop(columns=["weights"], errors="ignore") if sig is not None and len(sig) else pd.DataFrame()
+        rebal_map[strat] = rebal
+    summary = pd.DataFrame(summary_rows)
+    if len(summary) > 0 and "전략" in summary.columns:
+        cols = ["전략", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "마지막보유자산", "7천만환산최종자산"]
+        summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
+    return summary, daily_map, signal_map, rebal_map, status
+
+
+
 menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 실전 보유장부", "9. 도움말"])
 
 # =====================================================
@@ -11840,6 +11466,9 @@ LS ELECTRIC,전력/전선/인프라,2등대표주,2,좋음,Y,전력기기 대표
 """)
 
 
+
+
+
 # =====================================================
 # 6. 섹터전략 백테스트
 # =====================================================
@@ -11868,7 +11497,7 @@ elif menu == "6. 섹터전략 백테스트":
                     "사용자지정",
                 ],
                 index=7,
-                key="bt_period_preset_v38_2010_safe",
+                key="bt_period_preset",
             )
         preset_days_map = {
             "빠른검증 60거래일": 60,
@@ -11890,26 +11519,21 @@ elif menu == "6. 섹터전략 백테스트":
             period_preset,
             (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
         )
-        fixed_long_period = period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]
         with c1:
-            if fixed_long_period:
-                start_date = default_start_date
-                st.text_input("시작일", value=str(start_date), disabled=True, key="bt_start_date_fixed_v38")
-            else:
-                start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date_v38")
+            start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date")
         with c2:
-            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date_v38")
+            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
         with c3:
             max_signal_days = st.number_input(
-                "최대 검증 거래일 (2010용 최대 5000)",
+                "최대 검증 거래일",
                 min_value=5,
                 max_value=5000,
                 value=int(default_signal_days),
                 step=5,
-                key="bt_max_days_v38_5000_safe",
+                key="bt_max_days_v47_5000",
             )
-        if period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]:
-            st.info("장기검증 모드: 2010/2020/2021 시작일은 강제 고정합니다. T100/Turbo만 볼 때는 아래 '방공호/Turbo만 빠른 실행'을 누르세요. 섹터 개별주 백테스트 전체를 같이 돌리면 중간에 끊길 수 있습니다.")
+        if period_preset in ["2010부터 장기검증", "2020부터 전체검증", "2021부터 전체검증"]:
+            st.info("장기검증 모드: 2010/2020/2021년부터 검증합니다. BAA/VAA는 미국 ETF 월말 리밸런싱이라 섹터 개별주 백테스트보다 가볍습니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -11948,9 +11572,6 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
-                    "T10/T100 Turbo 공격ETF 100% NO CTA - 지수/환율 프록시",
-                    "T100-CAP5-R70-MIN5 현실형",
-                    "T100-CAP5-R70-MIN5 현실형 - 지수/환율 프록시",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
@@ -11970,7 +11591,7 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
-            st.caption("Turbo 모드는 방공호가 아닙니다. T10/T100은 Turbo 공격 ETF 100% / CTA 0%이며, 2010 검증용 지수/환율 프록시 옵션을 별도로 제공합니다.")
+            st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
@@ -11991,25 +11612,62 @@ elif menu == "6. 섹터전략 백테스트":
             if cta_close_df is not None:
                 st.caption(f"CTA CSV 업로드 감지: {len(cta_close_df):,}행")
 
-        cap5_selected = _bt_is_cap5_mode(bunker_mode)
-        with st.expander("1-0-1) T100-CAP5-R70-MIN5 현실형 설정", expanded=cap5_selected):
-            st.caption("CAP5는 손실을 당일에 잘라내는 이론형이 아니라, 하루 -5% 이하 신호가 나온 다음 거래일부터 T100 비중을 줄이는 현실형입니다.")
-            cp1, cp2, cp3, cp4, cp5 = st.columns(5)
-            with cp1:
-                cap5_trigger_pct = st.number_input("CAP 신호 기준 하루손실(%)", min_value=1.0, max_value=20.0, value=5.0, step=0.5, key="bt_cap5_trigger_pct")
-            with cp2:
-                cap5_r_weight_pct = st.number_input("방어모드 T100 비중(%)", min_value=0.0, max_value=100.0, value=70.0, step=5.0, key="bt_cap5_r_weight_pct")
-            with cp3:
-                cap5_min_days = st.number_input("방어모드 최소 유지일", min_value=1, max_value=60, value=5, step=1, key="bt_cap5_min_days")
-            with cp4:
-                cap5_cost_text = st.text_input("거래비용 비교(%)", value="0,0.1,0.2", key="bt_cap5_cost_text", help="쉼표로 입력. 예: 0,0.1,0.2")
-            with cp5:
-                cap5_initial_for_70m = st.number_input("환산 비교 기준", min_value=10_000_000, max_value=1_000_000_000, value=70_000_000, step=10_000_000, format="%d", key="bt_cap5_compare_capital")
+
+
+        st.subheader("1-0-2) BAA / VAA 동적자산배분 백테스트")
+        bv1, bv2, bv3, bv4 = st.columns(4)
+        with bv1:
+            baa_vaa_initial = st.number_input("BAA/VAA 총자금", min_value=1_000_000, max_value=10_000_000_000, value=int(initial_cash), step=1_000_000, format="%d", key="bt_baa_vaa_initial")
+        with bv2:
+            baa_vaa_fee = st.number_input("BAA/VAA 리밸런싱 비용률", min_value=0.0, max_value=0.01, value=0.001, step=0.001, format="%.3f", key="bt_baa_vaa_fee")
+        with bv3:
+            include_baa_balanced = st.checkbox("BAA Balanced도 같이", value=False, key="bt_baa_include_balanced")
+        with bv4:
+            st.caption("BAA Aggressive와 VAA-G4를 월말 리밸런싱으로 계산합니다. BIL/SHY는 CASH 프록시로 처리합니다.")
+        st.caption("BAA: Canary(SPY/EEM/EFA/AGG) 13612W가 모두 양수면 공격자산, 하나라도 음수면 방어자산으로 전환합니다. VAA-G4: SPY/EFA/EEM/AGG 중 하나라도 음수면 방어자산으로 이동합니다.")
+
+        if st.button("BAA/VAA 빠른 백테스트 실행", type="secondary", key="run_baa_vaa_backtest_fast"):
             try:
-                cap5_cost_list = [float(x.strip()) / 100.0 for x in str(cap5_cost_text).split(",") if str(x).strip() != ""]
-            except Exception:
-                cap5_cost_list = [0.0, 0.001, 0.002]
-            st.caption("복귀 조건: 최소 유지일 이후 T100 원본 자산곡선이 20일선 회복 또는 전고점 대비 -5% 이내 회복 시 다음 거래일부터 100% 복귀합니다.")
+                with st.spinner("BAA/VAA 미국 ETF 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
+                    bv_summary, bv_daily_map, bv_signal_map, bv_rebal_map, bv_status = run_baa_vaa_backtests(
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_cash=baa_vaa_initial,
+                        cash_annual_rate=bunker_cash_rate,
+                        fee_rate=baa_vaa_fee,
+                        include_balanced=include_baa_balanced,
+                    )
+                st.success("BAA/VAA 백테스트 완료")
+                st.dataframe(bv_summary, use_container_width=True, hide_index=True)
+                with st.expander("BAA/VAA 데이터 상태", expanded=False):
+                    st.dataframe(bv_status, use_container_width=True, hide_index=True)
+                with st.expander("BAA/VAA 최근 일별 결과", expanded=False):
+                    for _name, _df in bv_daily_map.items():
+                        st.markdown(f"##### {_name}")
+                        st.dataframe(_df.tail(60), use_container_width=True, hide_index=True)
+
+                out_zip = io.BytesIO()
+                with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(f"magic_split_BAA_VAA_summary_{today_str()}.csv", bv_summary.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_BAA_VAA_data_status_{today_str()}.csv", bv_status.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in bv_daily_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_daily_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in bv_signal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_signals_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in bv_rebal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_rebalances_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                st.download_button(
+                    "BAA/VAA 결과 ZIP 다운로드",
+                    data=out_zip.getvalue(),
+                    file_name=f"magic_split_BAA_VAA_backtest_{today_str()}.zip",
+                    mime="application/zip",
+                    key="download_baa_vaa_zip",
+                )
+            except Exception as e:
+                st.error(f"BAA/VAA 백테스트 실패: {e}")
 
         st.subheader("1-1) MDD -10% 수익확대 프리셋")
         profit_expand_preset = st.selectbox(
@@ -12236,137 +11894,6 @@ elif menu == "6. 섹터전략 백테스트":
             }
         ]), use_container_width=True, hide_index=True)
 
-        st.markdown("##### 2010 장기검증 안전 실행")
-        st.caption("T100/Turbo/073/064만 확인할 때는 아래 버튼을 먼저 쓰세요. 섹터 개별주 백테스트를 생략하고 ETF 방공호/Turbo만 바로 계산해서 중간 끊김을 줄입니다.")
-        if st.button("방공호/Turbo만 빠른 실행", type="secondary", key="run_bunker_turbo_only_v38"):
-            if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
-                st.error("시작일은 종료일보다 앞서야 합니다.")
-            else:
-                prog_b = st.progress(0)
-                status_b = st.empty()
-                try:
-                    status_b.caption("방공호/Turbo 전용 거래일 생성 중...")
-                    stub_daily_df = _bt_make_bunker_only_daily_df(
-                        start_date=str(start_date),
-                        end_date=str(end_date),
-                        total_initial=float(initial_cash),
-                        max_signal_days=int(max_signal_days),
-                    )
-                    prog_b.progress(0.25)
-                    status_b.caption(f"ETF 가격 조회 및 {bunker_mode} 계산 중... ({len(stub_daily_df):,}행)")
-                    run_mode_for_calc = _bt_cap5_base_mode(bunker_mode) if _bt_is_cap5_mode(bunker_mode) else bunker_mode
-                    bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
-                        stub_daily_df,
-                        total_initial=float(initial_cash),
-                        leader_ratio=float(leader_alloc_ratio) / 100.0,
-                        mode=run_mode_for_calc,
-                        cash_annual_rate=bunker_cash_rate,
-                        cta_code=cta_code,
-                        cta_close_df=cta_close_df,
-                    )
-                    prog_b.progress(1.0)
-                    status_b.empty()
-                    prog_b.empty()
-                    if bunker_summary.get("오류"):
-                        st.error(f"방공호/Turbo 빠른 실행 실패: {bunker_summary.get('오류')}")
-                    elif _bt_is_cap5_mode(bunker_mode):
-                        st.success("T100-CAP5-R70-MIN5 현실형 빠른 실행 완료")
-                        cap5_outputs = _bt_cap5_build_outputs(
-                            bunker_daily_df,
-                            initial=float(initial_cash),
-                            cash_rate_pct=float(bunker_cash_rate),
-                            cap_trigger_pct=float(cap5_trigger_pct),
-                            r_weight_pct=float(cap5_r_weight_pct),
-                            min_days=int(cap5_min_days),
-                            cost_list=cap5_cost_list,
-                        )
-                        cap5_summary_df = cap5_outputs.get("summary", pd.DataFrame())
-                        cap5_selected_df = cap5_outputs.get("selected_compare", pd.DataFrame())
-                        cap5_daily_df = cap5_outputs.get("daily", pd.DataFrame())
-                        main_row = cap5_selected_df.iloc[1] if len(cap5_selected_df) > 1 else (cap5_summary_df.iloc[-1] if len(cap5_summary_df) else {})
-                        q1, q2, q3, q4, q5 = st.columns(5)
-                        q1.metric("총수익률", f"{main_row.get('총수익률', 0)}%")
-                        q2.metric("최종자산", fmt_won(main_row.get("최종자산", 0)))
-                        q3.metric("CAGR", f"{main_row.get('CAGR', 'N/A')}%")
-                        q4.metric("MDD", f"{main_row.get('MDD', 0)}%")
-                        q5.metric("최악 하루", f"{main_row.get('최악하루', 'N/A')}%")
-                        st.caption(f"원본 T100 계산모드: {run_mode_for_calc} / 검증 {cap5_daily_df['기준일'].iloc[0] if len(cap5_daily_df) else ''} ~ {cap5_daily_df['기준일'].iloc[-1] if len(cap5_daily_df) else ''} / 행수 {len(cap5_daily_df):,}")
-                        tab_c1, tab_c2, tab_c3, tab_c4, tab_c5 = st.tabs(["핵심비교", "요약전체", "daily", "이벤트", "7천만환산"])
-                        with tab_c1:
-                            show_pinned_dataframe(cap5_selected_df, height=220)
-                        with tab_c2:
-                            show_pinned_dataframe(cap5_summary_df, height=260)
-                        with tab_c3:
-                            show_pinned_dataframe(cap5_daily_df.tail(160), height=420)
-                        with tab_c4:
-                            show_pinned_dataframe(cap5_outputs.get("events", pd.DataFrame()), height=420)
-                        with tab_c5:
-                            show_pinned_dataframe(cap5_outputs.get("70m_conversion", pd.DataFrame()), height=220)
-                        zip_bytes = _bt_cap5_outputs_to_zip(cap5_outputs, prefix="magic_split_T100_CAP5_R70_MIN5_v45")
-                        st.download_button(
-                            "T100-CAP5-R70-MIN5 결과 ZIP 다운로드",
-                            data=zip_bytes,
-                            file_name=f"magic_split_T100_CAP5_R70_MIN5_v45_outputs_{today_str()}.zip",
-                            mime="application/zip",
-                            key="download_cap5_r70_min5_integrated_v45",
-                        )
-                    else:
-                        st.success("방공호/Turbo 빠른 실행 완료")
-                        bunker_summary_df = pd.DataFrame([bunker_summary])
-                        q1, q2, q3, q4, q5 = st.columns(5)
-                        q1.metric("총수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
-                        q2.metric("최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
-                        q3.metric("연복리", f"{bunker_summary.get('연복리', 'N/A')}%")
-                        q4.metric("MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
-                        q5.metric("최악 하루", f"{bunker_summary.get('최악하루손실', 'N/A')}%")
-                        st.caption(f"실제검증 {bunker_daily_df['기준일'].iloc[0] if len(bunker_daily_df) else ''} ~ {bunker_daily_df['기준일'].iloc[-1] if len(bunker_daily_df) else ''} / 행수 {len(bunker_daily_df):,}")
-                        show_pinned_dataframe(bunker_summary_df, height=180)
-                        show_pinned_dataframe(bunker_daily_df.tail(120), height=320, pin_rank=False)
-                        mode_text = str(bunker_mode)
-                        if _bt_is_cap5_mode(mode_text) and ("프록시" in mode_text or "PROXY" in mode_text.upper()):
-                            tag = "T100_CAP5_R70_MIN5_PROXY"
-                        elif _bt_is_cap5_mode(mode_text):
-                            tag = "T100_CAP5_R70_MIN5"
-                        elif "T100" in mode_text and ("프록시" in mode_text or "PROXY" in mode_text.upper()):
-                            tag = "T10_T100_TURBO_NO_CTA_PROXY"
-                        elif "T100" in mode_text:
-                            tag = "T10_T100_TURBO_NO_CTA"
-                        elif "T90" in mode_text:
-                            tag = "T90_C10_TURBO_CTA"
-                        elif "T80" in mode_text:
-                            tag = "T80_C10_CASH10_TURBO"
-                        elif "T70" in mode_text:
-                            tag = "T70_D20_C10_TURBO"
-                        elif "064" in mode_text or "0/6/4" in mode_text:
-                            tag = "064_C10" if "C10" in mode_text.upper() else "064"
-                        elif "073" in mode_text or "0/7/3" in mode_text:
-                            tag = "073_C10" if "C10" in mode_text.upper() else "073"
-                        else:
-                            tag = "BUNKER_TURBO_ONLY"
-                        export_buffer = io.BytesIO()
-                        with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                            zf.writestr(f"magic_split_bunker_{tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
-                            zf.writestr(f"magic_split_bunker_{tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
-                            try:
-                                status_text = str(bunker_summary.get("방공호데이터상태", ""))
-                                if status_text:
-                                    rows_status = [{"상태": part} for part in status_text.split(" | ")]
-                                    zf.writestr(f"magic_split_bunker_{tag}_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
-                            except Exception:
-                                pass
-                        export_buffer.seek(0)
-                        st.download_button(
-                            "방공호/Turbo 빠른 실행 CSV 다운로드",
-                            data=export_buffer.getvalue(),
-                            file_name=f"magic_split_bunker_turbo_only_{tag}_{today_str()}.zip",
-                            mime="application/zip",
-                            key="download_bunker_turbo_only_v38",
-                        )
-                except Exception as e:
-                    prog_b.empty()
-                    status_b.empty()
-                    st.error(f"방공호/Turbo 빠른 실행 중 오류: {e}")
-
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
             if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
                 st.error("시작일은 종료일보다 앞서야 합니다.")
@@ -12478,7 +12005,7 @@ elif menu == "6. 섹터전략 백테스트":
                             "대장주엔진비중": leader_alloc_ratio,
                             "방공호방식": bunker_mode,
                             "방공호현금연수익률": bunker_cash_rate,
-                            "기본자산시장": "지수/환율 프록시" if proxy_extended else "국내상장ETF/국내현금성프록시",
+                            "기본자산시장": "국내상장ETF/국내현금성프록시",
                             "CTA시장": "미국상장관리선물ETF",
                             "CTA역할": "방공호내보완재_부스터아님",
                             "CTA코드후보": cta_code,
@@ -12519,46 +12046,20 @@ elif menu == "6. 섹터전략 백테스트":
                         }])
                         bunker_daily_df = pd.DataFrame()
                         bunker_summary_df = pd.DataFrame()
-                        cap5_outputs_for_export = {}
                         if bool(enable_bunker_backtest):
                             try:
-                                cap5_outputs_for_export = {}
-                                run_mode_for_calc = _bt_cap5_base_mode(bunker_mode) if _bt_is_cap5_mode(bunker_mode) else bunker_mode
-                                base_bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
+                                bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
                                     daily_df,
                                     total_initial=float(initial_cash),
                                     leader_ratio=float(leader_alloc_ratio) / 100.0,
-                                    mode=run_mode_for_calc,
+                                    mode=bunker_mode,
                                     cash_annual_rate=bunker_cash_rate,
                                     cta_code=cta_code,
                                     cta_close_df=cta_close_df,
                                 )
                                 if bunker_summary.get("오류"):
                                     st.warning(f"방공호 통합 백테스트 계산 실패: {bunker_summary.get('오류')}")
-                                elif _bt_is_cap5_mode(bunker_mode):
-                                    cap5_outputs_for_export = _bt_cap5_build_outputs(
-                                        base_bunker_daily_df,
-                                        initial=float(initial_cash),
-                                        cash_rate_pct=float(bunker_cash_rate),
-                                        cap_trigger_pct=float(cap5_trigger_pct),
-                                        r_weight_pct=float(cap5_r_weight_pct),
-                                        min_days=int(cap5_min_days),
-                                        cost_list=cap5_cost_list,
-                                    )
-                                    bunker_daily_df = cap5_outputs_for_export.get("daily", pd.DataFrame())
-                                    bunker_summary_df = cap5_outputs_for_export.get("selected_compare", pd.DataFrame())
-                                    main_row = bunker_summary_df.iloc[1] if len(bunker_summary_df) > 1 else (bunker_summary_df.iloc[-1] if len(bunker_summary_df) else {})
-                                    bm1, bm2, bm3, bm4 = st.columns(4)
-                                    bm1.metric("CAP5수익률", f"{main_row.get('총수익률', 0)}%")
-                                    bm2.metric("CAP5최종자산", fmt_won(main_row.get("최종자산", 0)))
-                                    bm3.metric("CAP5 MDD", f"{main_row.get('MDD', 0)}%")
-                                    bm4.metric("최악하루", f"{main_row.get('최악하루', 0)}%")
-                                    with st.expander(f"{bunker_mode} 통합 결과", expanded=False):
-                                        show_pinned_dataframe(bunker_summary_df, height=220)
-                                        show_pinned_dataframe(bunker_daily_df.tail(80), height=300, pin_rank=False)
-                                        show_pinned_dataframe(cap5_outputs_for_export.get("events", pd.DataFrame()), height=260)
                                 else:
-                                    bunker_daily_df = base_bunker_daily_df
                                     bunker_summary_df = pd.DataFrame([bunker_summary])
                                     bm1, bm2, bm3, bm4 = st.columns(4)
                                     bm1.metric("통합수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
@@ -12581,13 +12082,7 @@ elif menu == "6. 섹터전략 백테스트":
                             fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
 
                         bunker_mode_text = str(bunker_mode)
-                        if _bt_is_cap5_mode(bunker_mode_text) and ("프록시" in bunker_mode_text or "PROXY" in bunker_mode_text.upper()):
-                            bunker_file_tag = "T100_CAP5_R70_MIN5_PROXY"
-                        elif _bt_is_cap5_mode(bunker_mode_text):
-                            bunker_file_tag = "T100_CAP5_R70_MIN5"
-                        elif "T100" in bunker_mode_text and ("프록시" in bunker_mode_text or "PROXY" in bunker_mode_text.upper()):
-                            bunker_file_tag = "T10_T100_TURBO_NO_CTA_PROXY"
-                        elif "T100" in bunker_mode_text:
+                        if "T100" in bunker_mode_text:
                             bunker_file_tag = "T10_T100_TURBO_NO_CTA"
                         elif "T90" in bunker_mode_text:
                             bunker_file_tag = "T90_C10_TURBO_CTA"
@@ -12630,10 +12125,6 @@ elif menu == "6. 섹터전략 백테스트":
                                 zf.writestr(f"magic_split_bunker_{bunker_file_tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
                             if bool(enable_bunker_backtest) and len(bunker_daily_df) > 0:
                                 zf.writestr(f"magic_split_bunker_{bunker_file_tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
-                                if _bt_is_cap5_mode(bunker_mode_text) and cap5_outputs_for_export:
-                                    for _cap_name, _cap_df in cap5_outputs_for_export.items():
-                                        if isinstance(_cap_df, pd.DataFrame):
-                                            zf.writestr(f"magic_split_T100_CAP5_R70_MIN5_v45_{_cap_name}_{today_str()}.csv", _cap_df.to_csv(index=False).encode("utf-8-sig"))
                                 try:
                                     # 방공호 데이터 로딩 상태를 별도 파일로도 저장
                                     if len(bunker_summary_df) > 0 and "방공호데이터상태" in bunker_summary_df.columns:
