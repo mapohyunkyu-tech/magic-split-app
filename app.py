@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v50_BAA_VAA_YAHOO_ADJCLOSE_ONLY_20260701"
+APP_VERSION = "v51_KANG_MDD5_MA_PORTFOLIO_BACKTEST_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10725,6 +10725,317 @@ def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_a
         summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
     return summary, daily_map, signal_map, rebal_map, status
 
+
+
+# =====================================================
+# v51 강환국식 MDD5 이동평균 자산배분 백테스트
+# - 원형에 가까운 US/KR 프록시: 미국소형주/한국소형주/미국채/한국채/금
+# - 한국 ETF 프록시: KOSPI200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR/BOND
+# - 월말 기준 각 자산이 N개월 이동평균 위면 해당 슬롯 보유, 아니면 CASH 대체
+# - 월말 신호 → 다음 거래일부터 반영. 미래정보 없음.
+# =====================================================
+
+KANG_MDD5_PROFILES_V51 = {
+    "강환국 MDD5 US/KR 프록시": {
+        "구분": "US/KR혼합프록시",
+        "설명": "미국소형주(IWM) + 한국소형주(KOSDAQ150) + 미국장기채(TLT) + 한국채권 + 금(GLD)",
+        "assets": ["IWM", "KR_KOSDAQ150", "TLT", "KR_BOND3", "GLD"],
+        "cash": "CASH",
+    },
+    "강환국 MDD5 한국 ETF 프록시": {
+        "구분": "한국ETF프록시",
+        "설명": "KODEX200/KOSDAQ150/국내NASDAQ100/금/달러/채권을 같은 슬롯으로 운용",
+        "assets": ["KR_KOSPI200", "KR_KOSDAQ150", "KR_NASDAQ100", "KR_GOLD", "KR_DOLLAR", "KR_BOND3"],
+        "cash": "KR_CASH",
+    },
+}
+
+
+def _kang_ma_signal_text(weights):
+    return _taa_v49_weights_text(weights)
+
+
+def _kang_generate_ma_signals(prices, profile_name, ma_months=6):
+    """월말 기준 N개월 이동평균 위 자산만 보유, 이탈 자산 슬롯은 CASH로 대체."""
+    profile = KANG_MDD5_PROFILES_V51[profile_name]
+    assets = list(profile.get("assets", []))
+    cash_id = str(profile.get("cash", "CASH"))
+    monthly = _taa_v49_monthly_close(prices)
+    rows = []
+    if monthly is None or len(monthly) < int(ma_months) + 2:
+        return pd.DataFrame()
+    slot = 1.0 / max(len(assets), 1)
+    for asof in monthly.index:
+        weights = {}
+        detail = []
+        available_count = 0
+        risk_asset_count = 0
+        for aid in assets:
+            try:
+                if aid not in monthly.columns:
+                    weights[cash_id] = weights.get(cash_id, 0.0) + slot
+                    detail.append(f"{aid}:데이터없음→CASH")
+                    continue
+                s = pd.to_numeric(monthly[aid], errors="coerce").dropna()
+                s = s[s.index <= asof]
+                if len(s) < int(ma_months) + 1:
+                    weights[cash_id] = weights.get(cash_id, 0.0) + slot
+                    detail.append(f"{aid}:룩백부족→CASH")
+                    continue
+                p0 = float(s.iloc[-1])
+                ma = float(s.iloc[-int(ma_months):].mean())
+                available_count += 1
+                if p0 > ma:
+                    weights[aid] = weights.get(aid, 0.0) + slot
+                    risk_asset_count += 1
+                    detail.append(f"{aid}:보유 p0/MA{ma_months}={p0/ma:.3f}")
+                else:
+                    weights[cash_id] = weights.get(cash_id, 0.0) + slot
+                    detail.append(f"{aid}:이탈 p0/MA{ma_months}={p0/ma:.3f}→CASH")
+            except Exception:
+                weights[cash_id] = weights.get(cash_id, 0.0) + slot
+                detail.append(f"{aid}:오류→CASH")
+        rows.append({
+            "신호일": asof,
+            "전략": f"{profile_name} MA{ma_months}",
+            "프로필": profile_name,
+            "MA개월": int(ma_months),
+            "모드": f"KANG_MA{ma_months}",
+            "보유자산": _kang_ma_signal_text(weights),
+            "weights": weights,
+            "데이터가능자산수": available_count,
+            "위험자산보유수": risk_asset_count,
+            "CASH비중": round(float(weights.get(cash_id, 0.0)) * 100.0, 2),
+            "판정상세": "; ".join(detail),
+        })
+    return pd.DataFrame(rows)
+
+
+def run_kang_mdd5_ma_backtests(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, ma_list=(3, 6, 10), include_uskr=True, include_kr=True, us_data_mode="yahoo_adj_only"):
+    profiles = []
+    if include_uskr:
+        profiles.append("강환국 MDD5 US/KR 프록시")
+    if include_kr:
+        profiles.append("강환국 MDD5 한국 ETF 프록시")
+    if not profiles:
+        profiles = ["강환국 MDD5 US/KR 프록시"]
+    ma_list = [int(x) for x in ma_list if int(x) > 0]
+    if not ma_list:
+        ma_list = [6]
+    assets = set()
+    for pname in profiles:
+        prof = KANG_MDD5_PROFILES_V51[pname]
+        assets |= set(prof.get("assets", []))
+        assets.add(prof.get("cash", "CASH"))
+    prices, status = _taa_build_price_table_v49(assets, start_date, end_date, cash_annual_rate=cash_annual_rate, us_data_mode=us_data_mode)
+    summary_rows, daily_map, signal_map, rebal_map = [], {}, {}, {}
+    for pname in profiles:
+        for ma in ma_list:
+            strat_name = f"{pname} MA{ma}"
+            sig = _kang_generate_ma_signals(prices, pname, ma_months=ma)
+            daily, rebal, summ = _taa_v49_backtest_from_signals(prices, sig, initial_cash=initial_cash, fee_rate=fee_rate)
+            summ["전략"] = strat_name
+            summ["구분"] = KANG_MDD5_PROFILES_V51[pname].get("구분", "")
+            summ["MA개월"] = ma
+            summ["전략설명"] = KANG_MDD5_PROFILES_V51[pname].get("설명", "")
+            summ["미국데이터모드"] = us_data_mode
+            summ["7천만환산최종자산"] = round(summ.get("최종자산", 0) * 0.7) if not summ.get("오류") else 0
+            if len(daily) and "보유자산" in daily.columns:
+                summ["CASH포함일수"] = int(daily["보유자산"].astype(str).str.contains("CASH|KR_CASH", regex=True).sum())
+            summary_rows.append(summ)
+            daily_map[strat_name] = daily
+            signal_map[strat_name] = sig.drop(columns=["weights"], errors="ignore") if sig is not None and len(sig) else pd.DataFrame()
+            rebal_map[strat_name] = rebal
+    summary = pd.DataFrame(summary_rows)
+    if len(summary) > 0 and "전략" in summary.columns:
+        cols = ["구분", "전략", "MA개월", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "CASH포함일수", "마지막보유자산", "7천만환산최종자산", "전략설명", "미국데이터모드"]
+        summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
+    status = status.copy()
+    if len(status):
+        status.insert(0, "백테스트", "강환국 MDD5 MA")
+    return summary, daily_map, signal_map, rebal_map, status
+
+
+
+# =====================================================
+# v51 강환국식 MDD5형 MA 자산배분 백테스트
+# - 공개적으로 알려진 "3/6/10개월 이동평균 위일 때 보유, 아니면 현금" 계열을
+#   앱 내부에서 검증하기 위한 프록시 구현.
+# - 원 저작권/유료강의의 세부 공식 복제가 아니라, 사용자가 검증할 수 있는
+#   공개형 프록시 후보군이다.
+# =====================================================
+
+KANG_MDD5_PROFILES_V51 = {
+    "KANG_MDD5_GLOBAL_MA3": {
+        "구분": "글로벌혼합프록시",
+        "설명": "미국소형주+한국성장+미국채+한국채+금, 3개월선 위 보유",
+        "assets": ["IWM", "KR_KOSDAQ150", "TLT", "KR_BOND3", "GLD"],
+        "cash": "KR_CASH",
+        "windows": [3],
+        "require": "all",
+    },
+    "KANG_MDD5_GLOBAL_MA6": {
+        "구분": "글로벌혼합프록시",
+        "설명": "미국소형주+한국성장+미국채+한국채+금, 6개월선 위 보유",
+        "assets": ["IWM", "KR_KOSDAQ150", "TLT", "KR_BOND3", "GLD"],
+        "cash": "KR_CASH",
+        "windows": [6],
+        "require": "all",
+    },
+    "KANG_MDD5_GLOBAL_MA10": {
+        "구분": "글로벌혼합프록시",
+        "설명": "미국소형주+한국성장+미국채+한국채+금, 10개월선 위 보유",
+        "assets": ["IWM", "KR_KOSDAQ150", "TLT", "KR_BOND3", "GLD"],
+        "cash": "KR_CASH",
+        "windows": [10],
+        "require": "all",
+    },
+    "KANG_MDD5_GLOBAL_MA3_6_10_ALL": {
+        "구분": "글로벌혼합프록시",
+        "설명": "미국소형주+한국성장+미국채+한국채+금, 3/6/10개월선 모두 위일 때만 보유",
+        "assets": ["IWM", "KR_KOSDAQ150", "TLT", "KR_BOND3", "GLD"],
+        "cash": "KR_CASH",
+        "windows": [3, 6, 10],
+        "require": "all",
+    },
+    "KANG_MDD5_KR_PROXY_MA3": {
+        "구분": "국내상장ETF프록시",
+        "설명": "국내상장 NASDAQ100+KOSDAQ150+장기채+단기채+금, 3개월선 위 보유",
+        "assets": ["KR_NASDAQ100", "KR_KOSDAQ150", "KR_BOND10", "KR_BOND3", "KR_GOLD"],
+        "cash": "KR_CASH",
+        "windows": [3],
+        "require": "all",
+    },
+    "KANG_MDD5_KR_PROXY_MA6": {
+        "구분": "국내상장ETF프록시",
+        "설명": "국내상장 NASDAQ100+KOSDAQ150+장기채+단기채+금, 6개월선 위 보유",
+        "assets": ["KR_NASDAQ100", "KR_KOSDAQ150", "KR_BOND10", "KR_BOND3", "KR_GOLD"],
+        "cash": "KR_CASH",
+        "windows": [6],
+        "require": "all",
+    },
+    "KANG_MDD5_KR_PROXY_MA10": {
+        "구분": "국내상장ETF프록시",
+        "설명": "국내상장 NASDAQ100+KOSDAQ150+장기채+단기채+금, 10개월선 위 보유",
+        "assets": ["KR_NASDAQ100", "KR_KOSDAQ150", "KR_BOND10", "KR_BOND3", "KR_GOLD"],
+        "cash": "KR_CASH",
+        "windows": [10],
+        "require": "all",
+    },
+    "KANG_MDD5_KR_PROXY_MA3_6_10_ALL": {
+        "구분": "국내상장ETF프록시",
+        "설명": "국내상장 NASDAQ100+KOSDAQ150+장기채+단기채+금, 3/6/10개월선 모두 위일 때만 보유",
+        "assets": ["KR_NASDAQ100", "KR_KOSDAQ150", "KR_BOND10", "KR_BOND3", "KR_GOLD"],
+        "cash": "KR_CASH",
+        "windows": [3, 6, 10],
+        "require": "all",
+    },
+}
+
+
+def _kang_v51_monthly_close(prices):
+    if prices is None or len(prices) == 0:
+        return pd.DataFrame()
+    return prices.resample("ME").last().dropna(how="all")
+
+
+def _kang_v51_ma_signal(monthly, asof, code, windows, require="all"):
+    """월말 asof 기준: 가격이 n개월 이동평균 위면 True. 미래정보 없음."""
+    try:
+        s = monthly[code].dropna()
+        s = s[s.index <= asof]
+        checks = []
+        for w in windows:
+            w = int(w)
+            if len(s) < w + 1:
+                checks.append(False)
+                continue
+            p0 = float(s.iloc[-1])
+            ma = float(s.iloc[-w:].mean())
+            checks.append((ma > 0) and (p0 > ma))
+        if not checks:
+            return False
+        if str(require).lower() == "any":
+            return any(checks)
+        return all(checks)
+    except Exception:
+        return False
+
+
+def _kang_v51_generate_signals(prices, profile_name):
+    profile = KANG_MDD5_PROFILES_V51[profile_name]
+    assets = profile.get("assets", [])
+    cash_id = profile.get("cash", "KR_CASH")
+    windows = profile.get("windows", [3, 6, 10])
+    require = profile.get("require", "all")
+    monthly = _kang_v51_monthly_close(prices)
+    rows = []
+    if monthly is None or len(monthly) == 0:
+        return pd.DataFrame()
+    slot_w = 1.0 / max(len(assets), 1)
+    for asof in monthly.index:
+        weights = {}
+        signal_bits = []
+        for a in assets:
+            on = _kang_v51_ma_signal(monthly, asof, a, windows, require=require)
+            target = a if on else cash_id
+            weights[target] = weights.get(target, 0.0) + slot_w
+            signal_bits.append(f"{a}:{'ON' if on else 'CASH'}")
+        hold_text = _taa_v49_weights_text(weights) if '_taa_v49_weights_text' in globals() else str(weights)
+        rows.append({
+            "신호일": asof,
+            "전략": profile_name,
+            "구분": profile.get("구분", ""),
+            "설명": profile.get("설명", ""),
+            "MA조건": "/".join(map(str, windows)) + (" 모두 위" if require == "all" else " 하나라도 위"),
+            "보유자산": hold_text,
+            "weights": weights,
+            "현금슬롯수": int(sum(1 for x in signal_bits if x.endswith(':CASH'))),
+            "신호요약": "; ".join(signal_bits),
+        })
+    return pd.DataFrame(rows)
+
+
+def _kang_v51_backtest_from_signals(prices, signals, initial_cash=100_000_000, fee_rate=0.001):
+    # BAA/VAA v49 엔진과 같은 월말 신호 → 다음 거래일 적용 백테스트 함수를 재사용한다.
+    return _taa_v49_backtest_from_signals(prices, signals, initial_cash=initial_cash, fee_rate=fee_rate)
+
+
+def run_kang_mdd5_backtests_v51(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, include_global=True, include_kr_proxy=True, us_data_mode="yahoo_adj_only"):
+    strategies = []
+    if include_global:
+        strategies += [k for k in KANG_MDD5_PROFILES_V51 if k.startswith("KANG_MDD5_GLOBAL")]
+    if include_kr_proxy:
+        strategies += [k for k in KANG_MDD5_PROFILES_V51 if k.startswith("KANG_MDD5_KR_PROXY")]
+    if not strategies:
+        strategies = ["KANG_MDD5_KR_PROXY_MA3_6_10_ALL"]
+
+    asset_ids = set()
+    for strat in strategies:
+        prof = KANG_MDD5_PROFILES_V51[strat]
+        asset_ids |= set(prof.get("assets", []))
+        asset_ids.add(prof.get("cash", "KR_CASH"))
+    prices, status = _taa_build_price_table_v49(asset_ids, start_date, end_date, cash_annual_rate=cash_annual_rate, us_data_mode=us_data_mode)
+    summary_rows, daily_map, signal_map, rebal_map = [], {}, {}, {}
+    for strat in strategies:
+        sig = _kang_v51_generate_signals(prices, strat)
+        daily, rebal, summ = _kang_v51_backtest_from_signals(prices, sig, initial_cash=initial_cash, fee_rate=fee_rate)
+        prof = KANG_MDD5_PROFILES_V51[strat]
+        summ["전략"] = strat
+        summ["구분"] = prof.get("구분", "")
+        summ["설명"] = prof.get("설명", "")
+        summ["MA조건"] = "/".join(map(str, prof.get("windows", []))) + (" 모두 위" if prof.get("require") == "all" else " 하나라도 위")
+        summ["7천만환산최종자산"] = round(float(summ.get("최종자산", 0)) * 0.7) if not summ.get("오류") else 0
+        summary_rows.append(summ)
+        daily_map[strat] = daily
+        signal_map[strat] = sig.drop(columns=["weights"], errors="ignore") if sig is not None and len(sig) else pd.DataFrame()
+        rebal_map[strat] = rebal
+    summary = pd.DataFrame(summary_rows)
+    if len(summary) > 0:
+        cols = ["구분", "전략", "설명", "MA조건", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "마지막보유자산", "7천만환산최종자산"]
+        summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
+    return summary, daily_map, signal_map, rebal_map, status
+
 menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 실전 보유장부", "9. 도움말"])
 
 # =====================================================
@@ -12130,6 +12441,147 @@ elif menu == "6. 섹터전략 백테스트":
                 )
             except Exception as e:
                 st.error(f"BAA/VAA 백테스트 실패: {e}")
+
+
+
+        st.subheader("1-0-3) 강환국식 MDD5형 MA 자산배분 백테스트")
+        km1, km2, km3, km4 = st.columns(4)
+        with km1:
+            kang_initial = st.number_input("강환국식 MA 총자금", min_value=1_000_000, max_value=10_000_000_000, value=int(initial_cash), step=1_000_000, format="%d", key="bt_kang_mdd5_initial_v51")
+        with km2:
+            kang_fee = st.number_input("강환국식 MA 리밸런싱 비용률", min_value=0.0, max_value=0.01, value=0.001, step=0.001, format="%.3f", key="bt_kang_mdd5_fee_v51")
+        with km3:
+            kang_include_global = st.checkbox("글로벌 혼합 프록시", value=True, key="bt_kang_mdd5_global_v51")
+        with km4:
+            kang_include_kr = st.checkbox("국내상장 ETF 프록시", value=True, key="bt_kang_mdd5_kr_v51")
+        kang_us_data_mode_label = st.radio(
+            "강환국식 MA 미국 ETF 데이터 모드",
+            ["Yahoo Adj Close 전용(정확검증)", "Yahoo 우선 + FDR/Stooq 백업"],
+            index=0,
+            horizontal=True,
+            key="bt_kang_us_data_mode_v51",
+        )
+        kang_us_data_mode = "yahoo_adj_only" if kang_us_data_mode_label.startswith("Yahoo Adj Close") else "fallback"
+        st.caption("공개형 프록시: 각 자산 슬롯은 월말 가격이 선택 MA 위이면 보유, 아래이면 CASH. 월말 신호는 다음 거래일부터 반영합니다.")
+        st.caption("글로벌 혼합: IWM/한국성장/TLT/한국채/GLD. 국내상장 프록시: 국내 NASDAQ100/KOSDAQ150/국채/금 ETF. 원 유료전략 완전복제가 아니라 MDD5형 아이디어 검증용입니다.")
+
+        if st.button("강환국식 MDD5형 MA 빠른 백테스트 실행", type="secondary", key="run_kang_mdd5_backtest_v51"):
+            try:
+                with st.spinner("강환국식 MDD5형 MA 자산배분 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
+                    kg_summary, kg_daily_map, kg_signal_map, kg_rebal_map, kg_status = run_kang_mdd5_backtests_v51(
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_cash=kang_initial,
+                        cash_annual_rate=bunker_cash_rate,
+                        fee_rate=kang_fee,
+                        include_global=kang_include_global,
+                        include_kr_proxy=kang_include_kr,
+                        us_data_mode=kang_us_data_mode,
+                    )
+                st.success("강환국식 MDD5형 MA 백테스트 완료")
+                st.dataframe(kg_summary, use_container_width=True, hide_index=True)
+                with st.expander("강환국식 MA 데이터 상태", expanded=False):
+                    st.dataframe(kg_status, use_container_width=True, hide_index=True)
+                with st.expander("강환국식 MA 최근 일별 결과", expanded=False):
+                    for _name, _df in kg_daily_map.items():
+                        st.markdown(f"##### {_name}")
+                        st.dataframe(_df.tail(60), use_container_width=True, hide_index=True)
+
+                out_zip = io.BytesIO()
+                with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(f"magic_split_KANG_MDD5_MA_summary_{today_str()}.csv", kg_summary.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_KANG_MDD5_MA_data_status_{today_str()}.csv", kg_status.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_daily_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_daily_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_signal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_signals_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_rebal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_rebalances_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                st.download_button(
+                    "강환국식 MDD5형 MA 결과 ZIP 다운로드",
+                    data=out_zip.getvalue(),
+                    file_name=f"magic_split_KANG_MDD5_MA_backtest_{today_str()}.zip",
+                    mime="application/zip",
+                    key="download_kang_mdd5_zip_v51",
+                )
+            except Exception as e:
+                st.error(f"강환국식 MDD5형 MA 백테스트 실패: {e}")
+
+
+
+        st.subheader("1-0-3) 강환국식 MDD5 이동평균 자산배분 백테스트")
+        kg1, kg2, kg3, kg4, kg5 = st.columns(5)
+        with kg1:
+            kang_initial = st.number_input("강환국 MDD5 총자금", min_value=1_000_000, max_value=10_000_000_000, value=int(initial_cash), step=1_000_000, format="%d", key="bt_kang_initial_v51")
+        with kg2:
+            kang_fee = st.number_input("강환국 MDD5 리밸런싱 비용률", min_value=0.0, max_value=0.01, value=0.001, step=0.001, format="%.3f", key="bt_kang_fee_v51")
+        with kg3:
+            include_kang_uskr = st.checkbox("US/KR 혼합 프록시", value=True, key="bt_kang_include_uskr_v51")
+        with kg4:
+            include_kang_kr = st.checkbox("한국 ETF 프록시", value=True, key="bt_kang_include_kr_v51")
+        with kg5:
+            kang_ma_choices = st.multiselect("이평선 개월", options=[3, 6, 10], default=[3, 6, 10], key="bt_kang_ma_choices_v51")
+        kang_us_data_mode_label = st.radio(
+            "강환국 MDD5 미국 데이터 모드",
+            ["Yahoo Adj Close 전용(정확검증)", "Yahoo 우선 + FDR/Stooq 백업"],
+            index=0,
+            horizontal=True,
+            key="bt_kang_us_data_mode_v51",
+            help="US/KR 혼합 프록시의 IWM/TLT/GLD는 Yahoo 조정종가를 우선 사용합니다.",
+        )
+        kang_us_data_mode = "yahoo_adj_only" if kang_us_data_mode_label.startswith("Yahoo Adj Close") else "fallback"
+        st.caption("US/KR 혼합 프록시: IWM(미국소형주) + KOSDAQ150(한국소형주 대체) + TLT(미국장기채) + 한국채권 + GLD(금).")
+        st.caption("한국 ETF 프록시: KODEX200/KOSDAQ150/국내NASDAQ100/GOLD/DOLLAR/BOND. 각 자산은 월말 종가가 N개월 이평선 위면 보유, 아래면 해당 슬롯을 CASH로 대체합니다.")
+        st.caption("신호는 월말 종가 기준으로 계산하고 다음 거래일부터 반영합니다. 상장 전 데이터가 없는 자산은 CASH로 처리됩니다.")
+
+        if st.button("강환국 MDD5 MA 빠른 백테스트 실행", type="secondary", key="run_kang_mdd5_ma_backtest_v51"):
+            try:
+                with st.spinner("강환국식 MDD5 이동평균 자산배분 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
+                    kg_summary, kg_daily_map, kg_signal_map, kg_rebal_map, kg_status = run_kang_mdd5_ma_backtests(
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_cash=kang_initial,
+                        cash_annual_rate=bunker_cash_rate,
+                        fee_rate=kang_fee,
+                        ma_list=kang_ma_choices,
+                        include_uskr=include_kang_uskr,
+                        include_kr=include_kang_kr,
+                        us_data_mode=kang_us_data_mode,
+                    )
+                st.success("강환국 MDD5 MA 백테스트 완료")
+                st.dataframe(kg_summary, use_container_width=True, hide_index=True)
+                with st.expander("강환국 MDD5 데이터 상태", expanded=False):
+                    st.dataframe(kg_status, use_container_width=True, hide_index=True)
+                with st.expander("강환국 MDD5 최근 일별 결과", expanded=False):
+                    for _name, _df in kg_daily_map.items():
+                        st.markdown(f"##### {_name}")
+                        st.dataframe(_df.tail(60), use_container_width=True, hide_index=True)
+
+                out_zip = io.BytesIO()
+                with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(f"magic_split_KANG_MDD5_MA_summary_{today_str()}.csv", kg_summary.to_csv(index=False).encode("utf-8-sig"))
+                    zf.writestr(f"magic_split_KANG_MDD5_MA_data_status_{today_str()}.csv", kg_status.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_daily_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_daily_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_signal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_signals_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                    for _name, _df in kg_rebal_map.items():
+                        tag = _name.replace(" ", "_").replace("/", "_")
+                        zf.writestr(f"magic_split_{tag}_rebalances_{today_str()}.csv", _df.to_csv(index=False).encode("utf-8-sig"))
+                st.download_button(
+                    "강환국 MDD5 MA 결과 ZIP 다운로드",
+                    data=out_zip.getvalue(),
+                    file_name=f"magic_split_KANG_MDD5_MA_backtest_{today_str()}.zip",
+                    mime="application/zip",
+                    key="download_kang_mdd5_ma_zip_v51",
+                )
+            except Exception as e:
+                st.error(f"강환국 MDD5 MA 백테스트 실패: {e}")
 
         st.subheader("1-1) MDD -10% 수익확대 프리셋")
         profit_expand_preset = st.selectbox(
