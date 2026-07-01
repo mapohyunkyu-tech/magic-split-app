@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v31_TRUE_DEFENSE_CTA_064_FIX_20260701"
+APP_VERSION = "v33_TURBO10_NO_CTA_BACKTEST_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6084,6 +6084,10 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
     - C10/C15 CTA 보완형: 073/064/055의 방공호 일부를 미국 상장 관리선물 ETF(DBMF/KMLM/CTA)로 분리한다.
       예: 073-C10 = 기존 국내 방공호 60% + 미국 CTA 10% + 국내 부스터 30%.
       CTA는 부스터가 아니라 방공호 내부 보완재이며, 수익률 폭발보다 금/달러 외 위기 헤지 보완이 목적이다.
+    - Turbo 공격 ETF 전략: 기존 064-C10 오류본을 방공호가 아닌 공격전략으로 재정의한다.
+      T10/T100 = Turbo 공격 ETF 엔진 100% / CTA 0%, T90-C10 = Turbo 90% + CTA 10%,
+      T80-C10-CASH10 = Turbo 80% + CTA 10% + CASH 10%, T70-D20-C10 = Turbo 70% + 진짜방어 20% + CTA 10%.
+      Turbo 엔진은 KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 사용한다.
     - 5/3/2 생존형 복리: 50% 대장주 + 30% 진짜방공호 + 20% 공격형 듀얼부스터.
       매월 상위 5:3:2를 강제 리밸런싱하지 않고 각 칸 안에서 복리로 굴린다.
       분기 첫 거래일에 밴드만 점검한다.
@@ -6104,13 +6108,38 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         mode = str(mode or "월간 듀얼모멘텀 상위2")
 
         mode_upper = mode.upper()
-        split_073 = ("0/7/3" in mode) or ("073" in mode) or ("방공호형 공격복리" in mode)
-        split_064 = (("0/6/4" in mode) or ("064" in mode) or ("60/40" in mode) or ("공격형 064" in mode)) and (not split_073)
-        split_055 = (("0/5/5" in mode) or ("055" in mode) or ("50/50" in mode)) and (not split_073) and (not split_064)
-        split_532 = (("5/3/2" in mode) or ("532" in mode) or ("생존형" in mode)) and (not split_073) and (not split_064) and (not split_055)
-        split_702010 = (("70/20/10" in mode) or ("부스터" in mode)) and (not split_532) and (not split_073) and (not split_064) and (not split_055)
+        split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
+        split_turbo_t100 = split_turbo and ("T100" in mode_upper)
+        split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
+        split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
+        split_turbo_t70_defense = split_turbo and ("T70" in mode_upper)
+        split_073 = (("0/7/3" in mode) or ("073" in mode) or ("방공호형 공격복리" in mode)) and (not split_turbo)
+        split_064 = (("0/6/4" in mode) or ("064" in mode) or ("60/40" in mode) or ("공격형 064" in mode)) and (not split_073) and (not split_turbo)
+        split_055 = (("0/5/5" in mode) or ("055" in mode) or ("50/50" in mode)) and (not split_073) and (not split_064) and (not split_turbo)
+        split_532 = (("5/3/2" in mode) or ("532" in mode) or ("생존형" in mode)) and (not split_073) and (not split_064) and (not split_055) and (not split_turbo)
+        split_702010 = (("70/20/10" in mode) or ("부스터" in mode)) and (not split_532) and (not split_073) and (not split_064) and (not split_055) and (not split_turbo)
         cta_ratio = 0.0
-        if split_073:
+        if split_turbo_t100:
+            leader_ratio = 0.00
+            safe_ratio = 0.00
+            cta_ratio = 0.00
+            booster_ratio = 1.00
+        elif split_turbo_t90_c10:
+            leader_ratio = 0.00
+            safe_ratio = 0.00
+            cta_ratio = 0.10
+            booster_ratio = 0.90
+        elif split_turbo_t80_cash:
+            leader_ratio = 0.00
+            safe_ratio = 0.10
+            cta_ratio = 0.10
+            booster_ratio = 0.80
+        elif split_turbo_t70_defense:
+            leader_ratio = 0.00
+            safe_ratio = 0.20
+            cta_ratio = 0.10
+            booster_ratio = 0.70
+        elif split_073:
             leader_ratio = 0.00
             safe_ratio = 0.70
             booster_ratio = 0.30
@@ -6343,7 +6372,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             month_key = date.strftime("%Y-%m")
 
             if safe_state.get("last_month") != month_key:
-                if split_702010 or split_532 or split_073 or split_064 or split_055:
+                if split_turbo_t80_cash:
+                    safe_mode = "cash"
+                elif split_turbo_t70_defense:
+                    safe_mode = "defensive_dual"
+                elif split_702010 or split_532 or split_073 or split_064 or split_055:
                     safe_mode = "defensive_dual"
                 elif mode == "정적 50/30/20":
                     safe_mode = "static"
@@ -6572,6 +6605,58 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         if len(out) == 0:
             return out, {"오류": "방공호 결과가 없습니다."}
         final_total = float(out["통합총자산"].iloc[-1])
+        # v32 핵심 성과지표: Turbo/방공호 공통으로 summary CSV에 저장한다.
+        try:
+            _asset_curve = pd.to_numeric(out["통합총자산"], errors="coerce").ffill().dropna()
+            _n_days = int(len(_asset_curve))
+            _daily_ret = _asset_curve.pct_change()
+            _worst_day = float(_daily_ret.min() * 100.0) if _n_days > 1 else 0.0
+            _worst_3d = float((_asset_curve / _asset_curve.shift(3) - 1.0).min() * 100.0) if _n_days > 3 else np.nan
+            _worst_10d = float((_asset_curve / _asset_curve.shift(10) - 1.0).min() * 100.0) if _n_days > 10 else np.nan
+            _cagr = float(((final_total / total_initial) ** (252.0 / max(_n_days, 1)) - 1.0) * 100.0) if total_initial > 0 and final_total > 0 else np.nan
+            _peak_val = float(_asset_curve.iloc[0]) if _n_days else 0.0
+            _under_days = 0
+            _max_under_days = 0
+            for _v in _asset_curve:
+                _v = float(_v)
+                if _v >= _peak_val:
+                    _peak_val = _v
+                    _under_days = 0
+                else:
+                    _under_days += 1
+                    _max_under_days = max(_max_under_days, _under_days)
+            def _period_mdd(_start, _end):
+                try:
+                    _tmp = out[(pd.to_datetime(out["기준일"]) >= pd.to_datetime(_start)) & (pd.to_datetime(out["기준일"]) <= pd.to_datetime(_end))].copy()
+                    if len(_tmp) == 0:
+                        return "N/A"
+                    _vals = pd.to_numeric(_tmp["통합총자산"], errors="coerce").ffill().dropna()
+                    if len(_vals) == 0:
+                        return "N/A"
+                    return round(float((_vals / _vals.cummax() - 1.0).min() * 100.0), 2)
+                except Exception:
+                    return "N/A"
+            def _specific_day_loss(_date):
+                try:
+                    _tmp = out.copy()
+                    _tmp["_dt"] = pd.to_datetime(_tmp["기준일"], errors="coerce")
+                    _tmp = _tmp.sort_values("_dt").reset_index(drop=True)
+                    _idx = _tmp.index[_tmp["_dt"].eq(pd.to_datetime(_date))].to_list()
+                    if not _idx or _idx[0] <= 0:
+                        return "N/A"
+                    _i = int(_idx[0])
+                    return round(float((float(_tmp.loc[_i, "통합총자산"]) / float(_tmp.loc[_i-1, "통합총자산"]) - 1.0) * 100.0), 2)
+                except Exception:
+                    return "N/A"
+        except Exception:
+            _n_days = int(len(out))
+            _worst_day = np.nan
+            _worst_3d = np.nan
+            _worst_10d = np.nan
+            _cagr = np.nan
+            _max_under_days = 0
+            def _period_mdd(_start, _end): return "N/A"
+            def _specific_day_loss(_date): return "N/A"
         safe_final = float(out["진짜방공호평가금액"].iloc[-1]) if "진짜방공호평가금액" in out.columns else 0.0
         cta_final = float(out["CTA평가금액"].iloc[-1]) if "CTA평가금액" in out.columns else 0.0
         defense_final = float(out["방어구역평가금액"].iloc[-1]) if "방어구역평가금액" in out.columns else safe_final + cta_final
@@ -6586,7 +6671,9 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 status_text = " | ".join([f"{r.get('자산','')}:{r.get('상태','')}({r.get('사용가능일수',0)}일)" for _, r in bunker_price_status_df.iterrows()])
         except Exception:
             status_text = ""
-        if split_073:
+        if split_turbo:
+            memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
+        elif split_073:
             memo_text = "0/7/3 계열은 대장주를 제외하고 방어구역 70%와 부스터 30%로 운용합니다. C10/C15는 방어구역 안에 CTA를 10~15% 분리합니다. 매월 상위비중 강제 리밸런싱은 하지 않고, 분기마다 방공호65~80/부스터20~35 밴드를 점검하며 부스터40% 초과 시 즉시 35%선까지 잠급니다."
         elif split_064:
             memo_text = "0/6/4 계열은 대장주를 제외하고 방어구역 60%와 부스터 40%로 운용합니다. C10은 방어구역 안에 CTA 10%를 분리합니다. 분기마다 방공호55~70/부스터30~45 밴드를 점검하며 부스터50% 초과 시 즉시 45%선까지 잠급니다."
@@ -6599,6 +6686,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
 
         summary = {
             "방공호전략": mode,
+            "전략분류": "Turbo 공격 ETF 전략" if split_turbo else "방공호/부스터 전략",
+            "Turbo엔진비중": round(booster_ratio * 100, 1) if split_turbo else 0.0,
             "초기총자금": round(total_initial),
             "대장주비중": round(leader_ratio * 100, 1),
             "기존방공호비중": round(safe_ratio * 100, 1),
@@ -6621,7 +6710,15 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "최종통합운용구역": round(bunker_final),
             "최종통합총자산": round(final_total),
             "통합총수익률": round((final_total / total_initial - 1.0) * 100.0, 2),
+            "연복리": round(float(_cagr), 2) if not pd.isna(_cagr) else "N/A",
             "통합최대낙폭": round(float(out["통합MDD"].min()), 2),
+            "최악하루손실": round(float(_worst_day), 2) if not pd.isna(_worst_day) else "N/A",
+            "최악3일손실": round(float(_worst_3d), 2) if not pd.isna(_worst_3d) else "N/A",
+            "최악10일손실": round(float(_worst_10d), 2) if not pd.isna(_worst_10d) else "N/A",
+            "최장회복기간_거래일": int(_max_under_days),
+            "2020코로나구간낙폭": _period_mdd("2020-02-19", "2020-03-23"),
+            "2022하락장낙폭": _period_mdd("2022-01-01", "2022-12-31"),
+            "2026-03-04급락일손실": _specific_day_loss("2026-03-04"),
             "내부ETF리밸런싱횟수": int(safe_state.get("rebalances", 0)) + int(cta_state.get("rebalances", 0)) + int(booster_state.get("rebalances", 0)),
             "532상위밴드조정횟수": int(top_rebalance_count) if split_532 else 0,
             "073상위밴드조정횟수": int(top_rebalance_count) if split_073 else 0,
@@ -6637,7 +6734,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "현금연수익률가정": float(cash_annual_rate or 0.0),
             "기본자산시장": "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
-            "CTA역할": "방공호내보완재_부스터아님",
+            "CTA역할": "Turbo전략완충재" if split_turbo else "방공호내보완재_부스터아님",
+            "Turbo엔진허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR" if split_turbo else "",
             "방공호허용자산": "CASH/GOLD/DOLLAR/BOND/CTA",
             "방공호금지자산": "KODEX200/KOSDAQ150/NASDAQ100/기타주식형ETF",
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
@@ -11101,13 +11199,17 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/6/4-C10 CTA방공호",
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
+                    "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T90-C10 Turbo+CTA",
+                    "T80-C10-CASH10 Turbo+CTA+CASH",
+                    "T70-D20-C10 Turbo+진짜방어+CTA",
                     "5/3/2 생존형 복리",
                     "70/20/10 방공호+부스터",
                     "월간 듀얼모멘텀 상위2",
                     "정적 50/30/20",
                     "현금/단기채만",
                 ],
-                index=0,
+                index=7,
                 key="bt_bunker_mode",
             )
             bunker_cash_rate = st.number_input("CASH/CD·KOFR·단기금리 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="bt_bunker_cash_rate")
@@ -11117,6 +11219,7 @@ elif menu == "6. 섹터전략 백테스트":
             st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
+            st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
@@ -11550,7 +11653,15 @@ elif menu == "6. 섹터전략 백테스트":
                             fail_df = fail_df[(fail_df["구분"].eq("매도")) & (fail_df["실현손익"] < 0)].sort_values("실현손익")
 
                         bunker_mode_text = str(bunker_mode)
-                        if "0/7/3-C15" in bunker_mode_text or "073-C15" in bunker_mode_text:
+                        if "T100" in bunker_mode_text:
+                            bunker_file_tag = "T10_T100_TURBO_NO_CTA"
+                        elif "T90" in bunker_mode_text:
+                            bunker_file_tag = "T90_C10_TURBO_CTA"
+                        elif "T80" in bunker_mode_text:
+                            bunker_file_tag = "T80_C10_CASH10_TURBO"
+                        elif "T70" in bunker_mode_text:
+                            bunker_file_tag = "T70_D20_C10_TURBO"
+                        elif "0/7/3-C15" in bunker_mode_text or "073-C15" in bunker_mode_text:
                             bunker_file_tag = "073_C15"
                         elif "0/7/3-C10" in bunker_mode_text or "073-C10" in bunker_mode_text:
                             bunker_file_tag = "073_C10"
