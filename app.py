@@ -12750,89 +12750,95 @@ elif menu == "7. 실전 운영판":
 # 7-1. T100 하이브리드 운용모드
 # =====================================================
 elif menu == "7-1. T100 하이브리드 운용모드":
-    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v59")
-    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. 6310은 자동판정 또는 3순위 선택 때만 전환하고, 1순위 공격모드 선택 시에는 수익조건이 충족돼도 1순위를 유지합니다.")
+    st.header("7-1. T100 HYBRID 1↔3 LOCK 운용모드 v60")
+    st.caption("백테스트가 아니라 오늘 기준 목표비중과 리밸런싱 금액을 계산하는 실전 운용판입니다. v60부터 예수금은 '전략 CASH'와 '참고 예수금'을 분리합니다.")
 
     st.markdown("""
 **운용 규칙 요약**
 - 1순위: `T100 CAP5 + 5일 누적 -6% 방어`  
-  평상시 T100 100%, 급락 신호 시 T100 70% + CASH 30%.
+  평상시 T100 100%, 급락 신호 시 T100 70% + 전략 CASH 30%.
 - 3순위: `T100 SPLIT 60/30/10 + C안`  
-  운용판에서는 T100 60% + CASH 40%(대기 30% + 생활/잠금 10%)로 계산.
+  운용판에서는 T100 60% + 전략 CASH 40%(대기 30% + 생활/잠금 10%)로 계산.
 - 전환: 직전 잠금 기준 대비 +50% 달성 시 3순위 6310으로 잠금. 최소 60거래일 후 회복 조건이면 1순위 복귀.
 """)
 
     st.subheader("1) 현재 계좌 상태 입력")
-    st.info("천만원 실험이면 아래 입력값은 항상 `총자산 1,000만 / T100 1,000만 / CASH 0 / 잠금기준 1,000만`으로 두세요. 외부 현금이나 추가입금은 여기 넣지 않습니다.")
+    st.info("천만원 실험이면 `운용대상 투자금액 1,000만 / 현재 T100 평가금액 1,000만 / 전략 CASH 0 / 직전 잠금 기준 1,000만`입니다. 계좌에 따로 있는 예수금 600만은 아래 '참고 예수금'에만 적고 계산에는 넣지 마세요.")
 
-    # v59: 이전 세션에 남은 1,600만/600만 현금 입력값이 계속 살아나 목표가 올라가는 문제 방지.
-    # 기존 v54/v55 키와 완전히 분리하고, 버튼으로 실험값을 즉시 복구한다.
-    v59_keys = {
-        "t100_live_total_assets_v59": 10_000_000,
-        "t100_live_current_t100_v59": 10_000_000,
-        "t100_live_current_cash_v59": 0,
-        "t100_live_lock_base_v59": 10_000_000,
-        "t100_live_mode_v59": "1순위 공격모드",
-        "t100_live_lock_already_v59": False,
+    # v60: 사용자가 말한 의미에 맞춰 총자산을 '운용대상 투자금액'으로 바꾸고,
+    # 실제 계좌 예수금은 참고용(계산 제외)으로 분리한다.
+    v60_keys = {
+        "t100_live_operating_capital_v60": 10_000_000,
+        "t100_live_current_t100_v60": 10_000_000,
+        "t100_live_strategy_cash_v60": 0,
+        "t100_live_reference_cash_v60": 0,
+        "t100_live_lock_base_v60": 10_000_000,
+        "t100_live_mode_v60": "1순위 공격모드",
+        "t100_live_lock_already_v60": False,
     }
     r1, r2 = st.columns([1, 2])
     with r1:
-        if st.button("천만원 실험값으로 초기화", key="t100_live_reset_10m_v59", type="secondary"):
-            for _k, _v in v59_keys.items():
+        if st.button("천만원 실험값으로 초기화", key="t100_live_reset_10m_v60", type="secondary"):
+            for _k, _v in v60_keys.items():
                 st.session_state[_k] = _v
-            st.success("천만원 실험값으로 초기화했습니다. 다시 계산 버튼을 누르세요.")
+            st.success("천만원 실험값으로 초기화했습니다. 참고 예수금은 필요하면 따로 입력하세요.")
     with r2:
-        st.caption("입력값이 자꾸 저장되면 이 버튼을 누르세요. 목표금액이 1,600만으로 올라가는 문제를 막습니다.")
+        st.caption("입력값이 자꾸 저장되면 이 버튼을 누르세요. v60부터 참고 예수금은 목표금액을 올리지 않습니다.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        live_total_assets = st.number_input("현재 총자산", min_value=0, value=10_000_000, step=100_000, key="t100_live_total_assets_v59")
-        live_current_t100 = st.number_input("현재 T100 평가금액", min_value=0, value=10_000_000, step=100_000, key="t100_live_current_t100_v59")
+        live_operating_capital = st.number_input("운용대상 투자금액", min_value=0, value=10_000_000, step=100_000, key="t100_live_operating_capital_v60", help="T100 실험에 넣기로 정한 돈만 입력합니다. 예: 천만원 실험이면 10,000,000")
+        live_current_t100 = st.number_input("현재 T100 평가금액", min_value=0, value=10_000_000, step=100_000, key="t100_live_current_t100_v60", help="현재 T100 ETF로 실제 운용 중인 평가금액")
     with c2:
-        live_current_cash = st.number_input("현재 CASH/예수금", min_value=0, value=0, step=100_000, key="t100_live_current_cash_v59")
-        live_lock_base = st.number_input("직전 잠금 기준금액", min_value=1, value=10_000_000, step=100_000, key="t100_live_lock_base_v59")
+        live_strategy_cash = st.number_input("전략 CASH/방어현금(계산 포함)", min_value=0, value=0, step=100_000, key="t100_live_strategy_cash_v60", help="CAP5 방어 또는 6310 잠금으로 만든 현금만 입력합니다. 단순 예수금/추가입금은 넣지 마세요.")
+        live_reference_cash = st.number_input("계좌 예수금 메모(계산 제외)", min_value=0, value=0, step=100_000, key="t100_live_reference_cash_v60", help="계좌에 보이는 예수금이지만 T100 실험 자금이 아니면 여기에만 적습니다. 목표비중 계산에 반영하지 않습니다.")
+        live_lock_base = st.number_input("직전 잠금 기준금액", min_value=1, value=10_000_000, step=100_000, key="t100_live_lock_base_v60", help="+50% 판단 기준. 천만원 실험이면 10,000,000")
     with c3:
-        live_mode = st.selectbox("현재 운용모드", ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=1, key="t100_live_mode_v59")
-        live_lock_entry = st.date_input("6310 진입일", value=datetime.now().date(), key="t100_live_lock_entry_v59")
-        live_lock_already = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_live_lock_already_v59", help="과거에 +50% 수익잠금 조건을 충족해 이미 6310 모드로 들어간 경우에만 체크하세요.")
+        live_mode = st.selectbox("현재 운용모드", ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=1, key="t100_live_mode_v60")
+        live_lock_entry = st.date_input("6310 진입일", value=datetime.now().date(), key="t100_live_lock_entry_v60")
+        live_lock_already = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_live_lock_already_v60", help="과거에 +50% 수익잠금 조건을 충족해 이미 6310 모드로 들어간 경우에만 체크하세요.")
 
-    if int(live_current_t100) + int(live_current_cash) != int(live_total_assets):
-        st.warning(f"현재 T100 + CASH = {int(live_current_t100 + live_current_cash):,}원인데, 현재 총자산은 {int(live_total_assets):,}원입니다. 실험계좌 기준으로 세 값이 맞는지 확인하세요.")
-    st.caption("주의: 현재 총자산은 T100 실험계좌 안의 돈만 넣으세요. 외부에서 추가 입금한 현금까지 넣으면 앱이 수익으로 오해합니다. 추가입금 600만원을 넣은 상태라면 직전 잠금 기준금액도 1,600만원으로 맞추세요.")
+    live_total_assets = float(live_operating_capital)
+    live_current_cash = float(live_strategy_cash)
+    live_total_check = float(live_current_t100) + float(live_strategy_cash)
+    if int(live_total_check) != int(live_total_assets):
+        st.warning(f"운용대상 투자금액은 {int(live_total_assets):,}원인데, 현재 T100 + 전략 CASH = {int(live_total_check):,}원입니다. 평가손익 때문에 다를 수는 있지만, 단순 예수금은 '계좌 예수금 메모'에만 적으세요.")
+    if float(live_reference_cash) > 0:
+        st.info(f"참고 예수금 {int(live_reference_cash):,}원은 계산에서 제외했습니다. 그래서 목표금액/6310 조건은 운용대상 투자금액 {int(live_total_assets):,}원 기준으로만 봅니다.")
 
     st.subheader("2) 규칙 설정")
     c4, c5, c6, c7 = st.columns(4)
     with c4:
-        live_cap5 = st.number_input("CAP5 하루손실 기준(%)", value=-5.0, step=0.5, key="t100_live_cap5_v59")
-        live_ret5 = st.number_input("5일 누적손실 기준(%)", value=-6.0, step=0.5, key="t100_live_ret5_v59")
+        live_cap5 = st.number_input("CAP5 하루손실 기준(%)", value=-5.0, step=0.5, key="t100_live_cap5_v60")
+        live_ret5 = st.number_input("5일 누적손실 기준(%)", value=-6.0, step=0.5, key="t100_live_ret5_v60")
     with c5:
-        live_def_exp = st.number_input("1순위 방어 시 T100 노출(%)", min_value=0.0, max_value=100.0, value=70.0, step=5.0, key="t100_live_def_exp_v59")
-        live_def_days = st.number_input("현재 방어 유지일", min_value=0, value=0, step=1, key="t100_live_def_days_v59")
+        live_def_exp = st.number_input("1순위 방어 시 T100 노출(%)", min_value=0.0, max_value=100.0, value=70.0, step=5.0, key="t100_live_def_exp_v60")
+        live_def_days = st.number_input("현재 방어 유지일", min_value=0, value=0, step=1, key="t100_live_def_days_v60")
     with c6:
-        live_lock_gain = st.number_input("6310 전환 수익잠금 기준(%)", min_value=1.0, max_value=500.0, value=50.0, step=5.0, key="t100_live_lock_gain_v59")
-        live_lock_exp = st.number_input("3순위 6310 T100 노출(%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0, key="t100_live_lock_exp_v59")
+        live_lock_gain = st.number_input("6310 전환 수익잠금 기준(%)", min_value=1.0, max_value=500.0, value=50.0, step=5.0, key="t100_live_lock_gain_v60")
+        live_lock_exp = st.number_input("3순위 6310 T100 노출(%)", min_value=0.0, max_value=100.0, value=60.0, step=5.0, key="t100_live_lock_exp_v60")
     with c7:
-        live_min_lock = st.number_input("6310 최소 유지일", min_value=0, value=60, step=5, key="t100_live_min_lock_v59")
-        live_cash_rate = st.number_input("CASH 연수익률 프록시(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.25, key="t100_live_cash_rate_v59")
+        live_min_lock = st.number_input("6310 최소 유지일", min_value=0, value=60, step=5, key="t100_live_min_lock_v60")
+        live_cash_rate = st.number_input("CASH 연수익률 프록시(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.25, key="t100_live_cash_rate_v60")
 
     lock_target_preview = float(live_lock_base) * (1.0 + float(live_lock_gain) / 100.0)
     lock_profit_preview = lock_target_preview - float(live_lock_base)
     lock_left_preview = max(0.0, lock_target_preview - float(live_total_assets))
     if float(live_total_assets) < lock_target_preview and not bool(live_lock_already):
-        st.warning(f"6310 잠금 전환은 아직 불가: 기준 {float(live_lock_base):,.0f}원 → 목표 {lock_target_preview:,.0f}원(+{lock_profit_preview:,.0f}원). 현재 기준 남은 금액 {lock_left_preview:,.0f}원")
+        st.warning(f"6310 잠금 전환은 아직 불가: 기준 {float(live_lock_base):,.0f}원 → 목표 {lock_target_preview:,.0f}원(+{lock_profit_preview:,.0f}원). 현재 운용대상 기준 남은 금액 {lock_left_preview:,.0f}원")
     else:
         st.success(f"6310 잠금 전환 가능권: 기준 {float(live_lock_base):,.0f}원 / 목표 {lock_target_preview:,.0f}원")
-        st.caption("단, 현재 운용모드를 1순위 공격모드로 직접 선택하면 v58부터 6310으로 자동 전환하지 않습니다. 자동 전환은 자동판정 또는 3순위 선택 때만 실행합니다.")
+        st.caption("단, 현재 운용모드를 1순위 공격모드로 직접 선택하면 6310으로 자동 전환하지 않습니다. 자동 전환은 자동판정 또는 3순위 선택 때만 실행합니다.")
 
     with st.expander("ETF 코드 설정", expanded=False):
         cc1, cc2, cc3, cc4, cc5 = st.columns(5)
-        live_kodex200 = cc1.text_input("KODEX200", value="069500", key="t100_live_code_kodex_v59")
-        live_kosdaq150 = cc2.text_input("KOSDAQ150", value="229200", key="t100_live_code_kosdaq_v59")
-        live_nasdaq = cc3.text_input("NASDAQ100", value="133690", key="t100_live_code_nasdaq_v59")
-        live_gold = cc4.text_input("GOLD", value="411060", key="t100_live_code_gold_v59")
-        live_dollar = cc5.text_input("DOLLAR", value="261240", key="t100_live_code_dollar_v59")
+        live_kodex200 = cc1.text_input("KODEX200", value="069500", key="t100_live_code_kodex_v60")
+        live_kosdaq150 = cc2.text_input("KOSDAQ150", value="229200", key="t100_live_code_kosdaq_v60")
+        live_nasdaq = cc3.text_input("NASDAQ100", value="133690", key="t100_live_code_nasdaq_v60")
+        live_gold = cc4.text_input("GOLD", value="411060", key="t100_live_code_gold_v60")
+        live_dollar = cc5.text_input("DOLLAR", value="261240", key="t100_live_code_dollar_v60")
 
-    if st.button("T100 HYBRID 1↔3 운용판 계산", type="primary", key="t100_live_run_v59"):
+    if st.button("T100 HYBRID 1↔3 운용판 계산", type="primary", key="t100_live_run_v60"):
         with st.spinner("오늘 기준 T100 하이브리드 운용판 계산 중..."):
             live_summary_df, live_target_df, live_rebalance_df, live_status_df, live_recent_df, live_signal_df = build_t100_hybrid_13_live_operation(
                 total_assets=live_total_assets,
@@ -12867,12 +12873,14 @@ elif menu == "7-1. T100 하이브리드 운용모드":
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("목표모드", str(row.get("목표모드", "")))
             m2.metric("목표 T100 노출", f"{float(row.get('목표T100노출%', 0)):.1f}%")
-            m3.metric("목표 CASH", f"{float(row.get('목표CASH비중%', 0)):.1f}%")
+            m3.metric("목표 전략 CASH", f"{float(row.get('목표CASH비중%', 0)):.1f}%")
             m4.metric("잠금기준대비", f"{float(row.get('잠금기준대비수익률%', 0)):.2f}%")
             m5.metric("6310 가능", str(row.get("6310가능여부", "")))
             if row.get("6310가능여부", "") == "불가":
                 st.warning(f"6310은 아직 못 움직임: 목표 {float(row.get('6310전환목표금액', 0)):,.0f}원 / 남은 {float(row.get('6310전환까지남은금액', 0)):,.0f}원")
             st.info(f"판정사유: {row.get('판정사유', '')}")
+            if float(live_reference_cash) > 0:
+                st.caption(f"참고 예수금 {int(live_reference_cash):,}원은 리밸런싱 표에 반영하지 않았습니다.")
             st.markdown("##### 오늘 목표 자산배분")
             if 'show_pinned_dataframe' in globals():
                 _ = show_pinned_dataframe(live_target_df, height=260, pin_rank=False)
@@ -12906,16 +12914,17 @@ elif menu == "7-1. T100 하이브리드 운용모드":
                 data=export_buffer.getvalue(),
                 file_name=f"magic_split_T100_HYBRID_13_LIVE_OPERATION_{today_str()}.zip",
                 mime="application/zip",
-                key="t100_live_download_zip_v54",
+                key="t100_live_download_zip_v60",
             )
 
     st.subheader("3) 실전 리밸런싱 기준")
     st.markdown("""
 - **월 1회**: T100 내부 자산 선택을 바꿉니다. 예: NASDAQ100 50% + KODEX200 50%.
-- **매일 체크**: 하루 -5% 또는 5일 누적 -6%가 뜨면 다음 거래일부터 1순위 방어비중(T100 70% + CASH 30%)으로 낮춥니다.
-- **수익잠금**: 직전 잠금 기준금액 대비 +50%가 되면 3순위 6310(T100 60% + CASH 40%)으로 전환합니다.
+- **매일 체크**: 하루 -5% 또는 5일 누적 -6%가 뜨면 다음 거래일부터 1순위 방어비중(T100 70% + 전략 CASH 30%)으로 낮춥니다.
+- **수익잠금**: 직전 잠금 기준금액 대비 +50%가 되면 3순위 6310(T100 60% + 전략 CASH 40%)으로 전환합니다.
 - **복귀**: 6310 진입 후 최소 60거래일이 지나고, T100이 20일선 위이며 고점 대비 -5% 이내로 회복하면 1순위로 복귀합니다.
 - **천만원 실험**: 처음엔 1순위로 시작하고, +50% 달성 후부터 6310 잠금을 검토하는 방식이 가장 단순합니다.
+- **계좌 예수금 메모**: 외부 현금/추가입금/별도 예수금은 계산 제외입니다. 목표금액을 올리지 않습니다.
 """)
 
 
