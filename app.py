@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v47_BAA_VAA_BACKTEST_20260701"
+APP_VERSION = "v49_EXACT_BAA_VAA_US_KR_PROXY_20260701"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10278,6 +10278,442 @@ def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_a
 
 
 
+
+
+# =====================================================
+# v49 BAA/VAA 정확형 + 한국 ETF 프록시형 재정의
+# - 미국형: Yahoo adjusted close 우선, FDR Adj Close/Close, Stooq Close 순서
+# - BAA: Canary 13612W + p0/avg(p0..p12) 상대모멘텀 + 월말 신호/다음 거래일 적용
+# - VAA-G4: 13612W breadth momentum + 월말 신호/다음 거래일 적용
+# - 한국형: 국내 ETF 프록시로 별도 전략명에 KR Proxy 표기
+# =====================================================
+
+US_TAA_ASSETS_V49 = {
+    "SPY": {"label": "SPY(S&P500)", "ticker": "SPY"},
+    "QQQ": {"label": "QQQ(NASDAQ100)", "ticker": "QQQ"},
+    "EFA": {"label": "EFA(선진국 ex-US)", "ticker": "EFA"},
+    "EEM": {"label": "EEM(신흥국)", "ticker": "EEM"},
+    "AGG": {"label": "AGG(미국종합채권)", "ticker": "AGG"},
+    "TIP": {"label": "TIP(물가채)", "ticker": "TIP"},
+    "DBC": {"label": "DBC(원자재)", "ticker": "DBC"},
+    "IEF": {"label": "IEF(중기국채)", "ticker": "IEF"},
+    "TLT": {"label": "TLT(장기국채)", "ticker": "TLT"},
+    "LQD": {"label": "LQD(회사채)", "ticker": "LQD"},
+    "IWM": {"label": "IWM(미국소형주)", "ticker": "IWM"},
+    "VGK": {"label": "VGK(유럽주식)", "ticker": "VGK"},
+    "EWJ": {"label": "EWJ(일본주식)", "ticker": "EWJ"},
+    "VNQ": {"label": "VNQ(미국리츠)", "ticker": "VNQ"},
+    "GLD": {"label": "GLD(금)", "ticker": "GLD"},
+    "HYG": {"label": "HYG(하이일드)", "ticker": "HYG"},
+    "CASH": {"label": "CASH/BIL 프록시", "ticker": "CASH"},
+}
+
+KR_TAA_ASSETS_V49 = {
+    "KR_KOSPI200": {"label": "KODEX200/KOSPI200", "codes": ["069500"]},
+    "KR_KOSDAQ150": {"label": "KOSDAQ150", "codes": ["229200", "233740"]},
+    "KR_NASDAQ100": {"label": "국내상장 NASDAQ100", "codes": ["133690", "379810", "381170"]},
+    "KR_SP500": {"label": "국내상장 S&P500", "codes": ["360750", "379800", "143850"]},
+    "KR_GOLD": {"label": "금현물/금선물", "codes": ["411060", "132030", "319640"]},
+    "KR_DOLLAR": {"label": "미국달러선물", "codes": ["261240", "138230"]},
+    "KR_BOND3": {"label": "국고채/단기채권", "codes": ["114260", "148070", "153130"]},
+    "KR_BOND10": {"label": "국채선물10년/장기채", "codes": ["152380"]},
+    "KR_CASH": {"label": "CASH/CD/KOFR 프록시", "codes": ["CASH"]},
+}
+
+TAA_PROFILES_V49 = {
+    "BAA Aggressive Exact US": {
+        "kind": "BAA", "variant": "Aggressive", "cash": "CASH",
+        "canary": ["SPY", "EEM", "EFA", "AGG"],
+        "offensive": ["QQQ", "EEM", "EFA", "AGG"], "top_o": 1,
+        "defensive": ["TIP", "DBC", "CASH", "IEF", "TLT", "LQD", "AGG"], "top_d": 3,
+    },
+    "BAA Balanced Exact US": {
+        "kind": "BAA", "variant": "Balanced", "cash": "CASH",
+        "canary": ["SPY", "EEM", "EFA", "AGG"],
+        "offensive": ["SPY", "QQQ", "IWM", "VGK", "EWJ", "EEM", "VNQ", "DBC", "GLD", "TLT", "HYG", "LQD"], "top_o": 6,
+        "defensive": ["TIP", "DBC", "CASH", "IEF", "TLT", "LQD", "AGG"], "top_d": 3,
+    },
+    "VAA G4 Exact US": {
+        "kind": "VAA", "cash": "CASH",
+        "offensive": ["SPY", "EFA", "EEM", "AGG"],
+        "defensive": ["LQD", "IEF", "CASH"],
+    },
+    "BAA Aggressive KR Proxy": {
+        "kind": "BAA", "variant": "Aggressive", "cash": "KR_CASH", "proxy": True,
+        "canary": ["KR_KOSPI200", "KR_KOSDAQ150", "KR_NASDAQ100", "KR_BOND3"],
+        "offensive": ["KR_NASDAQ100", "KR_KOSDAQ150", "KR_KOSPI200", "KR_BOND3"], "top_o": 1,
+        "defensive": ["KR_CASH", "KR_GOLD", "KR_DOLLAR", "KR_BOND3", "KR_BOND10"], "top_d": 3,
+    },
+    "BAA Balanced KR Proxy": {
+        "kind": "BAA", "variant": "Balanced", "cash": "KR_CASH", "proxy": True,
+        "canary": ["KR_KOSPI200", "KR_KOSDAQ150", "KR_NASDAQ100", "KR_BOND3"],
+        "offensive": ["KR_KOSPI200", "KR_KOSDAQ150", "KR_NASDAQ100", "KR_SP500", "KR_GOLD", "KR_DOLLAR", "KR_BOND3", "KR_BOND10"], "top_o": 4,
+        "defensive": ["KR_CASH", "KR_GOLD", "KR_DOLLAR", "KR_BOND3", "KR_BOND10"], "top_d": 3,
+    },
+    "VAA G4 KR Proxy": {
+        "kind": "VAA", "cash": "KR_CASH", "proxy": True,
+        "offensive": ["KR_KOSPI200", "KR_KOSDAQ150", "KR_NASDAQ100", "KR_BOND3"],
+        "defensive": ["KR_DOLLAR", "KR_BOND3", "KR_CASH"],
+    },
+}
+
+
+def _taa_v49_epoch(dt):
+    try:
+        return int(pd.Timestamp(dt).timestamp())
+    except Exception:
+        return 0
+
+
+def _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_days=430):
+    """Yahoo chart API에서 조정가(adjclose)를 직접 가져온다. yfinance 설치 없이 사용."""
+    try:
+        import json
+        start_dt = pd.to_datetime(start_date) - pd.Timedelta(days=int(lookback_days * 1.8) + 40)
+        end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=5)
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "period1": _taa_v49_epoch(start_dt),
+            "period2": _taa_v49_epoch(end_dt),
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        }
+        r = requests.get(url, params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if not r.ok:
+            return pd.Series(dtype=float, name=ticker), "Yahoo실패"
+        data = r.json()
+        result = (data.get("chart", {}) or {}).get("result", [])
+        if not result:
+            return pd.Series(dtype=float, name=ticker), "Yahoo무데이터"
+        res = result[0]
+        ts = res.get("timestamp") or []
+        adj = (((res.get("indicators", {}) or {}).get("adjclose", []) or [{}])[0]).get("adjclose")
+        close = (((res.get("indicators", {}) or {}).get("quote", []) or [{}])[0]).get("close")
+        vals = adj if adj is not None else close
+        if not ts or not vals:
+            return pd.Series(dtype=float, name=ticker), "Yahoo무데이터"
+        idx = pd.to_datetime(ts, unit="s").tz_localize(None).normalize()
+        s = pd.Series(vals, index=idx, dtype="float64").dropna().sort_index()
+        s = s[~s.index.duplicated(keep="last")]
+        s = s[(s.index >= start_dt) & (s.index <= end_dt)]
+        s.name = ticker
+        if len(s) > 0:
+            return s, "Yahoo AdjClose" if adj is not None else "Yahoo Close"
+    except Exception:
+        pass
+    return pd.Series(dtype=float, name=ticker), "Yahoo실패"
+
+
+def _taa_load_us_series_v49(ticker, start_date, end_date, lookback_days=430):
+    ticker = str(ticker).strip().upper()
+    if ticker in {"CASH", "BIL", "SHY_CASH", "BIL_CASH"}:
+        return pd.Series(dtype=float, name="CASH"), "CASH프록시"
+    s, src = _taa_load_yahoo_adjclose_series_v49(ticker, start_date, end_date, lookback_days=lookback_days)
+    if len(s) > 0:
+        return s, src
+    # 기존 로더 재사용: FDR Adj Close/Close, Stooq Close
+    try:
+        s2, src2 = _taa_load_us_close_series(ticker, start_date, end_date, lookback_days=lookback_days)
+        if len(s2) > 0:
+            return s2, src2
+    except Exception:
+        pass
+    return pd.Series(dtype=float, name=ticker), "실패"
+
+
+def _taa_load_kr_series_v49(asset_id, start_date, end_date, lookback_days=430):
+    info = KR_TAA_ASSETS_V49.get(asset_id, {})
+    codes = info.get("codes", [])
+    if not codes or str(codes[0]).upper() == "CASH":
+        return pd.Series(dtype=float, name=asset_id), "CASH프록시", "CASH"
+    sd = pd.to_datetime(start_date) - pd.Timedelta(days=int(lookback_days * 1.8) + 40)
+    ed = pd.to_datetime(end_date) + pd.Timedelta(days=5)
+    for code in codes:
+        c = str(code).strip().zfill(6)
+        if not c.isdigit():
+            continue
+        # FDR
+        try:
+            df = fdr.DataReader(c, sd.strftime("%Y-%m-%d"), ed.strftime("%Y-%m-%d"))
+            if df is not None and len(df) > 0:
+                col = "Adj Close" if "Adj Close" in df.columns else "Close"
+                s = pd.to_numeric(df[col], errors="coerce")
+                s.index = pd.to_datetime(s.index)
+                s = s.dropna().sort_index()
+                s = s[~s.index.duplicated(keep="last")]
+                if len(s) > 0:
+                    s.name = asset_id
+                    return s, "FDR " + col, c
+        except Exception:
+            pass
+        # Naver backup
+        try:
+            s = _bt_load_naver_close_series(c, start_date, end_date, lookback_days=max(lookback_days, 430))
+            if len(s) > 0:
+                s.name = asset_id
+                return s, "Naver Close", c
+        except Exception:
+            pass
+    return pd.Series(dtype=float, name=asset_id), "실패", "|".join(codes)
+
+
+def _taa_asset_label_v49(asset_id):
+    if asset_id in US_TAA_ASSETS_V49:
+        return US_TAA_ASSETS_V49[asset_id].get("label", asset_id)
+    if asset_id in KR_TAA_ASSETS_V49:
+        return KR_TAA_ASSETS_V49[asset_id].get("label", asset_id)
+    return str(asset_id)
+
+
+def _taa_build_price_table_v49(asset_ids, start_date, end_date, cash_annual_rate=3.0):
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    all_index = None
+    series_map = {}
+    status_rows = []
+    for aid in sorted(set([str(x).strip() for x in asset_ids if str(x).strip()])):
+        if aid in {"CASH", "KR_CASH"}:
+            status_rows.append({"자산ID": aid, "자산명": _taa_asset_label_v49(aid), "시장": "CASH", "상태": "성공", "사용코드": "CASH", "소스": "연3% 일복리 프록시", "시작일": start_dt.date(), "종료일": end_dt.date(), "사용가능일수": "전체"})
+            continue
+        if aid.startswith("KR_"):
+            s, src, used = _taa_load_kr_series_v49(aid, start_dt, end_dt)
+            market = "KR Proxy"
+        else:
+            ticker = US_TAA_ASSETS_V49.get(aid, {}).get("ticker", aid)
+            s, src = _taa_load_us_series_v49(ticker, start_dt, end_dt)
+            used = ticker
+            market = "US Exact"
+        if len(s) > 0:
+            series_map[aid] = s
+            all_index = s.index if all_index is None else all_index.union(s.index)
+            status_rows.append({"자산ID": aid, "자산명": _taa_asset_label_v49(aid), "시장": market, "상태": "성공", "사용코드": used, "소스": src, "시작일": s.index.min().date(), "종료일": s.index.max().date(), "사용가능일수": len(s)})
+        else:
+            status_rows.append({"자산ID": aid, "자산명": _taa_asset_label_v49(aid), "시장": market, "상태": "실패", "사용코드": used, "소스": src, "시작일": "", "종료일": "", "사용가능일수": 0})
+    if all_index is None or len(all_index) == 0:
+        all_index = pd.date_range(start_dt, end_dt, freq="B")
+    all_index = pd.DatetimeIndex(sorted(pd.to_datetime(all_index.unique())))
+    all_index = all_index[(all_index >= start_dt) & (all_index <= end_dt)]
+    if len(all_index) == 0:
+        all_index = pd.date_range(start_dt, end_dt, freq="B")
+    prices = pd.DataFrame(index=all_index)
+    for aid, s in series_map.items():
+        prices[aid] = s.reindex(all_index).ffill()
+    daily_rate = (1.0 + float(cash_annual_rate) / 100.0) ** (1.0 / 252.0) - 1.0
+    cash = pd.Series(np.cumprod(np.repeat(1.0 + daily_rate, len(all_index))) * 100.0, index=all_index)
+    prices["CASH"] = cash
+    prices["KR_CASH"] = cash
+    return prices, pd.DataFrame(status_rows)
+
+
+def _taa_v49_monthly_close(prices):
+    if prices is None or len(prices) == 0:
+        return pd.DataFrame()
+    return prices.resample("ME").last().dropna(how="all")
+
+
+def _taa_v49_13612w(monthly, asof, code):
+    try:
+        s = pd.to_numeric(monthly[code], errors="coerce").dropna()
+        s = s[s.index <= asof]
+        if len(s) < 13:
+            return np.nan
+        p0, p1, p3, p6, p12 = float(s.iloc[-1]), float(s.iloc[-2]), float(s.iloc[-4]), float(s.iloc[-7]), float(s.iloc[-13])
+        if min(p1, p3, p6, p12) <= 0:
+            return np.nan
+        return 12.0 * (p0 / p1 - 1.0) + 4.0 * (p0 / p3 - 1.0) + 2.0 * (p0 / p6 - 1.0) + (p0 / p12 - 1.0)
+    except Exception:
+        return np.nan
+
+
+def _taa_v49_rel_mom(monthly, asof, code):
+    try:
+        s = pd.to_numeric(monthly[code], errors="coerce").dropna()
+        s = s[s.index <= asof]
+        if len(s) < 13:
+            return np.nan
+        vals = s.iloc[-13:]
+        avg = float(vals.mean())
+        p0 = float(vals.iloc[-1])
+        return p0 / avg - 1.0 if avg > 0 else np.nan
+    except Exception:
+        return np.nan
+
+
+def _taa_v49_weights_text(weights):
+    if not weights:
+        return ""
+    parts = []
+    for k, v in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):
+        if abs(v) > 1e-9:
+            parts.append(f"{k}({ _taa_asset_label_v49(k) }):{round(v*100,1)}%")
+    return " + ".join(parts)
+
+
+def _taa_v49_rank(scores):
+    return [k for k, v in sorted(scores.items(), key=lambda kv: (-999999 if pd.isna(kv[1]) else -kv[1], kv[0])) if not pd.isna(v)]
+
+
+def _taa_v49_signal_baa(monthly, asof, profile):
+    cash_id = profile.get("cash", "CASH")
+    canary = profile.get("canary", [])
+    offensive = profile.get("offensive", [])
+    defensive = profile.get("defensive", [])
+    top_o = int(profile.get("top_o", 1))
+    top_d = int(profile.get("top_d", 3))
+    can_mom = {c: _taa_v49_13612w(monthly, asof, c) for c in canary}
+    risk_on = all((not pd.isna(v)) and v > 0 for v in can_mom.values())
+    rel = {}
+    if risk_on:
+        rel = {c: _taa_v49_rel_mom(monthly, asof, c) for c in offensive}
+        picks = _taa_v49_rank(rel)[:top_o]
+        if not picks:
+            return {cash_id: 1.0}, "BAA_RISK_ON_NO_DATA", can_mom, rel
+        return {p: 1.0 / len(picks) for p in picks}, "BAA_RISK_ON", can_mom, rel
+    cash_rel = _taa_v49_rel_mom(monthly, asof, cash_id)
+    rel = {c: _taa_v49_rel_mom(monthly, asof, c) for c in defensive}
+    picks = _taa_v49_rank(rel)[:top_d]
+    if not picks:
+        return {cash_id: 1.0}, "BAA_DEF_NO_DATA", can_mom, rel
+    weights = {}
+    for p in picks:
+        target = p
+        if p != cash_id and (not pd.isna(cash_rel)) and (not pd.isna(rel.get(p))) and rel.get(p) < cash_rel:
+            target = cash_id
+        weights[target] = weights.get(target, 0.0) + 1.0 / len(picks)
+    return weights, "BAA_DEFENSIVE", can_mom, rel
+
+
+def _taa_v49_signal_vaa(monthly, asof, profile):
+    cash_id = profile.get("cash", "CASH")
+    offensive = profile.get("offensive", [])
+    defensive = profile.get("defensive", [])
+    mom_o = {c: _taa_v49_13612w(monthly, asof, c) for c in offensive}
+    risk_on = all((not pd.isna(v)) and v > 0 for v in mom_o.values())
+    if risk_on:
+        ranked = _taa_v49_rank(mom_o)
+        pick = ranked[0] if ranked else cash_id
+        return {pick: 1.0}, "VAA_RISK_ON", mom_o
+    mom_d = {c: _taa_v49_13612w(monthly, asof, c) for c in defensive}
+    ranked = _taa_v49_rank(mom_d)
+    pick = ranked[0] if ranked else cash_id
+    return {pick: 1.0}, "VAA_DEFENSIVE", {**mom_o, **mom_d}
+
+
+def _taa_v49_generate_signals(prices, strategy):
+    profile = TAA_PROFILES_V49[strategy]
+    monthly = _taa_v49_monthly_close(prices)
+    rows = []
+    if monthly is None or len(monthly) < 14:
+        return pd.DataFrame()
+    for asof in monthly.index:
+        if profile.get("kind") == "VAA":
+            weights, mode, mom = _taa_v49_signal_vaa(monthly, asof, profile)
+            rel = {}
+        else:
+            weights, mode, mom, rel = _taa_v49_signal_baa(monthly, asof, profile)
+        rows.append({
+            "신호일": asof,
+            "전략": strategy,
+            "모드": mode,
+            "보유자산": _taa_v49_weights_text(weights),
+            "weights": weights,
+            "음수모멘텀수": int(sum(1 for v in mom.values() if (not pd.isna(v)) and v <= 0)),
+            "모멘텀요약": "; ".join([f"{k}:{round(float(v),4)}" for k, v in mom.items() if not pd.isna(v)]),
+            "상대모멘텀요약": "; ".join([f"{k}:{round(float(v),4)}" for k, v in rel.items() if not pd.isna(v)]),
+        })
+    return pd.DataFrame(rows)
+
+
+def _taa_v49_backtest_from_signals(prices, signals, initial_cash=100_000_000, fee_rate=0.001):
+    if prices is None or len(prices) == 0:
+        return pd.DataFrame(), pd.DataFrame(), {"오류": "가격데이터 없음"}
+    if signals is None or len(signals) == 0:
+        return pd.DataFrame(), pd.DataFrame(), {"오류": "신호데이터 없음"}
+    prices = prices.copy().sort_index().ffill()
+    rets = prices.pct_change().fillna(0.0)
+    daily_index = prices.index
+    sig = signals.copy().sort_values("신호일")
+    change_points = []
+    for _, r in sig.iterrows():
+        sdate = pd.to_datetime(r["신호일"])
+        # 월말 종가 신호 → 다음 거래일부터 반영. 미래정보 없음.
+        pos = daily_index.searchsorted(sdate, side="right")
+        if pos < len(daily_index):
+            change_points.append((pos, dict(r["weights"]), str(r["보유자산"]), str(r["모드"]), sdate))
+    change_points = sorted(change_points, key=lambda x: x[0])
+    asset = float(initial_cash)
+    cur_weights = {"CASH": 1.0}
+    cur_hold_text = "CASH(CASH/BIL 프록시):100%"
+    cur_mode = "WAIT_LOOKBACK"
+    prev_weights = cur_weights.copy()
+    next_i = 0
+    rows, rebal_rows = [], []
+    for i, dt in enumerate(daily_index):
+        changed = False
+        while next_i < len(change_points) and change_points[next_i][0] == i:
+            cur_weights = dict(change_points[next_i][1])
+            cur_hold_text = change_points[next_i][2]
+            cur_mode = change_points[next_i][3]
+            turnover = sum(abs(cur_weights.get(k, 0.0) - prev_weights.get(k, 0.0)) for k in set(cur_weights) | set(prev_weights))
+            if turnover > 0:
+                asset *= (1.0 - float(fee_rate) * turnover)
+            rebal_rows.append({"리밸런싱일": dt.date(), "신호일": change_points[next_i][4].date(), "전략모드": cur_mode, "보유자산": cur_hold_text, "턴오버": round(turnover, 4)})
+            prev_weights = cur_weights.copy()
+            changed = True
+            next_i += 1
+        day_ret = 0.0
+        for code, w in cur_weights.items():
+            col = code if code in rets.columns else ("CASH" if "CASH" in rets.columns else None)
+            if col:
+                day_ret += float(w) * float(rets.at[dt, col])
+        asset *= (1.0 + day_ret)
+        rows.append({"기준일": dt.date(), "전략총자산": round(asset), "일수익률": day_ret, "보유자산": cur_hold_text, "전략모드": cur_mode, "리밸런싱": "Y" if changed else ""})
+    daily = pd.DataFrame(rows)
+    rebal = pd.DataFrame(rebal_rows)
+    summary = _taa_summary_metrics(daily, initial_cash=initial_cash)
+    summary["리밸런싱횟수"] = int(len(rebal))
+    summary["마지막보유자산"] = str(daily["보유자산"].iloc[-1]) if len(daily) else ""
+    summary["CASH100일수"] = int(daily["보유자산"].astype(str).str.contains("CASH").sum()) if len(daily) else 0
+    return daily, rebal, summary
+
+
+def run_baa_vaa_backtests(start_date, end_date, initial_cash=100_000_000, cash_annual_rate=3.0, fee_rate=0.001, include_balanced=False, include_kr_proxy=False, include_us_exact=True):
+    strategies = []
+    if include_us_exact:
+        strategies += ["BAA Aggressive Exact US", "VAA G4 Exact US"]
+        if include_balanced:
+            strategies.append("BAA Balanced Exact US")
+    if include_kr_proxy:
+        strategies += ["BAA Aggressive KR Proxy", "VAA G4 KR Proxy"]
+        if include_balanced:
+            strategies.append("BAA Balanced KR Proxy")
+    if not strategies:
+        strategies = ["BAA Aggressive Exact US", "VAA G4 Exact US"]
+    assets = set()
+    for strat in strategies:
+        prof = TAA_PROFILES_V49[strat]
+        for key in ["canary", "offensive", "defensive"]:
+            assets |= set(prof.get(key, []))
+        assets.add(prof.get("cash", "CASH"))
+    prices, status = _taa_build_price_table_v49(assets, start_date, end_date, cash_annual_rate=cash_annual_rate)
+    summary_rows, daily_map, signal_map, rebal_map = [], {}, {}, {}
+    for strat in strategies:
+        sig = _taa_v49_generate_signals(prices, strat)
+        daily, rebal, summ = _taa_v49_backtest_from_signals(prices, sig, initial_cash=initial_cash, fee_rate=fee_rate)
+        summ["전략"] = strat
+        summ["구분"] = "한국ETF프록시" if "KR Proxy" in strat else "미국원규칙"
+        summ["7천만환산최종자산"] = round(summ.get("최종자산", 0) * 0.7) if not summ.get("오류") else 0
+        summary_rows.append(summ)
+        daily_map[strat] = daily
+        signal_map[strat] = sig.drop(columns=["weights"], errors="ignore") if sig is not None and len(sig) else pd.DataFrame()
+        rebal_map[strat] = rebal
+    summary = pd.DataFrame(summary_rows)
+    if len(summary) > 0 and "전략" in summary.columns:
+        cols = ["구분", "전략", "시작일", "종료일", "최종자산", "총수익률", "CAGR", "MDD", "최악하루", "최악3일", "최악10일", "최장회복기간", "MDD고점일", "MDD저점일", "MDD회복일", "MDD회복거래일", "리밸런싱횟수", "CASH100일수", "마지막보유자산", "7천만환산최종자산"]
+        summary = summary[[c for c in cols if c in summary.columns] + [c for c in summary.columns if c not in cols]]
+    return summary, daily_map, signal_map, rebal_map, status
+
 menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 실전 보유장부", "9. 도움말"])
 
 # =====================================================
@@ -11614,21 +12050,24 @@ elif menu == "6. 섹터전략 백테스트":
 
 
 
-        st.subheader("1-0-2) BAA / VAA 동적자산배분 백테스트")
-        bv1, bv2, bv3, bv4 = st.columns(4)
+        st.subheader("1-0-2) BAA / VAA 정확형 + 한국 ETF 프록시 백테스트")
+        bv1, bv2, bv3, bv4, bv5 = st.columns(5)
         with bv1:
-            baa_vaa_initial = st.number_input("BAA/VAA 총자금", min_value=1_000_000, max_value=10_000_000_000, value=int(initial_cash), step=1_000_000, format="%d", key="bt_baa_vaa_initial")
+            baa_vaa_initial = st.number_input("BAA/VAA 총자금", min_value=1_000_000, max_value=10_000_000_000, value=int(initial_cash), step=1_000_000, format="%d", key="bt_baa_vaa_initial_v49")
         with bv2:
-            baa_vaa_fee = st.number_input("BAA/VAA 리밸런싱 비용률", min_value=0.0, max_value=0.01, value=0.001, step=0.001, format="%.3f", key="bt_baa_vaa_fee")
+            baa_vaa_fee = st.number_input("BAA/VAA 리밸런싱 비용률", min_value=0.0, max_value=0.01, value=0.001, step=0.001, format="%.3f", key="bt_baa_vaa_fee_v49")
         with bv3:
-            include_baa_balanced = st.checkbox("BAA Balanced도 같이", value=False, key="bt_baa_include_balanced")
+            include_baa_balanced = st.checkbox("BAA Balanced도 같이", value=True, key="bt_baa_include_balanced_v49")
         with bv4:
-            st.caption("BAA Aggressive와 VAA-G4를 월말 리밸런싱으로 계산합니다. BIL/SHY는 CASH 프록시로 처리합니다.")
-        st.caption("BAA: Canary(SPY/EEM/EFA/AGG) 13612W가 모두 양수면 공격자산, 하나라도 음수면 방어자산으로 전환합니다. VAA-G4: SPY/EFA/EEM/AGG 중 하나라도 음수면 방어자산으로 이동합니다.")
+            include_us_exact = st.checkbox("미국 원규칙", value=True, key="bt_baa_include_us_exact_v49")
+        with bv5:
+            include_kr_proxy = st.checkbox("한국 ETF 프록시", value=True, key="bt_baa_include_kr_proxy_v49")
+        st.caption("미국 원규칙은 Yahoo Adj Close를 우선 사용하고, 월말 신호를 다음 거래일부터 반영합니다. 한국 ETF 프록시는 국내 상장 ETF 대체자산이라 정확 복제본이 아니라 별도 비교용입니다.")
+        st.caption("BAA: Canary(SPY/EEM/EFA/AGG) 13612W가 모두 양수면 공격자산, 하나라도 음수면 방어자산. VAA-G4: SPY/EFA/EEM/AGG breadth momentum 기준 방어 전환.")
 
-        if st.button("BAA/VAA 빠른 백테스트 실행", type="secondary", key="run_baa_vaa_backtest_fast"):
+        if st.button("BAA/VAA 정확형 빠른 백테스트 실행", type="secondary", key="run_baa_vaa_backtest_fast_v49"):
             try:
-                with st.spinner("BAA/VAA 미국 ETF 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
+                with st.spinner("BAA/VAA 미국 원규칙 + 한국 ETF 프록시 데이터 조회 및 월말 리밸런싱 백테스트 중..."):
                     bv_summary, bv_daily_map, bv_signal_map, bv_rebal_map, bv_status = run_baa_vaa_backtests(
                         start_date=start_date,
                         end_date=end_date,
@@ -11636,8 +12075,10 @@ elif menu == "6. 섹터전략 백테스트":
                         cash_annual_rate=bunker_cash_rate,
                         fee_rate=baa_vaa_fee,
                         include_balanced=include_baa_balanced,
+                        include_kr_proxy=include_kr_proxy,
+                        include_us_exact=include_us_exact,
                     )
-                st.success("BAA/VAA 백테스트 완료")
+                st.success("BAA/VAA 정확형 백테스트 완료")
                 st.dataframe(bv_summary, use_container_width=True, hide_index=True)
                 with st.expander("BAA/VAA 데이터 상태", expanded=False):
                     st.dataframe(bv_status, use_container_width=True, hide_index=True)
