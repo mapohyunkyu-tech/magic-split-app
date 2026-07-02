@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v61_T100_HYBRID_LIVE_AUTO_70_30_20260702"
+APP_VERSION = "v62_T100_HYBRID_LIVE_AUTO_CAP_SIGNAL_20260702"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -9915,7 +9915,7 @@ except Exception as e:
 
 
 # =====================================================
-# 7-1. T100 하이브리드 1↔3 운용모드 v61
+# 7-1. T100 하이브리드 1↔3 운용모드 v62
 # =====================================================
 
 def _fmt_won(v):
@@ -9925,9 +9925,9 @@ def _fmt_won(v):
         return str(v)
 
 
-def _t100_hybrid_live_operation_v61():
+def _t100_hybrid_live_operation_v62():
     st.header("7-1. T100 HYBRID 1↔3 운용모드")
-    st.caption("v61: 계좌 예수금은 계산에서 제외하고, T100 평가금액 + 전략 CASH만으로 70/30·60/40 목표금액을 자동 계산합니다.")
+    st.caption("v62: CAP5/5일누적 방어 신호를 체크박스로 넣지 않습니다. 전일·5거래일 전 운용기준금액으로 앱이 자동 계산합니다.")
 
     with st.expander("운용 기준 먼저 보기", expanded=True):
         st.markdown("""
@@ -9935,20 +9935,22 @@ def _t100_hybrid_live_operation_v61():
 - **1순위 방어모드**: T100 70%, 전략 CASH 30%
 - **3순위 6310 잠금모드**: T100 60%, 전략 CASH 40%
 - **계좌 예수금 메모**는 계산에서 제외합니다. 계좌에 남아 있는 별도 현금 600만 원은 여기만 넣으세요.
-- 목표금액은 **현재 T100 평가금액 + 전략 CASH/방어현금** 기준으로 자동 계산합니다. 1,150만 원이면 70/30은 자동으로 805만 / 345만입니다.
+- 목표금액은 **현재 T100 평가금액 + 전략 CASH/방어현금** 기준으로 자동 계산합니다.
+- CAP5/5일 누적 방어는 네가 체크하는 게 아니라, **오늘 운용기준금액 / 전일 운용기준금액 / 5거래일 전 운용기준금액**으로 자동 판정합니다.
 """)
 
-    # v59/v60에서 저장된 값이 남아 혼동되는 문제 방지용 새 key 사용.
     defaults = {
-        "t100_v61_base_amount": 10_000_000,
-        "t100_v61_current_t100": 10_000_000,
-        "t100_v61_strategy_cash": 0,
-        "t100_v61_memo_cash": 0,
-        "t100_v61_lock_base": 10_000_000,
-        "t100_v61_mode": "1순위 공격모드",
-        "t100_v61_assets": ["KODEX200", "NASDAQ100"],
+        "t100_v62_base_amount": 10_000_000,
+        "t100_v62_current_t100": 10_000_000,
+        "t100_v62_strategy_cash": 0,
+        "t100_v62_memo_cash": 0,
+        "t100_v62_lock_base": 10_000_000,
+        "t100_v62_prev_basis": 10_000_000,
+        "t100_v62_five_basis": 10_000_000,
+        "t100_v62_mode": "1순위 공격모드",
+        "t100_v62_assets": ["KODEX200", "NASDAQ100"],
     }
-    if st.button("천만원 실험값으로 초기화", key="t100_v61_reset_10m"):
+    if st.button("천만원 실험값으로 초기화", key="t100_v62_reset_10m"):
         for k, v in defaults.items():
             st.session_state[k] = v
         st.success("천만원 실험값으로 초기화했습니다. 목표금액은 T100 1,000만 / CASH 0으로 계산됩니다.")
@@ -9960,22 +9962,75 @@ def _t100_hybrid_live_operation_v61():
     st.subheader("1) 현재 계좌 상태 입력")
     c1, c2 = st.columns(2)
     with c1:
-        base_amount = st.number_input("실험/운용 원금 메모", min_value=0, value=int(st.session_state.get("t100_v61_base_amount", 10_000_000)), step=100_000, key="t100_v61_base_amount")
-        current_t100 = st.number_input("현재 T100 평가금액", min_value=0, value=int(st.session_state.get("t100_v61_current_t100", 10_000_000)), step=100_000, key="t100_v61_current_t100")
-        strategy_cash = st.number_input("전략 CASH/방어현금", min_value=0, value=int(st.session_state.get("t100_v61_strategy_cash", 0)), step=100_000, key="t100_v61_strategy_cash")
+        base_amount = st.number_input("실험/운용 원금 메모", min_value=0, value=int(st.session_state.get("t100_v62_base_amount", 10_000_000)), step=100_000, key="t100_v62_base_amount")
+        current_t100 = st.number_input("현재 T100 평가금액", min_value=0, value=int(st.session_state.get("t100_v62_current_t100", 10_000_000)), step=100_000, key="t100_v62_current_t100")
+        strategy_cash = st.number_input("전략 CASH/방어현금", min_value=0, value=int(st.session_state.get("t100_v62_strategy_cash", 0)), step=100_000, key="t100_v62_strategy_cash")
     with c2:
-        memo_cash = st.number_input("계좌 예수금 메모 · 계산 제외", min_value=0, value=int(st.session_state.get("t100_v61_memo_cash", 0)), step=100_000, key="t100_v61_memo_cash")
-        lock_base = st.number_input("직전 잠금 기준금액", min_value=1, value=int(st.session_state.get("t100_v61_lock_base", 10_000_000)), step=100_000, key="t100_v61_lock_base")
-        mode = st.selectbox("현재 운용모드", ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"], index=["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"].index(st.session_state.get("t100_v61_mode", "1순위 공격모드")) if st.session_state.get("t100_v61_mode", "1순위 공격모드") in ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"] else 1, key="t100_v61_mode")
+        memo_cash = st.number_input("계좌 예수금 메모 · 계산 제외", min_value=0, value=int(st.session_state.get("t100_v62_memo_cash", 0)), step=100_000, key="t100_v62_memo_cash")
+        lock_base = st.number_input("직전 잠금 기준금액", min_value=1, value=int(st.session_state.get("t100_v62_lock_base", 10_000_000)), step=100_000, key="t100_v62_lock_base")
+        mode_list = ["자동판정", "1순위 공격모드", "1순위 방어모드", "3순위 6310 잠금모드"]
+        mode_default = st.session_state.get("t100_v62_mode", "1순위 공격모드")
+        mode = st.selectbox("현재 운용모드", mode_list, index=mode_list.index(mode_default) if mode_default in mode_list else 1, key="t100_v62_mode")
 
     strategy_total = float(current_t100) + float(strategy_cash)
     account_total_memo = strategy_total + float(memo_cash)
     lock_return = (strategy_total / float(lock_base) - 1.0) if float(lock_base) > 0 else 0.0
-    lock_possible = lock_return >= 0.50
 
     if memo_cash > 0:
         st.info(f"계좌 예수금 메모 {_fmt_won(memo_cash)}는 계산에서 제외합니다. 운용 계산 기준은 T100 + 전략 CASH = {_fmt_won(strategy_total)}입니다.")
 
+    st.subheader("2) 규칙 설정")
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        defense_t100_ratio = st.number_input("방어모드 T100 비중%", min_value=0.0, max_value=100.0, value=70.0, step=5.0, key="t100_v62_defense_ratio") / 100.0
+    with r2:
+        split_t100_ratio = st.number_input("6310 T100 비중%", min_value=0.0, max_value=100.0, value=60.0, step=5.0, key="t100_v62_split_ratio") / 100.0
+    with r3:
+        lock_trigger = st.number_input("6310 전환 수익률%", min_value=0.0, max_value=300.0, value=50.0, step=5.0, key="t100_v62_lock_trigger") / 100.0
+    with r4:
+        st.number_input("6310 최소 유지일", min_value=0, max_value=300, value=60, step=5, key="t100_v62_min_days")
+
+    rr1, rr2 = st.columns(2)
+    with rr1:
+        daily_cap_trigger = st.number_input("하루 손실 방어 기준%", min_value=-50.0, max_value=0.0, value=-5.0, step=0.5, key="t100_v62_daily_cap") / 100.0
+    with rr2:
+        five_day_trigger = st.number_input("5거래일 누적손실 방어 기준%", min_value=-50.0, max_value=0.0, value=-6.0, step=0.5, key="t100_v62_five_cap") / 100.0
+
+    st.subheader("3) 위험 신호 자동계산")
+    st.caption("여기서 CAP 신호를 체크하지 않습니다. 전일/5거래일 전 운용기준금액을 넣으면 앱이 자동으로 방어 여부를 계산합니다. 값을 모르면 현재 운용기준금액과 같게 두면 신호 없음으로 봅니다.")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        prev_basis = st.number_input("전일 운용기준금액", min_value=1, value=int(st.session_state.get("t100_v62_prev_basis", max(1, int(round(strategy_total))))), step=100_000, key="t100_v62_prev_basis")
+    with s2:
+        five_basis = st.number_input("5거래일 전 운용기준금액", min_value=1, value=int(st.session_state.get("t100_v62_five_basis", max(1, int(round(strategy_total))))), step=100_000, key="t100_v62_five_basis")
+    with s3:
+        already_6310 = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_v62_already_6310")
+
+    day_ret = (strategy_total / float(prev_basis) - 1.0) if float(prev_basis) > 0 else 0.0
+    five_ret = (strategy_total / float(five_basis) - 1.0) if float(five_basis) > 0 else 0.0
+    daily_hit = day_ret <= daily_cap_trigger
+    five_hit = five_ret <= five_day_trigger
+    risk_signal = bool(daily_hit or five_hit)
+
+    q1, q2, q3 = st.columns(3)
+    q1.metric("하루 변동률", f"{day_ret*100:.2f}%")
+    q2.metric("5거래일 변동률", f"{five_ret*100:.2f}%")
+    q3.metric("자동 방어신호", "ON" if risk_signal else "OFF")
+    if risk_signal:
+        reasons = []
+        if daily_hit:
+            reasons.append(f"하루 {day_ret*100:.2f}% ≤ {daily_cap_trigger*100:.1f}%")
+        if five_hit:
+            reasons.append(f"5일 {five_ret*100:.2f}% ≤ {five_day_trigger*100:.1f}%")
+        st.warning("자동 방어신호 ON: " + " / ".join(reasons))
+    else:
+        st.info("자동 방어신호 OFF: 현재는 1순위 공격 유지 조건입니다.")
+
+    st.subheader("4) 복귀/잠금 상태")
+    st.caption("복귀는 6310 또는 방어모드에 들어간 뒤에만 확인합니다. 평소 1순위 공격모드에서는 건드릴 필요 없습니다.")
+    recovery_signal = st.checkbox("방어/6310 복귀 조건 충족", value=False, key="t100_v62_recovery_signal")
+
+    lock_possible = lock_return >= lock_trigger
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("운용 계산 기준", _fmt_won(strategy_total))
     m2.metric("계좌총액 메모", _fmt_won(account_total_memo))
@@ -9984,26 +10039,6 @@ def _t100_hybrid_live_operation_v61():
 
     if abs(float(base_amount) - float(strategy_total)) > 1:
         st.warning(f"실험/운용 원금 메모는 {_fmt_won(base_amount)}이고, 실제 운용 계산 기준은 {_fmt_won(strategy_total)}입니다. 수익률 판단은 직전 잠금 기준금액 대비 T100+전략CASH로 계산합니다.")
-
-    st.subheader("2) 규칙 설정")
-    r1, r2, r3, r4 = st.columns(4)
-    with r1:
-        defense_t100_ratio = st.number_input("방어모드 T100 비중%", min_value=0.0, max_value=100.0, value=70.0, step=5.0, key="t100_v61_defense_ratio") / 100.0
-    with r2:
-        split_t100_ratio = st.number_input("6310 T100 비중%", min_value=0.0, max_value=100.0, value=60.0, step=5.0, key="t100_v61_split_ratio") / 100.0
-    with r3:
-        lock_trigger = st.number_input("6310 전환 수익률%", min_value=0.0, max_value=300.0, value=50.0, step=5.0, key="t100_v61_lock_trigger") / 100.0
-    with r4:
-        st.number_input("6310 최소 유지일", min_value=0, max_value=300, value=60, step=5, key="t100_v61_min_days")
-
-    st.subheader("3) 오늘 신호 입력")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        risk_signal = st.checkbox("CAP5 또는 5일 누적 -6% 방어 신호", value=False, key="t100_v61_risk_signal")
-    with s2:
-        recovery_signal = st.checkbox("방어/6310 복귀 조건 충족", value=False, key="t100_v61_recovery_signal")
-    with s3:
-        already_6310 = st.checkbox("이미 6310 잠금에 진입한 계좌", value=False, key="t100_v61_already_6310")
 
     # 운용모드 판정
     reason = ""
@@ -10021,18 +10056,17 @@ def _t100_hybrid_live_operation_v61():
             reason = f"자동판정: 잠금 기준 대비 +{lock_return*100:.2f}% → 6310 전환"
         elif risk_signal:
             effective_mode = "1순위 방어모드"
-            reason = "자동판정: CAP5/5일 누적 방어 신호 → 70/30 방어"
+            reason = "자동판정: 자동 방어신호 ON → 70/30 방어"
         else:
             effective_mode = "1순위 공격모드"
             reason = "자동판정: 위험/잠금 신호 없음 → 1순위 공격"
     else:
-        # 수동 선택은 존중한다. 단, 6310 수동 선택은 조건 미달이면 차단.
         if mode == "3순위 6310 잠금모드" and (not already_6310) and (lock_return < lock_trigger):
-            effective_mode = "1순위 공격모드" if not risk_signal else "1순위 방어모드"
+            effective_mode = "1순위 방어모드" if risk_signal else "1순위 공격모드"
             reason = f"수동 6310 선택했지만 잠금 조건(+{lock_trigger*100:.0f}%) 미달 → 6310 차단"
         elif mode == "1순위 공격모드" and risk_signal:
             effective_mode = "1순위 방어모드"
-            reason = "수동 1순위지만 위험 신호가 켜져 있어 70/30 방어로 계산"
+            reason = "수동 1순위지만 자동 방어신호 ON → 70/30 방어로 계산"
         else:
             effective_mode = f"{mode}"
             if lock_return >= lock_trigger and mode == "1순위 공격모드":
@@ -10055,22 +10089,22 @@ def _t100_hybrid_live_operation_v61():
     diff_t100 = target_t100_amount - float(current_t100)
     diff_cash = target_cash_amount - float(strategy_cash)
 
-    st.subheader("4) 오늘 판정")
+    st.subheader("5) 오늘 판정")
     p1, p2, p3 = st.columns(3)
     p1.metric("오늘 운용모드", effective_mode)
     p2.metric("목표 T100", f"{target_t100_ratio*100:.1f}%")
     p3.metric("목표 CASH", f"{target_cash_ratio*100:.1f}%")
-    if "차단" in reason:
+    if "차단" in reason or risk_signal:
         st.warning(reason)
     elif "가능권" in reason:
         st.info(reason)
     else:
         st.success(reason)
 
-    st.subheader("5) 오늘 목표 자산배분")
+    st.subheader("6) 오늘 목표 자산배분")
     all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR", "CASH"]
-    default_assets = st.session_state.get("t100_v61_assets", ["KODEX200", "NASDAQ100"])
-    t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v61_assets")
+    default_assets = st.session_state.get("t100_v62_assets", ["KODEX200", "NASDAQ100"])
+    t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v62_assets")
     if len(t100_assets) == 0:
         t100_assets = ["CASH"]
 
@@ -10083,15 +10117,21 @@ def _t100_hybrid_live_operation_v61():
     if target_cash_amount > 0 or effective_mode != "1순위 공격모드":
         rows.append({"구분": "전략CASH", "자산": "CASH", "목표비중%": round(target_cash_ratio * 100, 2), "목표금액": int(round(target_cash_amount)), "비고": "방어/잠금 현금"})
     target_df = pd.DataFrame(rows)
-    _ = show_pinned_dataframe(target_df, height=240, pin_rank=False) if 'show_pinned_dataframe' in globals() else st.dataframe(target_df, use_container_width=True)
+    if 'show_pinned_dataframe' in globals():
+        _ = show_pinned_dataframe(target_df, height=240, pin_rank=False)
+    else:
+        _ = st.dataframe(target_df, use_container_width=True)
 
-    st.subheader("6) 현재금액 대비 리밸런싱")
+    st.subheader("7) 현재금액 대비 리밸런싱")
     rebalance_df = pd.DataFrame([
         {"항목": "T100 총노출", "현재금액": int(round(current_t100)), "목표금액": int(round(target_t100_amount)), "차이_매수양수_매도음수": int(round(diff_t100)), "해야할일": "추가매수" if diff_t100 > 1000 else ("일부매도" if diff_t100 < -1000 else "대기")},
         {"항목": "전략 CASH/방어현금", "현재금액": int(round(strategy_cash)), "목표금액": int(round(target_cash_amount)), "차이_매수양수_매도음수": int(round(diff_cash)), "해야할일": "현금확보" if diff_cash > 1000 else ("현금투입" if diff_cash < -1000 else "대기")},
         {"항목": "계좌 예수금 메모", "현재금액": int(round(memo_cash)), "목표금액": 0, "차이_매수양수_매도음수": 0, "해야할일": "계산제외"},
     ])
-    _ = show_pinned_dataframe(rebalance_df, height=180, pin_rank=False) if 'show_pinned_dataframe' in globals() else st.dataframe(rebalance_df, use_container_width=True)
+    if 'show_pinned_dataframe' in globals():
+        _ = show_pinned_dataframe(rebalance_df, height=180, pin_rank=False)
+    else:
+        _ = st.dataframe(rebalance_df, use_container_width=True)
 
     if diff_t100 < -1000:
         st.error(f"T100을 약 {_fmt_won(abs(diff_t100))} 줄여서 전략 CASH를 확보하세요.")
@@ -12264,7 +12304,7 @@ elif menu == "7. 실전 운영판":
 # =====================================================
 
 elif menu == "7-1. T100 하이브리드 운용모드":
-    _t100_hybrid_live_operation_v61()
+    _t100_hybrid_live_operation_v62()
 
 elif menu == "8. 실전 보유장부":
     st.header("8. 실전 보유장부")
