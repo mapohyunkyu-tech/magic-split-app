@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v67_T100_EXTENDED_SP500_BOND_BACKTEST_20260702"
+APP_VERSION = "v68_T100_EXTENDED_RESTORE_2010_FAST_LIVE_20260702"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6761,6 +6761,41 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
 
+
+def _bt_make_bunker_only_daily_df(start_date, end_date, total_initial=100_000_000, max_signal_days=None):
+    """방공호/Turbo 전용 빠른 백테스트용 daily_df를 만든다.
+
+    섹터 개별주 백테스트를 생략하고 기준일/총자산만 만든다.
+    T100/Turbo/073/064 계열은 build_bunker_7030_backtest가 자체 ETF 가격으로 계산한다.
+    """
+    try:
+        sd = pd.to_datetime(start_date)
+        ed = pd.to_datetime(end_date)
+        if sd >= ed:
+            return pd.DataFrame(columns=["기준일", "총자산"])
+        dates = []
+        try:
+            ss = _bt_load_naver_close_series("069500", sd, ed, lookback_days=5200)
+            if ss is not None and len(ss) > 0:
+                idx = pd.DatetimeIndex(pd.to_datetime(ss.index, errors="coerce")).dropna().sort_values().drop_duplicates()
+                idx = idx[(idx >= sd) & (idx <= ed)]
+                if len(idx) > 0 and idx.min() <= sd + pd.DateOffset(days=45):
+                    dates = [d.strftime("%Y-%m-%d") for d in idx]
+        except Exception:
+            dates = []
+        if not dates:
+            dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(sd, ed)]
+        if max_signal_days and len(dates) > int(max_signal_days):
+            dates = dates[-int(max_signal_days):]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
+    except Exception:
+        dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
+
 def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
     """KODEX200 숫자 기반 시장붕괴 차단 필터.
 
@@ -11537,10 +11572,11 @@ elif menu == "6. 섹터전략 백테스트":
                     "스트레스검증 720거래일",
                     "2021부터 전체검증",
                     "2020부터 전체검증",
+                    "2010부터 장기검증",
                     "사용자지정",
                 ],
-                index=6,
-                key="bt_period_preset",
+                index=7,
+                key="bt_period_preset_v68_restore_2010",
             )
         preset_days_map = {
             "빠른검증 60거래일": 60,
@@ -11550,31 +11586,38 @@ elif menu == "6. 섹터전략 백테스트":
             "스트레스검증 720거래일": 720,
             "2021부터 전체검증": 1500,
             "2020부터 전체검증": 1800,
+            "2010부터 장기검증": 4300,
         }
         preset_start_map = {
             "2021부터 전체검증": datetime(2021, 1, 4).date(),
             "2020부터 전체검증": datetime(2020, 1, 2).date(),
+            "2010부터 장기검증": datetime(2010, 1, 4).date(),
         }
         default_signal_days = preset_days_map.get(period_preset, 240)
         default_start_date = preset_start_map.get(
             period_preset,
             (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
         )
+        fixed_long_period = period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]
         with c1:
-            start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date")
+            if fixed_long_period:
+                start_date = default_start_date
+                st.text_input("시작일", value=str(start_date), disabled=True, key="bt_start_date_fixed_v68")
+            else:
+                start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date_v68")
         with c2:
-            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
+            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date_v68")
         with c3:
             max_signal_days = st.number_input(
-                "최대 검증 거래일",
+                "최대 검증 거래일 (2010용 최대 5000)",
                 min_value=5,
-                max_value=3000,
+                max_value=5000,
                 value=int(default_signal_days),
                 step=5,
-                key="bt_max_days",
+                key="bt_max_days_v68_5000_restore",
             )
-        if period_preset in ["2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2020/2021년부터 검증합니다. 개별 종목은 데이터가 생기는 날부터 자동 편입됩니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
+        if period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]:
+            st.info("장기검증 모드: 2010/2020/2021 시작일은 강제 고정합니다. T100/Turbo만 볼 때는 아래 '방공호/Turbo만 빠른 실행'을 먼저 누르세요. 섹터 개별주 백테스트 전체를 같이 돌리면 느리거나 중간에 끊길 수 있습니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -11878,6 +11921,94 @@ elif menu == "6. 섹터전략 백테스트":
                 "성장주붕괴필터": growth_collapse_mode,
             }
         ]), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 2010 장기검증 안전 실행")
+        st.caption("T100/Turbo/073/064만 확인할 때는 이 버튼을 먼저 쓰세요. 섹터 개별주 백테스트를 생략하고 ETF 방공호/Turbo만 바로 계산해서 훨씬 빠릅니다.")
+        if st.button("방공호/Turbo만 빠른 실행", type="secondary", key="run_bunker_turbo_only_v68"):
+            if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
+                st.error("시작일은 종료일보다 앞서야 합니다.")
+            else:
+                prog_b = st.progress(0)
+                status_b = st.empty()
+                try:
+                    status_b.caption("방공호/Turbo 전용 거래일 생성 중...")
+                    stub_daily_df = _bt_make_bunker_only_daily_df(
+                        start_date=str(start_date),
+                        end_date=str(end_date),
+                        total_initial=float(initial_cash),
+                        max_signal_days=int(max_signal_days),
+                    )
+                    prog_b.progress(0.25)
+                    status_b.caption(f"ETF 가격 조회 및 {bunker_mode} 계산 중... ({len(stub_daily_df):,}행)")
+                    bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
+                        stub_daily_df,
+                        total_initial=float(initial_cash),
+                        leader_ratio=float(leader_alloc_ratio) / 100.0,
+                        mode=bunker_mode,
+                        cash_annual_rate=bunker_cash_rate,
+                        cta_code=cta_code,
+                        cta_close_df=cta_close_df,
+                    )
+                    prog_b.progress(1.0)
+                    status_b.empty()
+                    prog_b.empty()
+                    if bunker_summary.get("오류"):
+                        st.error(f"방공호/Turbo 빠른 실행 실패: {bunker_summary.get('오류')}")
+                    else:
+                        st.success("방공호/Turbo 빠른 실행 완료")
+                        bunker_summary_df = pd.DataFrame([bunker_summary])
+                        q1, q2, q3, q4, q5 = st.columns(5)
+                        q1.metric("총수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
+                        q2.metric("최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
+                        q3.metric("연복리", f"{bunker_summary.get('연복리', 'N/A')}%")
+                        q4.metric("MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
+                        q5.metric("최악 하루", f"{bunker_summary.get('최악하루손실', 'N/A')}%")
+                        st.caption(f"실제검증 {bunker_daily_df['기준일'].iloc[0] if len(bunker_daily_df) else ''} ~ {bunker_daily_df['기준일'].iloc[-1] if len(bunker_daily_df) else ''} / 행수 {len(bunker_daily_df):,}")
+                        show_pinned_dataframe(bunker_summary_df, height=180)
+                        show_pinned_dataframe(bunker_daily_df.tail(120), height=320, pin_rank=False)
+                        mode_text = str(bunker_mode)
+                        mode_upper = mode_text.upper()
+                        if "T100" in mode_text and ("확장" in mode_text or "SP500" in mode_upper or "S&P" in mode_upper or "BOND" in mode_upper):
+                            tag = "T10_T100_TURBO_EXTENDED_SP500_BOND"
+                        elif "T100" in mode_text and ("프록시" in mode_text or "PROXY" in mode_upper):
+                            tag = "T10_T100_TURBO_NO_CTA_PROXY"
+                        elif "T100" in mode_text:
+                            tag = "T10_T100_TURBO_NO_CTA"
+                        elif "T90" in mode_text:
+                            tag = "T90_C10_TURBO_CTA"
+                        elif "T80" in mode_text:
+                            tag = "T80_C10_CASH10_TURBO"
+                        elif "T70" in mode_text:
+                            tag = "T70_D20_C10_TURBO"
+                        elif "064" in mode_text or "0/6/4" in mode_text:
+                            tag = "064_C10" if "C10" in mode_upper else "064"
+                        elif "073" in mode_text or "0/7/3" in mode_text:
+                            tag = "073_C10" if "C10" in mode_upper else "073"
+                        else:
+                            tag = "BUNKER_TURBO_ONLY"
+                        export_buffer = io.BytesIO()
+                        with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr(f"magic_split_bunker_{tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_bunker_{tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                            try:
+                                status_text = str(bunker_summary.get("방공호데이터상태", ""))
+                                if status_text:
+                                    rows_status = [{"상태": part} for part in status_text.split(" | ")]
+                                    zf.writestr(f"magic_split_bunker_{tag}_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                            except Exception:
+                                pass
+                        export_buffer.seek(0)
+                        st.download_button(
+                            "방공호/Turbo 빠른 실행 CSV 다운로드",
+                            data=export_buffer.getvalue(),
+                            file_name=f"magic_split_bunker_turbo_only_{tag}_{today_str()}.zip",
+                            mime="application/zip",
+                            key="download_bunker_turbo_only_v68",
+                        )
+                except Exception as e:
+                    prog_b.empty()
+                    status_b.empty()
+                    st.error(f"방공호/Turbo 빠른 실행 중 오류: {e}")
 
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
             if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
