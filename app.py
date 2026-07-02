@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v65_T100_HYBRID_LIVE_SIMPLE_3INPUT_20260702"
+APP_VERSION = "v67_T100_EXTENDED_SP500_BOND_BACKTEST_20260702"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6066,7 +6066,7 @@ def _bt_prepare_external_close_series(data, asset_name="CTA"):
     except Exception:
         return pd.Series(dtype=float)
 
-def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", gold_code="411060", dollar_code="261240", bond_code="114260|152380", cta_code="DBMF|KMLM|CTA", cta_close_df=None):
+def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", sp500_code="360750|379800|143850", gold_code="411060", dollar_code="261240", bond_code="114260|152380", cta_code="DBMF|KMLM|CTA", cta_close_df=None):
     """대장주 엔진 + 방공호/부스터 통합 백테스트.
 
     지원 모드
@@ -6087,7 +6087,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
     - Turbo 공격 ETF 전략: 기존 064-C10 오류본을 방공호가 아닌 공격전략으로 재정의한다.
       T10/T100 = Turbo 공격 ETF 엔진 100% / CTA 0%, T90-C10 = Turbo 90% + CTA 10%,
       T80-C10-CASH10 = Turbo 80% + CTA 10% + CASH 10%, T70-D20-C10 = Turbo 70% + 진짜방어 20% + CTA 10%.
-      Turbo 엔진은 KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 사용한다.
+      Turbo 기본 엔진은 KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 사용한다. 확장형은 S&P500/BOND까지 후보에 추가해 검증한다.
     - 5/3/2 생존형 복리: 50% 대장주 + 30% 진짜방공호 + 20% 공격형 듀얼부스터.
       매월 상위 5:3:2를 강제 리밸런싱하지 않고 각 칸 안에서 복리로 굴린다.
       분기 첫 거래일에 밴드만 점검한다.
@@ -6109,6 +6109,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
 
         mode_upper = mode.upper()
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
+        split_turbo_extended = split_turbo and (("확장" in mode) or ("SP500" in mode_upper) or ("S&P" in mode_upper) or ("BOND" in mode_upper))
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
@@ -6193,6 +6194,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
             {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
             {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
+            {"name": "SP500", "code": f"{sp500_code}|360750|379800|143850", "type": "asset", "market": "KR"},
             {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
             {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
             {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
@@ -6290,7 +6292,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                     for p in picks:
                         weights[p] = weights.get(p, 0.0) + w
             elif component_mode == "aggressive_dual":
-                cols = [c for c in ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR"] if price_df is not None and c in price_df.columns]
+                # v67: 기본 T100은 기존 5개 후보 유지. 확장형 모드에서만 S&P500/BOND 추가.
+                turbo_asset_pool = ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR"]
+                if split_turbo_extended:
+                    turbo_asset_pool = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND"]
+                cols = [c for c in turbo_asset_pool if price_df is not None and c in price_df.columns]
                 sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
                 asof = prev_date if prev_date is not None else date
                 picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
@@ -6735,12 +6741,12 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "기본자산시장": "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
             "CTA역할": "Turbo전략완충재" if split_turbo else "방공호내보완재_부스터아님",
-            "Turbo엔진허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR" if split_turbo else "",
+            "Turbo엔진허용자산": ("KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND" if split_turbo_extended else "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR") if split_turbo else "",
             "방공호허용자산": "CASH/GOLD/DOLLAR/BOND/CTA",
             "방공호금지자산": "KODEX200/KOSDAQ150/NASDAQ100/기타주식형ETF",
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
-            "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
+            "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, SP500 {sp500_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -9981,7 +9987,7 @@ def _get_t100_hybrid_prior_values_v63(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v65: 입력은 T100 투입원금 / 현재 T100 평가금액 / 계좌 예수금 3개 중심. 6310은 체크하면 6:3:1을 자동 계산합니다.")
+    st.caption("v66: 3개 입력 중심 + 목표금액을 실제 매수/매도 주수로 자동 환산합니다. 금액은 딱 맞추지 않고 남는 돈은 현금으로 둡니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10131,7 +10137,7 @@ def _t100_hybrid_live_operation_v63():
         st.info("현재 상태가 6310 변신 후 운용중이므로 6310 유지 계산을 합니다.")
 
     st.subheader("4) 오늘 결론")
-    all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR", "CASH"]
+    all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]
     default_assets = st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
     t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v65_assets")
     if not t100_assets:
@@ -10209,6 +10215,94 @@ def _t100_hybrid_live_operation_v63():
         _ = show_pinned_dataframe(target_df, height=240, pin_rank=False)
     else:
         _ = st.dataframe(target_df, use_container_width=True, height=240)
+
+    # v66: 목표금액을 실제 주문수량으로 자동 환산한다.
+    st.subheader("4-1) 실제 주문수량 계산")
+    st.caption("금액은 1주 단위 때문에 딱 맞지 않습니다. 앱은 목표금액을 넘기지 않도록 매수/매도 주수를 계산하고, 남는 금액은 현금으로 둡니다.")
+    code_map_v66 = {
+        "KODEX200": "069500",
+        "KOSDAQ150": "229200",
+        "NASDAQ100": "133690",
+        "SP500": "360750",
+        "GOLD": "411060",
+        "DOLLAR": "261240",
+        "CASH": "현금",
+    }
+    t100_target_rows = target_df[target_df["구분"].astype(str).eq("T100 내부자산")].copy() if len(target_df) else pd.DataFrame()
+    order_rows = []
+    if len(t100_target_rows) == 0:
+        st.info("T100 내부자산 목표가 없습니다.")
+    else:
+        st.markdown("현재가와 보유수량을 넣으면, 목표금액에 맞춰 **몇 주 사고/팔지** 계산합니다.")
+        for _, rr in t100_target_rows.iterrows():
+            asset = str(rr.get("자산", ""))
+            target_amt = float(rr.get("목표금액", 0) or 0)
+            code = code_map_v66.get(asset, "")
+            c1, c2, c3 = st.columns([1.1, 1.2, 1.2])
+            with c1:
+                st.write(f"**{asset}** `{code}`")
+                st.caption(f"목표금액 {_fmt_won(target_amt)}")
+            with c2:
+                price = st.number_input(f"{asset} 현재가", min_value=0, value=int(st.session_state.get(f"t100_v66_price_{asset}", 0)), step=10, key=f"t100_v66_price_{asset}")
+            with c3:
+                qty = st.number_input(f"{asset} 현재 보유수량", min_value=0, value=int(st.session_state.get(f"t100_v66_qty_{asset}", 0)), step=1, key=f"t100_v66_qty_{asset}")
+            current_amt = float(price) * float(qty)
+            diff = target_amt - current_amt
+            if float(price) <= 0:
+                action = "현재가 입력 필요"
+                order_qty = 0
+                order_amt = 0
+                after_qty = qty
+                after_amt = current_amt
+                gap = target_amt - after_amt
+            elif diff > 0:
+                order_qty = int(diff // float(price))
+                order_amt = order_qty * float(price)
+                after_qty = int(qty) + order_qty
+                after_amt = after_qty * float(price)
+                gap = target_amt - after_amt
+                action = "매수" if order_qty > 0 else "대기"
+            elif diff < 0:
+                order_qty = int(abs(diff) // float(price))
+                order_amt = order_qty * float(price)
+                after_qty = int(qty) - order_qty
+                after_amt = after_qty * float(price)
+                gap = target_amt - after_amt
+                action = "매도" if order_qty > 0 else "대기"
+            else:
+                action = "유지"
+                order_qty = 0
+                order_amt = 0
+                after_qty = qty
+                after_amt = current_amt
+                gap = 0
+            order_rows.append({
+                "자산": asset,
+                "코드": code,
+                "현재가": int(price),
+                "현재수량": int(qty),
+                "현재평가": int(round(current_amt)),
+                "목표금액": int(round(target_amt)),
+                "행동": action,
+                "주문수량": int(order_qty),
+                "예상주문금액": int(round(order_amt)),
+                "주문후수량": int(after_qty),
+                "주문후평가": int(round(after_amt)),
+                "목표대비잔차": int(round(gap)),
+            })
+        order_df = pd.DataFrame(order_rows)
+        if len(order_df):
+            show_cols = ["자산", "코드", "현재가", "현재수량", "현재평가", "목표금액", "행동", "주문수량", "예상주문금액", "주문후평가", "목표대비잔차"]
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(order_df[show_cols], height=240, pin_rank=False)
+            else:
+                _ = st.dataframe(order_df[show_cols], use_container_width=True, height=240)
+            cash_leftover = 0
+            try:
+                cash_leftover = int(order_df.loc[order_df["행동"].eq("매수"), "목표대비잔차"].clip(lower=0).sum())
+            except Exception:
+                cash_leftover = 0
+            st.caption(f"매수 후 목표에 못 맞춘 잔돈은 현금으로 남깁니다. 예상 잔돈 합계: {_fmt_won(cash_leftover)}")
 
     if mode_name == "6310 전환":
         reb_rows.append({"해야할일": "T100 매도", "금액": int(round(abs(sell_t100))), "설명": "매도 후 30%는 대기현금, 10%는 생활비/잠금현금"})
@@ -11519,6 +11613,7 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T10/T100 Turbo 확장형 SP500+BOND",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
@@ -11535,10 +11630,10 @@ elif menu == "6. 섹터전략 백테스트":
         with bk3:
             st.caption("073: 방어구역 70% + 부스터 30%. 부스터 35% 초과는 방공호 잠금, 40% 초과는 즉시 잠금.")
             st.caption("064: 방어구역 60% + 부스터 40%. 부스터 45% 초과는 방공호 잠금, 50% 초과는 즉시 잠금.")
-            st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
+            st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시. v67 확장형은 SP500/BOND 후보를 추가 비교합니다.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
-            st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
+            st.caption("Turbo 모드는 방공호가 아닙니다. 기본 T100은 기존 후보, 확장형 T100은 SP500+BOND를 추가한 후보군으로 비교합니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
