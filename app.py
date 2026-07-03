@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v74_T100_HISTORY_PERSISTENT_DATA_DIR_20260703"
+APP_VERSION = "v77_T100_HISTORY_CLEAR_MIGRATION_FIX_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10007,9 +10007,11 @@ try:
     T100_HYBRID_DATA_DIR = Path.home() / "magic_split_data"
     T100_HYBRID_DATA_DIR.mkdir(parents=True, exist_ok=True)
     T100_HYBRID_HISTORY_PATH = T100_HYBRID_DATA_DIR / "t100_hybrid_live_history.csv"
+    T100_HYBRID_CLEAR_MARKER_PATH = T100_HYBRID_DATA_DIR / ".t100_hybrid_history_cleared"
 except Exception:
     T100_HYBRID_DATA_DIR = Path(".")
     T100_HYBRID_HISTORY_PATH = T100_HYBRID_LEGACY_HISTORY_PATH
+    T100_HYBRID_CLEAR_MARKER_PATH = Path(".t100_hybrid_history_cleared")
 
 
 def _empty_t100_hybrid_history_v74():
@@ -10017,8 +10019,12 @@ def _empty_t100_hybrid_history_v74():
 
 
 def _migrate_t100_hybrid_history_v74():
-    """예전 앱 폴더에 저장된 기록이 있으면 새 고정 데이터 폴더로 1회 복사한다."""
+    """예전 앱 폴더에 저장된 기록이 있으면 새 고정 데이터 폴더로 1회 복사한다.
+    v77: 사용자가 전체 초기화한 뒤에는 구버전 파일을 다시 자동복사하지 않는다.
+    """
     try:
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            return
         if (not T100_HYBRID_HISTORY_PATH.exists()) and T100_HYBRID_LEGACY_HISTORY_PATH.exists() and T100_HYBRID_HISTORY_PATH != T100_HYBRID_LEGACY_HISTORY_PATH:
             T100_HYBRID_HISTORY_PATH.write_bytes(T100_HYBRID_LEGACY_HISTORY_PATH.read_bytes())
     except Exception:
@@ -10058,6 +10064,11 @@ def _load_t100_hybrid_history_v63():
 
 def _save_t100_hybrid_history_v63(record: dict):
     """동일 기준일 기록은 덮어쓰고 저장한다."""
+    try:
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+    except Exception:
+        pass
     hist = _load_t100_hybrid_history_v63()
     day = str(record.get("기준일"))
     if len(hist) and "기준일" in hist.columns:
@@ -10103,7 +10114,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v76: 투입원금 / 어제 평가금 / 오늘 평가금 / 오늘 추가매수액 분리 + 저장/초기화 오류 수정.")
+    st.caption("v77: 투입원금/평가금/추가매수액 분리 + 초기화 후 구버전 기록 재복사 방지 수정.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10229,6 +10240,8 @@ def _t100_hybrid_live_operation_v63():
     with st.expander("운용기록 저장 위치 / 백업", expanded=False):
         st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
         st.code(str(T100_HYBRID_HISTORY_PATH))
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            st.caption("전체 초기화 상태: 구버전 운용기록 자동복사를 막고 있습니다. 새로 저장하거나 백업을 복원하면 자동으로 해제됩니다.")
         hist_backup = _load_t100_hybrid_history_v63()
         st.download_button(
             "T100 운용기록 백업 CSV 다운로드",
@@ -10246,6 +10259,11 @@ def _t100_hybrid_live_operation_v63():
                     uploaded_history.seek(0)
                     restore_df = pd.read_csv(uploaded_history, encoding="cp949")
                 # 구버전 CSV도 로더가 보정하게 원본 컬럼을 최대한 살려 저장
+                try:
+                    if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+                        T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+                except Exception:
+                    pass
                 restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
                 st.success("T100 운용기록을 복원했습니다.")
                 try:
@@ -10305,12 +10323,31 @@ def _t100_hybrid_live_operation_v63():
                 pass
     with save3:
         if st.button("운용기록 전체 초기화", key="t100_v65_clear"):
+            # v77: 고정 저장파일을 지운 뒤 구버전 앱 폴더 파일이 다시 자동복사되는 문제 방지
             try:
                 if T100_HYBRID_HISTORY_PATH.exists():
                     T100_HYBRID_HISTORY_PATH.unlink()
             except Exception:
                 pass
-            st.warning("운용기록을 초기화했습니다.")
+            try:
+                if T100_HYBRID_LEGACY_HISTORY_PATH.exists() and T100_HYBRID_LEGACY_HISTORY_PATH != T100_HYBRID_HISTORY_PATH:
+                    T100_HYBRID_LEGACY_HISTORY_PATH.unlink()
+            except Exception:
+                pass
+            try:
+                T100_HYBRID_CLEAR_MARKER_PATH.write_text("cleared", encoding="utf-8")
+            except Exception:
+                pass
+            st.session_state["_t100_v76_pending_widget_updates"] = {
+                "t100_v65_base": 10_000_000,
+                "t100_v65_value": 10_000_000,
+                "t100_v65_cash": 0,
+                "t100_v75_strategy_deposit": 0,
+                "t100_v75_strategy_withdrawal": 0,
+                "t100_v75_t100_buy": 0,
+                "t100_v75_t100_sell": 0,
+            }
+            st.warning("운용기록을 전체 초기화했습니다. 구버전 기록 자동복사도 차단했습니다.")
             try:
                 st.rerun()
             except Exception:
