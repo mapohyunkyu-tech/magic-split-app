@@ -10155,7 +10155,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v79: 최근 저장값을 투입원금/오늘평가 입력칸에 자동 불러오고, 현재 상황 통합판을 표시합니다.")
+    st.caption("v83: v79 실전운용판 유지 + 눌림목 한방 보조계좌를 추가했습니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10388,7 +10388,7 @@ def _t100_hybrid_live_operation_v63():
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v79 최근 저장값 자동불러오기 + 현재상황 통합판 저장",
+                "메모": "v83 최근 저장값 자동불러오기 + 현재상황 통합판 + 눌림목 보조판",
             })
             st.session_state["_t100_v76_pending_widget_updates"] = {
                 "t100_v65_base": int(round(base_after)),
@@ -10649,6 +10649,116 @@ def _t100_hybrid_live_operation_v63():
             except Exception:
                 cash_leftover = 0
             st.caption(f"매수 후 목표에 못 맞춘 잔돈은 현금으로 남깁니다. 예상 잔돈 합계: {_fmt_won(cash_leftover)}")
+
+
+    # =====================================================
+    # v83: T100 눌림목 한방 보조계좌
+    # =====================================================
+    st.subheader("4-2) 눌림목 한방 보조계좌")
+    st.caption("메인 T100은 그대로 두고, 방어 OFF일 때만 이번 달 T100 선택 ETF 안에서 소액 눌림목을 치는 보조판입니다.")
+
+    pb_default_budget = int(round(max(float(base_after), float(current_t100)) * 0.10)) if max(float(base_after), float(current_t100)) > 0 else 0
+    pb_on = st.checkbox("눌림목 한방 계좌 사용", value=False, key="t100_v83_pullback_on")
+    pb_cols0 = st.columns(4)
+    with pb_cols0[0]:
+        pb_budget = st.number_input("눌림목 전용자금", min_value=0, value=int(st.session_state.get("t100_v83_budget", pb_default_budget)), step=100_000, key="t100_v83_budget")
+    with pb_cols0[1]:
+        pb_entry_pct = st.number_input("진입 눌림 하한%", min_value=0.0, max_value=30.0, value=float(st.session_state.get("t100_v83_entry_low", 3.0)), step=0.5, key="t100_v83_entry_low")
+    with pb_cols0[2]:
+        pb_exit_pct = st.number_input("진입 눌림 상한%", min_value=0.0, max_value=50.0, value=float(st.session_state.get("t100_v83_entry_high", 7.0)), step=0.5, key="t100_v83_entry_high")
+    with pb_cols0[3]:
+        pb_take_profit = st.number_input("익절%", min_value=0.0, max_value=30.0, value=float(st.session_state.get("t100_v83_tp", 4.0)), step=0.5, key="t100_v83_tp")
+
+    pb_cols1 = st.columns(3)
+    with pb_cols1[0]:
+        pb_stop_loss = st.number_input("손절%", min_value=0.0, max_value=20.0, value=float(st.session_state.get("t100_v83_sl", 3.0)), step=0.5, key="t100_v83_sl")
+    with pb_cols1[1]:
+        pb_max_days = st.number_input("최대 보유일", min_value=1, max_value=30, value=int(st.session_state.get("t100_v83_max_days", 5)), step=1, key="t100_v83_max_days")
+    with pb_cols1[2]:
+        pb_allow_near_ma = st.checkbox("20일선 근처 허용", value=True, key="t100_v83_near_ma")
+
+    pb_rows = []
+    pb_assets = [a for a in t100_assets if str(a).upper() not in ["CASH", "DOLLAR", "BOND"]]
+    if not pb_on:
+        st.info("눌림목 계좌 OFF: 메인 T100만 운용합니다.")
+    elif risk_signal:
+        st.error("방어 ON 상태: 눌림목 신규진입 금지. 보유 중이면 정리 우선입니다.")
+    elif not pb_assets:
+        st.warning("눌림목 후보가 없습니다. 이번 달 T100 선택 자산이 CASH/DOLLAR/BOND뿐이면 신규진입하지 않습니다.")
+    else:
+        st.markdown("대상은 **이번 달 T100 선택 ETF만** 봅니다. 최근고점, 현재가, 20일선, 전일종가를 넣으면 진입 여부를 계산합니다.")
+        per_pb_budget = float(pb_budget) / max(1, len(pb_assets))
+        for asset in pb_assets:
+            st.markdown(f"**{asset} 눌림목 체크**")
+            pbc1, pbc2, pbc3, pbc4 = st.columns(4)
+            with pbc1:
+                high_price = st.number_input(f"{asset} 최근고점", min_value=0.0, value=float(st.session_state.get(f"t100_v83_{asset}_high", 0.0)), step=10.0, key=f"t100_v83_{asset}_high")
+            with pbc2:
+                now_price = st.number_input(f"{asset} 현재가", min_value=0.0, value=float(st.session_state.get(f"t100_v83_{asset}_now", 0.0)), step=10.0, key=f"t100_v83_{asset}_now")
+            with pbc3:
+                ma20_price = st.number_input(f"{asset} 20일선", min_value=0.0, value=float(st.session_state.get(f"t100_v83_{asset}_ma20", 0.0)), step=10.0, key=f"t100_v83_{asset}_ma20")
+            with pbc4:
+                prev_price = st.number_input(f"{asset} 전일종가", min_value=0.0, value=float(st.session_state.get(f"t100_v83_{asset}_prev", 0.0)), step=10.0, key=f"t100_v83_{asset}_prev")
+
+            if high_price > 0 and now_price > 0:
+                pullback_pct = (float(now_price) / float(high_price) - 1.0) * 100.0
+            else:
+                pullback_pct = np.nan
+            in_pullback_zone = bool(pd.notna(pullback_pct) and (-float(pb_exit_pct) <= pullback_pct <= -float(pb_entry_pct)))
+            if ma20_price > 0 and now_price > 0:
+                ma_ok = bool(now_price >= ma20_price) or (bool(pb_allow_near_ma) and now_price >= ma20_price * 0.99)
+            else:
+                ma_ok = False
+            rebound_ok = bool(prev_price > 0 and now_price > prev_price)
+            entry_ok = bool(pb_on and (not risk_signal) and in_pullback_zone and ma_ok and rebound_ok)
+            if entry_ok:
+                action = "진입"
+                reason = "눌림구간 + 20일선 방어 + 반등확인"
+            elif not in_pullback_zone:
+                action = "대기"
+                reason = "눌림률 조건 미충족"
+            elif not ma_ok:
+                action = "대기"
+                reason = "20일선 이탈/미입력"
+            elif not rebound_ok:
+                action = "대기"
+                reason = "반등확인 전"
+            else:
+                action = "대기"
+                reason = "조건 확인 필요"
+            pb_rows.append({
+                "자산": asset,
+                "최근고점": float(high_price),
+                "현재가": float(now_price),
+                "눌림률%": round(float(pullback_pct), 2) if pd.notna(pullback_pct) else "입력필요",
+                "20일선OK": "OK" if ma_ok else "NO",
+                "반등OK": "OK" if rebound_ok else "NO",
+                "행동": action,
+                "진입금액": int(round(per_pb_budget)) if entry_ok else 0,
+                "익절가": round(float(now_price) * (1.0 + float(pb_take_profit)/100.0), 2) if entry_ok and now_price > 0 else "",
+                "손절가": round(float(now_price) * (1.0 - float(pb_stop_loss)/100.0), 2) if entry_ok and now_price > 0 else "",
+                "최대보유일": int(pb_max_days) if entry_ok else "",
+                "사유": reason,
+            })
+        pb_df = pd.DataFrame(pb_rows)
+        if len(pb_df):
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(pb_df, height=260, pin_rank=False)
+            else:
+                _ = st.dataframe(pb_df, use_container_width=True, height=260)
+            if (pb_df["행동"].astype(str) == "진입").any():
+                st.success("눌림목 진입 후보가 있습니다. 메인 T100은 건드리지 말고 전용자금 안에서만 진입하세요.")
+            else:
+                st.info("현재는 눌림목 진입 후보가 없습니다. 전용자금은 현금 대기입니다.")
+
+    with st.expander("눌림목 한방 룰", expanded=False):
+        st.markdown(f"""
+- 메인 T100 운용과 분리합니다. 눌림목 전용자금만 사용합니다.
+- **방어 OFF일 때만** 신규진입합니다. 방어 ON이면 신규진입 금지입니다.
+- 대상은 이번 달 T100 선택 ETF 안에서만 봅니다.
+- 기본 진입: 최근고점 대비 `-{pb_entry_pct:.1f}% ~ -{pb_exit_pct:.1f}%` 눌림 + 20일선 위/근처 + 전일 대비 반등.
+- 기본 청산: `+{pb_take_profit:.1f}%` 익절, `-{pb_stop_loss:.1f}%` 손절, 최대 `{int(pb_max_days)}`거래일 보유.
+""")
 
     if mode_name == "6310 전환":
         reb_rows.append({"해야할일": "T100 매도", "금액": int(round(abs(sell_t100))), "설명": "매도 후 30%는 대기현금, 10%는 생활비/잠금현금"})
