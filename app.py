@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v71_RESTORE_2010_FAST_PLUS_T100_A_TP5_20260703"
+APP_VERSION = "v72_T100_A_SCALEIN_SEQUENTIAL_LEVEL_FIX_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10572,21 +10572,63 @@ def build_t100_a_scalein_backtest(
                         if lvl == 1 and rebuy_first_on_tp:
                             buy_slot(d, a, entry_per_asset, level=1, kind="1차재진입")
 
-            # 2) 월중 추가매수: 월초 기준가 대비 -5% 단계마다 종목별 500만원. 단계는 월중 1회만.
+            # 2) 월중 추가매수 v72: 직전 활성차수 매수가 대비 -5%마다 순차 진입.
+            #    기존 v70은 월초 기준가 대비 -5/-10/-15%를 한 번에 계산해서,
+            #    하루에 3차/4차가 동시에 들어가는 문제가 있었다.
+            #    실전 차수 운용은 한 거래일에 한 종목당 최대 1개 차수만 추가한다.
             for a in list(positions.keys()):
                 apos = positions.get(a, {})
-                ref = float(apos.get("monthly_ref", np.nan))
                 px = get_px(a, d)
-                if pd.isna(ref) or ref <= 0 or pd.isna(px) or px <= 0:
+                if pd.isna(px) or px <= 0:
                     continue
+
                 triggered = set(apos.get("triggered_levels", set()))
-                for n in range(1, max_add_count + 1):
-                    level = n + 1
-                    trigger = ref * (1.0 - add_step_pct * n)
-                    if level not in triggered and px <= trigger and cash > 0:
-                        used = buy_slot(d, a, add_per_asset, level=level, kind=f"추가{level}차")
-                        if used > 0:
-                            triggered.add(level)
+                act = [sl for sl in apos.get("slots", []) if bool(sl.get("active", True))]
+                if len(act) == 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                active_levels = sorted(set(int(sl.get("level", 0)) for sl in act if int(sl.get("level", 0)) >= 1))
+                if len(active_levels) == 0:
+                    continue
+
+                # 추가차수가 모두 청산되어 1차만 남아 있으면 새 1차 사이클로 보고 추가차수 기록을 리셋한다.
+                if active_levels == [1] and len([sl for sl in act if int(sl.get("level", 0)) >= 2]) == 0:
+                    triggered = set()
+
+                # 아직 사지 않은 가장 낮은 추가차수만 검토한다. 예: 2차 -> 3차 -> 4차 순서.
+                next_level = None
+                for lv in range(2, max_add_count + 2):
+                    if lv not in triggered and lv not in active_levels:
+                        next_level = lv
+                        break
+                if next_level is None:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                prev_level = next_level - 1
+                prev_slots = [sl for sl in act if int(sl.get("level", 0)) == prev_level]
+                if len(prev_slots) == 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                # 같은 차수 후보가 여러 개면 가장 최근 진입분을 기준으로 한다.
+                prev_slot = sorted(prev_slots, key=lambda sl: str(sl.get("entry_date", "")))[-1]
+                prev_ep = float(prev_slot.get("entry_price", np.nan))
+                if pd.isna(prev_ep) or prev_ep <= 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                trigger = prev_ep * (1.0 - add_step_pct)
+                if px <= trigger and cash > 0:
+                    used = buy_slot(d, a, add_per_asset, level=next_level, kind=f"추가{next_level}차")
+                    if used > 0:
+                        triggered.add(next_level)
+
                 apos["triggered_levels"] = triggered
                 positions[a] = apos
 
@@ -10636,7 +10678,7 @@ def build_t100_a_scalein_backtest(
             "1차재진입건수": rebuy_count,
             "실현손익합계": realized_pnl,
             "마지막보유": daily_df["보유자산"].iloc[-1],
-            "설정": f"종목당 1차 {entry_per_asset:,.0f}원 / -{add_step_pct*100:.1f}%마다 {add_per_asset:,.0f}원 x {max_add_count}회 / +{take_profit_pct*100:.1f}% 익절 / 1차재진입 {'ON' if rebuy_first_on_tp else 'OFF'} / {'확장형' if extended_universe else '기본형'}",
+            "설정": f"종목당 1차 {entry_per_asset:,.0f}원 / 직전차수 대비 -{add_step_pct*100:.1f}%마다 {add_per_asset:,.0f}원 x {max_add_count}회 / +{take_profit_pct*100:.1f}% 익절 / 1차재진입 {'ON' if rebuy_first_on_tp else 'OFF'} / 하루최대1차수 / {'확장형' if extended_universe else '기본형'}",
         }
         return daily_df, trade_df, monthly_df, status_df, summary
     except Exception as e:
@@ -13382,7 +13424,7 @@ elif menu == "10. T100 A분할 백테스트":
 
     st.info(f"최대 필요자금 감각: 월초 2종목 {int(a_entry)*2:,.0f}원 + 추가매수 최대 {int(a_add)*int(a_max)*2:,.0f}원 = {int(a_entry)*2 + int(a_add)*int(a_max)*2:,.0f}원 / 익절은 차수별 +{float(a_tp):.1f}%, 1차 재진입 {'ON' if a_rebuy_first else 'OFF'}")
 
-    if st.button("T100 A분할 v70 백테스트 실행", type="primary", key="v70_run_a_scalein"):
+    if st.button("T100 A분할 v72 백테스트 실행", type="primary", key="v70_run_a_scalein"):
         with st.spinner("T100 A분할 백테스트 계산 중..."):
             daily_a, trades_a, monthly_a, status_a, summary_a = build_t100_a_scalein_backtest(
                 a_start,
