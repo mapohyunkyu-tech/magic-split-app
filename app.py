@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v73_T100_A_SCALEIN_MONTHLY_COMPOUND_FIX_20260703"
+APP_VERSION = "v74_T100_HISTORY_PERSISTENT_DATA_DIR_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -9967,21 +9967,50 @@ def _fmt_won(v):
 
 
 
-T100_HYBRID_HISTORY_PATH = Path("t100_hybrid_live_history.csv")
+# v74: 앱 폴더를 새로 설치/덮어쓰기 해도 운용기록이 날아가지 않도록
+# 실행 폴더가 아니라 사용자 홈 폴더의 고정 데이터 폴더에 저장한다.
+T100_HYBRID_HISTORY_COLUMNS = ["기준일", "운용기준금액", "T100평가금액", "전략CASH", "생활비잠금현금", "계좌예수금메모", "운용모드", "메모"]
+T100_HYBRID_LEGACY_HISTORY_PATH = Path("t100_hybrid_live_history.csv")
+try:
+    T100_HYBRID_DATA_DIR = Path.home() / "magic_split_data"
+    T100_HYBRID_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    T100_HYBRID_HISTORY_PATH = T100_HYBRID_DATA_DIR / "t100_hybrid_live_history.csv"
+except Exception:
+    # 홈 폴더 접근이 막힌 환경에서는 기존 방식으로 후퇴
+    T100_HYBRID_DATA_DIR = Path(".")
+    T100_HYBRID_HISTORY_PATH = T100_HYBRID_LEGACY_HISTORY_PATH
+
+
+def _empty_t100_hybrid_history_v74():
+    return pd.DataFrame(columns=T100_HYBRID_HISTORY_COLUMNS)
+
+
+def _migrate_t100_hybrid_history_v74():
+    """예전 앱 폴더에 저장된 기록이 있으면 새 고정 데이터 폴더로 1회 복사한다."""
+    try:
+        if (not T100_HYBRID_HISTORY_PATH.exists()) and T100_HYBRID_LEGACY_HISTORY_PATH.exists() and T100_HYBRID_HISTORY_PATH != T100_HYBRID_LEGACY_HISTORY_PATH:
+            T100_HYBRID_HISTORY_PATH.write_bytes(T100_HYBRID_LEGACY_HISTORY_PATH.read_bytes())
+    except Exception:
+        pass
 
 
 def _load_t100_hybrid_history_v63():
-    """로컬 CSV에 저장된 T100 하이브리드 운용기록을 읽는다."""
+    """고정 데이터 폴더에 저장된 T100 하이브리드 운용기록을 읽는다."""
     try:
+        _migrate_t100_hybrid_history_v74()
         if not T100_HYBRID_HISTORY_PATH.exists():
-            return pd.DataFrame(columns=["기준일", "운용기준금액", "T100평가금액", "전략CASH", "생활비잠금현금", "계좌예수금메모", "운용모드", "메모"])
+            return _empty_t100_hybrid_history_v74()
         df = pd.read_csv(T100_HYBRID_HISTORY_PATH, encoding="utf-8-sig")
+        for col in T100_HYBRID_HISTORY_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[T100_HYBRID_HISTORY_COLUMNS]
         if "기준일" in df.columns:
             df["기준일"] = pd.to_datetime(df["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
             df = df.dropna(subset=["기준일"]).sort_values("기준일")
         return df
     except Exception:
-        return pd.DataFrame(columns=["기준일", "운용기준금액", "T100평가금액", "전략CASH", "생활비잠금현금", "계좌예수금메모", "운용모드", "메모"])
+        return _empty_t100_hybrid_history_v74()
 
 
 def _save_t100_hybrid_history_v63(record: dict):
@@ -10022,7 +10051,7 @@ def _get_t100_hybrid_prior_values_v63(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v66: 3개 입력 중심 + 목표금액을 실제 매수/매도 주수로 자동 환산합니다. 금액은 딱 맞추지 않고 남는 돈은 현금으로 둡니다.")
+    st.caption("v74: 3개 입력 중심 + 목표금액 주수 환산 + T100 운용기록을 사용자 홈 폴더에 고정 저장합니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10031,6 +10060,7 @@ def _t100_hybrid_live_operation_v63():
 - **6310으로 전환하기 체크**: 현재 T100 평가금액을 기준으로 **T100 60% / 대기현금 30% / 생활비·잠금현금 10%**를 계산합니다.
 - **계좌 예수금**은 참고 표시입니다. 6310 전환 때 실제로 현금이 생기면 예수금에서 대기현금/잠금현금으로 나눠 관리하면 됩니다.
 - **5일 전 금액은 외우지 않습니다.** 매일 장마감 후 `오늘 운용기록 저장/갱신`을 누르면 앱이 전일·5거래일 전 T100 평가금액을 자동으로 불러옵니다.
+- **v74부터 운용기록은 앱 폴더가 아니라 사용자 홈 폴더의 `magic_split_data`에 저장됩니다.** 새 ZIP을 덮어써도 기록이 유지됩니다.
 """)
 
     defaults = {
@@ -10096,6 +10126,38 @@ def _t100_hybrid_live_operation_v63():
         st.info("저장기록이 아직 없습니다. 오늘 기록을 저장하면 내일부터 전일 기준금액을 자동으로 씁니다.")
     elif prior_count < 5:
         st.info(f"저장기록 {prior_count}개: 하루 -5%만 판정하고, 5거래일 누적 -6%는 기록 5개부터 켭니다.")
+
+    with st.expander("운용기록 저장 위치 / 백업", expanded=False):
+        st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
+        st.code(str(T100_HYBRID_HISTORY_PATH))
+        hist_backup = _load_t100_hybrid_history_v63()
+        st.download_button(
+            "T100 운용기록 백업 CSV 다운로드",
+            data=hist_backup.to_csv(index=False).encode("utf-8-sig"),
+            file_name="t100_hybrid_live_history_backup.csv",
+            mime="text/csv",
+            key="t100_v74_history_backup_download",
+        )
+        uploaded_history = st.file_uploader("백업 CSV 복원", type=["csv"], key="t100_v74_history_restore_upload")
+        if uploaded_history is not None and st.button("업로드한 운용기록으로 복원", key="t100_v74_history_restore_button"):
+            try:
+                try:
+                    restore_df = pd.read_csv(uploaded_history, encoding="utf-8-sig")
+                except Exception:
+                    uploaded_history.seek(0)
+                    restore_df = pd.read_csv(uploaded_history, encoding="cp949")
+                for col in T100_HYBRID_HISTORY_COLUMNS:
+                    if col not in restore_df.columns:
+                        restore_df[col] = ""
+                restore_df = restore_df[T100_HYBRID_HISTORY_COLUMNS]
+                restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+                st.success("T100 운용기록을 복원했습니다.")
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"복원 실패: {e}")
 
     save1, save2, save3 = st.columns(3)
     with save1:
