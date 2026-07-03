@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v72_T100_A_SCALEIN_SEQUENTIAL_LEVEL_FIX_20260703"
+APP_VERSION = "v73_T100_A_SCALEIN_MONTHLY_COMPOUND_FIX_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10377,6 +10377,7 @@ def build_t100_a_scalein_backtest(
     rebuy_first_on_tp=True,
     cash_annual_rate=3.0,
     fee_rate=0.0,
+    monthly_compound=True,
     extended_universe=False,
     kodex200_code="069500",
     kosdaq150_code="229200",
@@ -10386,12 +10387,13 @@ def build_t100_a_scalein_backtest(
     dollar_code="261240|138230",
     bond_code="114260|152380",
 ):
-    """T100 A안 v70: 월초 상위2 ETF에 종목당 1차 진입, -5%마다 추가매수, 각 차수 +5% 익절.
+    """T100 A안 v73: 월초 상위2 ETF에 종목당 1차 진입, -5%마다 추가매수, 각 차수 +5% 익절.
 
     규칙:
     - 월 1회 리밸런싱: 매월 첫 검증 거래일에 기존 포지션 정리 후 새 상위2 진입.
     - 1차: 종목당 entry_per_asset 매수.
-    - 추가: 월초 기준가 대비 -5%, -10%, ... 단계마다 add_per_asset, 종목별 최대 max_add_count회.
+    - 증액복리 ON이면 매월 시작 총자산/초기자금 비율만큼 1차금액과 추가금액을 자동 확대/축소한다.
+    - 추가: 직전 활성차수 매수가 대비 -5%마다 월별 증액 적용 add_per_asset, 종목별 최대 max_add_count회.
     - 익절: 각 차수별 매수가 대비 take_profit_pct% 도달 시 해당 차수만 매도.
     - 1차는 익절되면 같은 날 entry_per_asset 규모로 즉시 재진입(옵션).
     - 2차 이상은 한 달 안에서 해당 단계가 한 번 트리거되면 반복 재매수하지 않음.
@@ -10431,8 +10433,11 @@ def build_t100_a_scalein_backtest(
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), status_df, {"오류":"사용 가능한 거래일이 없습니다."}
 
         total_initial = float(total_initial or 0)
-        entry_per_asset = float(entry_per_asset or 0)
-        add_per_asset = float(add_per_asset or 0)
+        base_entry_per_asset = float(entry_per_asset or 0)
+        base_add_per_asset = float(add_per_asset or 0)
+        entry_per_asset = base_entry_per_asset
+        add_per_asset = base_add_per_asset
+        monthly_compound = bool(monthly_compound)
         add_step_pct = float(add_step_pct or 5.0) / 100.0
         max_add_count = int(max_add_count or 0)
         take_profit_pct = float(take_profit_pct or 5.0) / 100.0
@@ -10495,7 +10500,7 @@ def build_t100_a_scalein_backtest(
             if qty <= 0:
                 return 0.0
             if asset not in positions:
-                positions[asset] = {"monthly_ref": px, "triggered_levels": set(), "slots": []}
+                positions[asset] = {"monthly_ref": px, "triggered_levels": set(), "slots": [], "add_amount": base_add_per_asset, "entry_amount": base_entry_per_asset, "month_scale": 1.0}
             slot_seq += 1
             slot = {"slot_id": slot_seq, "level": int(level), "qty": qty, "entry_price": px, "invested": amount, "entry_date": pd.to_datetime(date).strftime("%Y-%m-%d"), "active": True}
             positions[asset]["slots"].append(slot)
@@ -10536,6 +10541,11 @@ def build_t100_a_scalein_backtest(
             if new_month:
                 if last_month is not None and len(active_slots()) > 0:
                     sell_all(d, reason="월초 새 리밸런싱 전 정리")
+                month_start_total = portfolio_value(d)
+                month_scale = (month_start_total / total_initial) if (monthly_compound and total_initial > 0) else 1.0
+                # 월별 증액복리: 총자산이 커지면 1차/추가금도 같은 비율로 커진다.
+                month_entry_per_asset = base_entry_per_asset * month_scale
+                month_add_per_asset = base_add_per_asset * month_scale
                 asof = prev_date if prev_date is not None else d
                 cols = [c for c in ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND"] if c in price_df.columns]
                 sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index)
@@ -10550,9 +10560,9 @@ def build_t100_a_scalein_backtest(
                 for pck in picks[:2]:
                     px = get_px(pck, d)
                     if not pd.isna(px) and px > 0:
-                        positions[pck] = {"monthly_ref": px, "triggered_levels": set(), "slots": []}
-                    bought += buy_slot(d, pck, entry_per_asset, level=1, kind="월초1차")
-                monthly_rows.append({"월": month_key, "리밸런싱일": d.strftime("%Y-%m-%d"), "선택1": picks[0] if len(picks) > 0 else "CASH", "선택2": picks[1] if len(picks) > 1 else "", "월초매수금액": bought, "리밸런싱후현금": cash})
+                        positions[pck] = {"monthly_ref": px, "triggered_levels": set(), "slots": [], "add_amount": month_add_per_asset, "entry_amount": month_entry_per_asset, "month_scale": month_scale}
+                    bought += buy_slot(d, pck, month_entry_per_asset, level=1, kind="월초1차")
+                monthly_rows.append({"월": month_key, "리밸런싱일": d.strftime("%Y-%m-%d"), "선택1": picks[0] if len(picks) > 0 else "CASH", "선택2": picks[1] if len(picks) > 1 else "", "월시작총자산": month_start_total, "증액배율": month_scale, "종목당1차금액": month_entry_per_asset, "종목당추가금액": month_add_per_asset, "월초매수금액": bought, "리밸런싱후현금": cash})
                 last_month = month_key
 
             # 1) 차수별 +5% 익절. 1차는 익절 후 즉시 재진입 옵션.
@@ -10625,7 +10635,8 @@ def build_t100_a_scalein_backtest(
 
                 trigger = prev_ep * (1.0 - add_step_pct)
                 if px <= trigger and cash > 0:
-                    used = buy_slot(d, a, add_per_asset, level=next_level, kind=f"추가{next_level}차")
+                    month_add_amount = float(apos.get("add_amount", base_add_per_asset))
+                    used = buy_slot(d, a, month_add_amount, level=next_level, kind=f"추가{next_level}차")
                     if used > 0:
                         triggered.add(next_level)
 
@@ -10678,7 +10689,7 @@ def build_t100_a_scalein_backtest(
             "1차재진입건수": rebuy_count,
             "실현손익합계": realized_pnl,
             "마지막보유": daily_df["보유자산"].iloc[-1],
-            "설정": f"종목당 1차 {entry_per_asset:,.0f}원 / 직전차수 대비 -{add_step_pct*100:.1f}%마다 {add_per_asset:,.0f}원 x {max_add_count}회 / +{take_profit_pct*100:.1f}% 익절 / 1차재진입 {'ON' if rebuy_first_on_tp else 'OFF'} / 하루최대1차수 / {'확장형' if extended_universe else '기본형'}",
+            "설정": f"기준 종목당 1차 {base_entry_per_asset:,.0f}원 / 직전차수 대비 -{add_step_pct*100:.1f}%마다 기준 {base_add_per_asset:,.0f}원 x {max_add_count}회 / 월별증액 {'ON' if monthly_compound else 'OFF'} / +{take_profit_pct*100:.1f}% 익절 / 1차재진입 {'ON' if rebuy_first_on_tp else 'OFF'} / 하루최대1차수 / {'확장형' if extended_universe else '기본형'}",
         }
         return daily_df, trade_df, monthly_df, status_df, summary
     except Exception as e:
@@ -13389,7 +13400,7 @@ elif menu == "8. 실전 보유장부":
 
 elif menu == "10. T100 A분할 백테스트":
     st.header("10. T100 A분할 백테스트")
-    st.caption("A안 v70: 월초 T100 상위 2개 ETF에 종목당 3,000만원 1차 진입, -5%마다 500만원 추가, 각 차수 +5% 익절. 1차는 익절되면 같은 달 다시 1차 재진입합니다.")
+    st.caption("A안 v73: 월초 T100 상위 2개 ETF에 종목당 3,000만원 1차 진입, -5%마다 500만원 추가, 각 차수 +5% 익절. 월마다 총자산이 늘면 1차/추가금도 자동 증액합니다.")
 
     st.subheader("1) 백테스트 설정")
     a1, a2, a3, a4 = st.columns(4)
@@ -13417,14 +13428,15 @@ elif menu == "10. T100 A분할 백테스트":
         a_tp = st.number_input("차수별 익절률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="v70_a_tp")
     with c2:
         a_rebuy_first = st.checkbox("1차 익절 후 즉시 재진입", value=True, key="v70_a_rebuy_first")
+        a_monthly_compound = st.checkbox("월별 증액복리 적용", value=True, key="v73_a_monthly_compound")
     with c3:
         a_cash_rate = st.number_input("대기현금 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="v70_a_cash_rate")
     with c4:
         a_fee = st.number_input("수수료/세금 비율", min_value=0.0, max_value=0.01, value=0.0003, step=0.0001, format="%.4f", key="v70_a_fee")
 
-    st.info(f"최대 필요자금 감각: 월초 2종목 {int(a_entry)*2:,.0f}원 + 추가매수 최대 {int(a_add)*int(a_max)*2:,.0f}원 = {int(a_entry)*2 + int(a_add)*int(a_max)*2:,.0f}원 / 익절은 차수별 +{float(a_tp):.1f}%, 1차 재진입 {'ON' if a_rebuy_first else 'OFF'}")
+    st.info(f"기준 필요자금 감각: 월초 2종목 {int(a_entry)*2:,.0f}원 + 추가매수 최대 {int(a_add)*int(a_max)*2:,.0f}원 = {int(a_entry)*2 + int(a_add)*int(a_max)*2:,.0f}원 / 월별 증액복리 {'ON' if a_monthly_compound else 'OFF'} / 익절은 차수별 +{float(a_tp):.1f}%, 1차 재진입 {'ON' if a_rebuy_first else 'OFF'}")
 
-    if st.button("T100 A분할 v72 백테스트 실행", type="primary", key="v70_run_a_scalein"):
+    if st.button("T100 A분할 v73 백테스트 실행", type="primary", key="v70_run_a_scalein"):
         with st.spinner("T100 A분할 백테스트 계산 중..."):
             daily_a, trades_a, monthly_a, status_a, summary_a = build_t100_a_scalein_backtest(
                 a_start,
