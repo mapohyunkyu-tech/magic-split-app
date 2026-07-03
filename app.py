@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v77_T100_HISTORY_CLEAR_MIGRATION_FIX_20260703"
+APP_VERSION = "v79_T100_PREFILL_LATEST_SAVED_INPUTS_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10082,6 +10082,47 @@ def _save_t100_hybrid_history_v63(record: dict):
     return hist
 
 
+def _get_t100_hybrid_latest_saved_values_v79(hist: pd.DataFrame):
+    """최근 저장기록에서 입력칸 기본값으로 쓸 투입원금/당일평가금액/예수금 메모를 가져온다."""
+    if hist is None or len(hist) == 0 or "기준일" not in hist.columns:
+        return None
+    try:
+        tmp = hist.copy()
+        tmp["기준일"] = tmp["기준일"].astype(str)
+        tmp = tmp.sort_values("기준일")
+        last = tmp.iloc[-1]
+
+        def _num_from_row(*cols, default=0):
+            for col in cols:
+                if col in last.index:
+                    val = pd.to_numeric(pd.Series([last[col]]), errors="coerce").iloc[0]
+                    if pd.notna(val):
+                        return int(round(float(val)))
+            return int(default)
+
+        latest_base = _num_from_row("투입원금", default=10_000_000)
+        latest_value = _num_from_row("당일평가금액", "T100평가금액", "운용기준금액", default=latest_base)
+        latest_cash = _num_from_row("계좌예수금메모", "전략CASH", default=0)
+        return {
+            "date": str(last.get("기준일", "")),
+            "base": latest_base,
+            "value": latest_value,
+            "cash": latest_cash,
+        }
+    except Exception:
+        return None
+
+
+def _apply_t100_hybrid_latest_saved_to_inputs_v79(latest: dict):
+    """number_input 생성 전에 호출해서 최근 저장값을 입력칸 기본값에 반영한다."""
+    if not latest:
+        return False
+    st.session_state["t100_v65_base"] = int(latest.get("base", 10_000_000))
+    st.session_state["t100_v65_value"] = int(latest.get("value", latest.get("base", 10_000_000)))
+    st.session_state["t100_v65_cash"] = int(latest.get("cash", 0))
+    return True
+
+
 def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, current_value: float):
     """저장기록에서 전일 평가금액과 최근 1일변동률 기록을 불러온다."""
     if hist is None or len(hist) == 0 or "기준일" not in hist.columns:
@@ -10114,7 +10155,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v78: 현재 상황 통합판 추가 · 투입원금/어제평가/오늘평가/-5%/5일-6%를 한 화면에 표시합니다.")
+    st.caption("v79: 최근 저장값을 투입원금/오늘평가 입력칸에 자동 불러오고, 현재 상황 통합판을 표시합니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10145,6 +10186,36 @@ def _t100_hybrid_live_operation_v63():
     if isinstance(pending_widget_updates, dict):
         for _k, _v in pending_widget_updates.items():
             st.session_state[_k] = _v
+
+    # v79: 새 ZIP/새 세션에서도 최근 저장값을 입력칸에 자동 반영한다.
+    hist_for_latest_prefill = _load_t100_hybrid_history_v63()
+    latest_saved_for_input = _get_t100_hybrid_latest_saved_values_v79(hist_for_latest_prefill)
+    if latest_saved_for_input and not st.session_state.get("_t100_v79_latest_prefill_done", False):
+        if "t100_v65_base" not in st.session_state and "t100_v65_value" not in st.session_state:
+            _apply_t100_hybrid_latest_saved_to_inputs_v79(latest_saved_for_input)
+        st.session_state["_t100_v79_latest_prefill_done"] = True
+
+    if latest_saved_for_input:
+        p0, p1 = st.columns([1, 2])
+        with p0:
+            if st.button("최근 저장값 입력칸 불러오기", key="t100_v79_load_latest_inputs"):
+                _apply_t100_hybrid_latest_saved_to_inputs_v79(latest_saved_for_input)
+                st.session_state["_t100_v79_latest_prefill_done"] = True
+                st.success(
+                    f"최근 저장값({latest_saved_for_input.get('date', '')})을 입력칸에 불러왔습니다: "
+                    f"투입원금 {_fmt_won(latest_saved_for_input.get('base', 0))}, "
+                    f"오늘평가 {_fmt_won(latest_saved_for_input.get('value', 0))}"
+                )
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+        with p1:
+            st.caption(
+                f"최근 저장값: {latest_saved_for_input.get('date', '')} · "
+                f"투입원금 {_fmt_won(latest_saved_for_input.get('base', 0))} · "
+                f"당일평가 {_fmt_won(latest_saved_for_input.get('value', 0))}"
+            )
 
     if st.button("천만원 실험값으로 초기화", key="t100_v65_reset"):
         for k, v in defaults.items():
@@ -10317,10 +10388,12 @@ def _t100_hybrid_live_operation_v63():
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v78 현재상황 통합판 저장",
+                "메모": "v79 최근 저장값 자동불러오기 + 현재상황 통합판 저장",
             })
             st.session_state["_t100_v76_pending_widget_updates"] = {
                 "t100_v65_base": int(round(base_after)),
+                "t100_v65_value": int(round(current_t100)),
+                "t100_v65_cash": int(round(account_cash)),
                 # 저장 후 입출금/매매 입력칸은 다음 실행에서 0으로 초기화한다.
                 "t100_v75_strategy_deposit": 0,
                 "t100_v75_strategy_withdrawal": 0,
