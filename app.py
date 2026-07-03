@@ -9956,7 +9956,7 @@ except Exception as e:
 
 
 # =====================================================
-# 7-1. T100 하이브리드 1↔3 운용모드 v64
+# 7-1. T100 하이브리드 1↔3 운용모드 v75
 # =====================================================
 
 def _fmt_won(v):
@@ -9966,17 +9966,48 @@ def _fmt_won(v):
         return str(v)
 
 
+def _fmt_pct(v):
+    try:
+        if v == "" or pd.isna(v):
+            return "-"
+        return f"{float(v)*100:.2f}%"
+    except Exception:
+        return "-"
 
-# v74: 앱 폴더를 새로 설치/덮어쓰기 해도 운용기록이 날아가지 않도록
-# 실행 폴더가 아니라 사용자 홈 폴더의 고정 데이터 폴더에 저장한다.
-T100_HYBRID_HISTORY_COLUMNS = ["기준일", "운용기준금액", "T100평가금액", "전략CASH", "생활비잠금현금", "계좌예수금메모", "운용모드", "메모"]
+
+# v75: 추가입금/매도현금화가 있는 날도 방어판정을 정상 계산한다.
+# - 투입원금: 사용자가 실제 전략에 넣은 누적 돈. 추가입금/인출 때만 바뀐다.
+# - 전일평가금액/당일평가금액: T100 ETF 평가금액. 매일 바뀐다.
+# - 1일 방어판정 기준금액 = 전일 T100 평가금액 + 오늘 T100 실제 추가매수액 - 오늘 T100 실제 현금화매도액
+#   예: 어제 1,000만, 오늘 500만을 실제 T100에 샀으면 기준금액 1,500만. 장마감 1,380만이면 -8%라 방어 ON.
+T100_HYBRID_HISTORY_COLUMNS = [
+    "기준일",
+    "투입원금",
+    "전일평가금액",
+    "당일평가금액",
+    "추가입금",
+    "인출",
+    "T100추가매수",
+    "T100현금화매도",
+    "판정기준금액",
+    "1일변동률",
+    "5일누적변동률",
+    "방어신호",
+    # 구버전 호환 컬럼
+    "운용기준금액",
+    "T100평가금액",
+    "전략CASH",
+    "생활비잠금현금",
+    "계좌예수금메모",
+    "운용모드",
+    "메모",
+]
 T100_HYBRID_LEGACY_HISTORY_PATH = Path("t100_hybrid_live_history.csv")
 try:
     T100_HYBRID_DATA_DIR = Path.home() / "magic_split_data"
     T100_HYBRID_DATA_DIR.mkdir(parents=True, exist_ok=True)
     T100_HYBRID_HISTORY_PATH = T100_HYBRID_DATA_DIR / "t100_hybrid_live_history.csv"
 except Exception:
-    # 홈 폴더 접근이 막힌 환경에서는 기존 방식으로 후퇴
     T100_HYBRID_DATA_DIR = Path(".")
     T100_HYBRID_HISTORY_PATH = T100_HYBRID_LEGACY_HISTORY_PATH
 
@@ -9995,12 +10026,24 @@ def _migrate_t100_hybrid_history_v74():
 
 
 def _load_t100_hybrid_history_v63():
-    """고정 데이터 폴더에 저장된 T100 하이브리드 운용기록을 읽는다."""
+    """고정 데이터 폴더에 저장된 T100 하이브리드 운용기록을 읽는다. v63~v74 기록도 v75 형식으로 보정한다."""
     try:
         _migrate_t100_hybrid_history_v74()
         if not T100_HYBRID_HISTORY_PATH.exists():
             return _empty_t100_hybrid_history_v74()
         df = pd.read_csv(T100_HYBRID_HISTORY_PATH, encoding="utf-8-sig")
+
+        # 구버전 기록 보정: 운용기준금액/T100평가금액만 있던 기록을 당일평가금액으로 승격
+        if "당일평가금액" not in df.columns:
+            if "T100평가금액" in df.columns:
+                df["당일평가금액"] = df["T100평가금액"]
+            elif "운용기준금액" in df.columns:
+                df["당일평가금액"] = df["운용기준금액"]
+        if "운용기준금액" not in df.columns and "당일평가금액" in df.columns:
+            df["운용기준금액"] = df["당일평가금액"]
+        if "T100평가금액" not in df.columns and "당일평가금액" in df.columns:
+            df["T100평가금액"] = df["당일평가금액"]
+
         for col in T100_HYBRID_HISTORY_COLUMNS:
             if col not in df.columns:
                 df[col] = ""
@@ -10019,54 +10062,68 @@ def _save_t100_hybrid_history_v63(record: dict):
     day = str(record.get("기준일"))
     if len(hist) and "기준일" in hist.columns:
         hist = hist[hist["기준일"].astype(str) != day]
-    hist = pd.concat([hist, pd.DataFrame([record])], ignore_index=True)
+    for col in T100_HYBRID_HISTORY_COLUMNS:
+        if col not in record:
+            record[col] = ""
+    hist = pd.concat([hist, pd.DataFrame([record])[T100_HYBRID_HISTORY_COLUMNS]], ignore_index=True)
     hist = hist.sort_values("기준일")
     hist.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
     return hist
 
 
-def _get_t100_hybrid_prior_values_v63(hist: pd.DataFrame, today_str: str, current_value: float):
-    """저장기록에서 전일/5거래일 전 운용기준금액을 자동 추출한다."""
-    if hist is None or len(hist) == 0 or "기준일" not in hist.columns or "운용기준금액" not in hist.columns:
-        return float(current_value), float(current_value), "저장기록 없음", "저장기록 없음", 0
+def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, current_value: float):
+    """저장기록에서 전일 평가금액과 최근 1일변동률 기록을 불러온다."""
+    if hist is None or len(hist) == 0 or "기준일" not in hist.columns:
+        return float(current_value), "저장기록 없음", [], 0
     tmp = hist.copy()
     tmp["기준일"] = tmp["기준일"].astype(str)
-    tmp["운용기준금액"] = pd.to_numeric(tmp["운용기준금액"], errors="coerce")
-    tmp = tmp.dropna(subset=["운용기준금액"])
+    if "당일평가금액" not in tmp.columns:
+        if "T100평가금액" in tmp.columns:
+            tmp["당일평가금액"] = tmp["T100평가금액"]
+        elif "운용기준금액" in tmp.columns:
+            tmp["당일평가금액"] = tmp["운용기준금액"]
+        else:
+            tmp["당일평가금액"] = np.nan
+    tmp["당일평가금액"] = pd.to_numeric(tmp["당일평가금액"], errors="coerce")
+    tmp = tmp.dropna(subset=["당일평가금액"])
     tmp = tmp[tmp["기준일"] < today_str].sort_values("기준일")
     if len(tmp) == 0:
-        return float(current_value), float(current_value), "이전 기록 없음", "5거래일 전 기록 없음", 0
+        return float(current_value), "이전 기록 없음", [], 0
     prev_row = tmp.iloc[-1]
-    prev_value = float(prev_row["운용기준금액"])
+    prev_value = float(prev_row["당일평가금액"])
     prev_label = str(prev_row["기준일"])
-    if len(tmp) >= 5:
-        five_row = tmp.iloc[-5]
-        five_value = float(five_row["운용기준금액"])
-        five_label = str(five_row["기준일"])
-    else:
-        five_value = float(current_value)
-        five_label = f"기록 {len(tmp)}개뿐 · 5일신호 미사용"
-    return prev_value, five_value, prev_label, five_label, len(tmp)
+
+    # v75 이후 기록은 1일변동률을 저장한다. 구버전은 비어 있을 수 있으므로 숫자만 사용.
+    prior_returns = []
+    if "1일변동률" in tmp.columns:
+        ret_series = pd.to_numeric(tmp["1일변동률"], errors="coerce").dropna()
+        prior_returns = [float(x) for x in ret_series.tail(4).tolist()]
+    return prev_value, prev_label, prior_returns, len(tmp)
 
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v74: 3개 입력 중심 + 목표금액 주수 환산 + T100 운용기록을 사용자 홈 폴더에 고정 저장합니다.")
+    st.caption("v75: 투입원금 / 어제 평가금 / 오늘 평가금 / 오늘 추가매수액을 분리해서 방어판정을 계산합니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
-- **1순위 운용중**: 현재 T100 평가금액을 그대로 운용합니다. 오늘 위험신호가 뜨면 앱이 자동으로 **70/30 방어**를 알려줍니다.
-- **6310 전환 가능**: `현재 T100 평가금액 >= T100 투입원금 × 1.5`이면 가능으로 표시합니다.
-- **6310으로 전환하기 체크**: 현재 T100 평가금액을 기준으로 **T100 60% / 대기현금 30% / 생활비·잠금현금 10%**를 계산합니다.
-- **계좌 예수금**은 참고 표시입니다. 6310 전환 때 실제로 현금이 생기면 예수금에서 대기현금/잠금현금으로 나눠 관리하면 됩니다.
-- **5일 전 금액은 외우지 않습니다.** 매일 장마감 후 `오늘 운용기록 저장/갱신`을 누르면 앱이 전일·5거래일 전 T100 평가금액을 자동으로 불러옵니다.
-- **v74부터 운용기록은 앱 폴더가 아니라 사용자 홈 폴더의 `magic_split_data`에 저장됩니다.** 새 ZIP을 덮어써도 기록이 유지됩니다.
+- **투입원금**: 내가 실제 전략에 넣은 돈의 누적입니다. 추가입금/인출할 때만 바뀝니다.
+- **-5% 방어판정**: 투입원금 기준이 아니라 `오늘 T100 평가금액 ÷ 오늘 판정기준금액 - 1`로 계산합니다.
+- **오늘 판정기준금액**: `어제 T100 평가금액 + 오늘 T100 실제 추가매수액 - 오늘 T100 현금화매도액`입니다.
+- 예: 어제 평가금액 1,000만, 오늘 500만을 실제 T100에 추가매수했다면 오늘 판정기준은 1,500만입니다. 장마감 평가금액이 1,380만이면 -8%라서 방어 ON입니다.
+- **전략 추가입금**은 투입원금을 늘리는 돈이고, **T100 실제 추가매수액**은 그중 오늘 ETF를 실제로 산 금액입니다. 방어날에 일부만 사고 나머지를 현금으로 남기면 실제 산 금액만 T100 추가매수액에 넣습니다.
+- **5일 누적 -6%**는 최근 저장된 `1일변동률`을 누적해서 계산합니다. 추가입금이 있어도 실제 추가매수액을 보정하므로 수익으로 착각하지 않습니다.
+- 운용기록은 사용자 홈 폴더의 `magic_split_data`에 저장되어 새 ZIP을 덮어써도 유지됩니다.
 """)
 
     defaults = {
         "t100_v65_base": 10_000_000,
         "t100_v65_value": 10_000_000,
         "t100_v65_cash": 0,
+        "t100_v75_strategy_deposit": 0,
+        "t100_v75_strategy_withdrawal": 0,
+        "t100_v75_t100_buy": 0,
+        "t100_v75_t100_sell": 0,
         "t100_v65_status": "1순위 운용중",
         "t100_v65_assets": ["KODEX200", "NASDAQ100"],
     }
@@ -10079,24 +10136,6 @@ def _t100_hybrid_live_operation_v63():
         except Exception:
             pass
 
-    st.subheader("1) 오늘 입력")
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        base_amount = st.number_input("T100 투입원금", min_value=0, value=int(st.session_state.get("t100_v65_base", 10_000_000)), step=100_000, key="t100_v65_base")
-    with a2:
-        current_t100 = st.number_input("현재 T100 평가금액", min_value=0, value=int(st.session_state.get("t100_v65_value", 10_000_000)), step=100_000, key="t100_v65_value")
-    with a3:
-        account_cash = st.number_input("계좌 예수금 · 참고", min_value=0, value=int(st.session_state.get("t100_v65_cash", 0)), step=100_000, key="t100_v65_cash")
-
-    b1, b2 = st.columns(2)
-    with b1:
-        status_list = ["1순위 운용중", "6310 변신 후 운용중"]
-        status_default = st.session_state.get("t100_v65_status", "1순위 운용중")
-        status = st.selectbox("현재 상태", status_list, index=status_list.index(status_default) if status_default in status_list else 0, key="t100_v65_status")
-    with b2:
-        record_date = st.date_input("오늘 기준일", value=datetime.now().date(), key="t100_v65_date")
-    today_str = record_date.strftime("%Y-%m-%d") if hasattr(record_date, "strftime") else str(record_date)
-
     # 고정 규칙
     lock_trigger = 0.50
     defense_t100_ratio = 0.70
@@ -10107,25 +10146,77 @@ def _t100_hybrid_live_operation_v63():
     daily_cap_trigger = -0.05
     five_day_trigger = -0.06
 
+    st.subheader("1) 오늘 입력")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        base_before = st.number_input("T100 누적 투입원금 · 오늘 입출금 전", min_value=0, value=int(st.session_state.get("t100_v65_base", 10_000_000)), step=100_000, key="t100_v65_base")
+    with a2:
+        current_t100 = st.number_input("오늘 장마감 T100 평가금액", min_value=0, value=int(st.session_state.get("t100_v65_value", 10_000_000)), step=100_000, key="t100_v65_value")
+    with a3:
+        account_cash = st.number_input("계좌 예수금 · 참고", min_value=0, value=int(st.session_state.get("t100_v65_cash", 0)), step=100_000, key="t100_v65_cash")
+
+    dep1, dep2, dep3, dep4 = st.columns(4)
+    with dep1:
+        strategy_deposit = st.number_input("오늘 전략 추가입금", min_value=0, value=int(st.session_state.get("t100_v75_strategy_deposit", 0)), step=100_000, key="t100_v75_strategy_deposit")
+    with dep2:
+        strategy_withdrawal = st.number_input("오늘 전략 인출", min_value=0, value=int(st.session_state.get("t100_v75_strategy_withdrawal", 0)), step=100_000, key="t100_v75_strategy_withdrawal")
+    with dep3:
+        t100_buy_today = st.number_input("오늘 T100 실제 추가매수액", min_value=0, value=int(st.session_state.get("t100_v75_t100_buy", 0)), step=100_000, key="t100_v75_t100_buy")
+    with dep4:
+        t100_sell_today = st.number_input("오늘 T100 현금화매도액", min_value=0, value=int(st.session_state.get("t100_v75_t100_sell", 0)), step=100_000, key="t100_v75_t100_sell")
+
+    b1, b2 = st.columns(2)
+    with b1:
+        status_list = ["1순위 운용중", "6310 변신 후 운용중"]
+        status_default = st.session_state.get("t100_v65_status", "1순위 운용중")
+        status = st.selectbox("현재 상태", status_list, index=status_list.index(status_default) if status_default in status_list else 0, key="t100_v65_status")
+    with b2:
+        record_date = st.date_input("오늘 기준일", value=datetime.now().date(), key="t100_v65_date")
+    today_str = record_date.strftime("%Y-%m-%d") if hasattr(record_date, "strftime") else str(record_date)
+
+    base_after = max(0.0, float(base_before) + float(strategy_deposit) - float(strategy_withdrawal))
+    st.metric("저장 후 누적 투입원금", _fmt_won(base_after))
+
     st.subheader("2) 자동 위험신호")
     hist = _load_t100_hybrid_history_v63()
-    prev_basis, five_basis, prev_label, five_label, prior_count = _get_t100_hybrid_prior_values_v63(hist, today_str, float(current_t100))
-    day_ret = (float(current_t100) / float(prev_basis) - 1.0) if float(prev_basis) > 0 else 0.0
-    five_ret = (float(current_t100) / float(five_basis) - 1.0) if float(five_basis) > 0 else 0.0
+    prev_eval, prev_label, prior_returns, prior_count = _get_t100_hybrid_prior_values_v75(hist, today_str, float(current_t100))
+
+    if prior_count >= 1:
+        decision_basis = max(0.0, float(prev_eval) + float(t100_buy_today) - float(t100_sell_today))
+        day_ret = (float(current_t100) / decision_basis - 1.0) if decision_basis > 0 else 0.0
+    else:
+        decision_basis = float(current_t100)
+        day_ret = 0.0
+
+    ret_for_5d = list(prior_returns[-4:]) + [float(day_ret)] if prior_count >= 1 else []
+    if len(ret_for_5d) >= 5:
+        five_ret = float(np.prod([1.0 + r for r in ret_for_5d[-5:]]) - 1.0)
+        five_label = "최근 5거래일 보정수익률 누적"
+        five_available = True
+    else:
+        five_ret = 0.0
+        five_label = f"기록 {len(ret_for_5d)}개뿐 · 5일신호 미사용"
+        five_available = False
+
     daily_hit = (prior_count >= 1) and (day_ret <= daily_cap_trigger)
-    five_hit = (prior_count >= 5) and (five_ret <= five_day_trigger)
+    five_hit = bool(five_available) and (five_ret <= five_day_trigger)
     risk_signal = bool(daily_hit or five_hit)
 
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric(f"전일 · {prev_label}", _fmt_won(prev_basis))
-    s2.metric(f"5거래일 전 · {five_label}", _fmt_won(five_basis))
-    s3.metric("하루/5일 변동", f"{day_ret*100:.2f}% / {five_ret*100:.2f}%")
+    s1.metric(f"어제 평가금액 · {prev_label}", _fmt_won(prev_eval))
+    s2.metric("오늘 판정기준", _fmt_won(decision_basis))
+    s3.metric("1일 / 5일 변동", f"{day_ret*100:.2f}% / " + (f"{five_ret*100:.2f}%" if five_available else "기록부족"))
     s4.metric("방어신호", "ON" if risk_signal else "OFF")
 
     if prior_count == 0:
-        st.info("저장기록이 아직 없습니다. 오늘 기록을 저장하면 내일부터 전일 기준금액을 자동으로 씁니다.")
-    elif prior_count < 5:
-        st.info(f"저장기록 {prior_count}개: 하루 -5%만 판정하고, 5거래일 누적 -6%는 기록 5개부터 켭니다.")
+        st.info("저장기록이 아직 없습니다. 오늘 기록을 저장하면 내일부터 어제 평가금액을 자동으로 씁니다.")
+    elif not five_available:
+        st.info(f"5일 누적 기록 부족: {five_label}. 지금은 하루 -5%만 판정합니다.")
+
+    if float(strategy_deposit) > 0 or float(strategy_withdrawal) > 0 or float(t100_buy_today) > 0 or float(t100_sell_today) > 0:
+        st.info(
+            f"오늘 입출금/매매 보정 적용: 판정기준 = 어제 평가 {_fmt_won(prev_eval)} + T100추가매수 {_fmt_won(t100_buy_today)} - T100현금화매도 {_fmt_won(t100_sell_today)} = {_fmt_won(decision_basis)}"
+        )
 
     with st.expander("운용기록 저장 위치 / 백업", expanded=False):
         st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
@@ -10146,10 +10237,7 @@ def _t100_hybrid_live_operation_v63():
                 except Exception:
                     uploaded_history.seek(0)
                     restore_df = pd.read_csv(uploaded_history, encoding="cp949")
-                for col in T100_HYBRID_HISTORY_COLUMNS:
-                    if col not in restore_df.columns:
-                        restore_df[col] = ""
-                restore_df = restore_df[T100_HYBRID_HISTORY_COLUMNS]
+                # 구버전 CSV도 로더가 보정하게 원본 컬럼을 최대한 살려 저장
                 restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
                 st.success("T100 운용기록을 복원했습니다.")
                 try:
@@ -10164,15 +10252,27 @@ def _t100_hybrid_live_operation_v63():
         if st.button("오늘 운용기록 저장/갱신", type="primary", key="t100_v65_save"):
             _save_t100_hybrid_history_v63({
                 "기준일": today_str,
+                "투입원금": int(round(base_after)),
+                "전일평가금액": int(round(prev_eval)) if prior_count >= 1 else "",
+                "당일평가금액": int(round(current_t100)),
+                "추가입금": int(round(strategy_deposit)),
+                "인출": int(round(strategy_withdrawal)),
+                "T100추가매수": int(round(t100_buy_today)),
+                "T100현금화매도": int(round(t100_sell_today)),
+                "판정기준금액": int(round(decision_basis)),
+                "1일변동률": float(day_ret) if prior_count >= 1 else "",
+                "5일누적변동률": float(five_ret) if five_available else "",
+                "방어신호": "ON" if risk_signal else "OFF",
                 "운용기준금액": int(round(current_t100)),
                 "T100평가금액": int(round(current_t100)),
                 "전략CASH": 0,
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v65 단순운용 저장",
+                "메모": "v75 입출금 보정 방어판정 저장",
             })
-            st.success(f"{today_str} 기록을 저장했습니다.")
+            st.session_state["t100_v65_base"] = int(round(base_after))
+            st.success(f"{today_str} 기록을 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다.")
             try:
                 st.rerun()
             except Exception:
@@ -10205,20 +10305,27 @@ def _t100_hybrid_live_operation_v63():
     if len(hist_view):
         with st.expander("최근 저장기록", expanded=False):
             recent_hist = hist_view.tail(10).copy()
+            # 보기 좋게 % 컬럼 추가
+            if "1일변동률" in recent_hist.columns:
+                recent_hist["1일변동률표시"] = recent_hist["1일변동률"].apply(_fmt_pct)
+            if "5일누적변동률" in recent_hist.columns:
+                recent_hist["5일누적표시"] = recent_hist["5일누적변동률"].apply(_fmt_pct)
+            show_cols = [c for c in ["기준일", "투입원금", "전일평가금액", "당일평가금액", "추가입금", "T100추가매수", "T100현금화매도", "판정기준금액", "1일변동률표시", "5일누적표시", "방어신호", "운용모드"] if c in recent_hist.columns]
             if 'show_pinned_dataframe' in globals():
-                _ = show_pinned_dataframe(recent_hist, height=220, pin_rank=False)
+                _ = show_pinned_dataframe(recent_hist[show_cols], height=260, pin_rank=False)
             else:
-                _ = st.dataframe(recent_hist, use_container_width=True, height=220)
+                _ = st.dataframe(recent_hist[show_cols], use_container_width=True, height=260)
 
     st.subheader("3) 6310 가능 여부")
+    base_amount = float(base_after)
     lock_target = float(base_amount) * (1.0 + lock_trigger)
     lock_possible = float(current_t100) >= lock_target if float(base_amount) > 0 else False
     lock_profit = float(current_t100) - float(base_amount)
     lock_need = max(0.0, lock_target - float(current_t100))
 
     l1, l2, l3, l4 = st.columns(4)
-    l1.metric("T100 투입원금", _fmt_won(base_amount))
-    l2.metric("현재 T100 평가", _fmt_won(current_t100))
+    l1.metric("T100 누적 투입원금", _fmt_won(base_amount))
+    l2.metric("오늘 T100 평가", _fmt_won(current_t100))
     l3.metric("6310 기준", _fmt_won(lock_target))
     l4.metric("6310 가능", "가능" if lock_possible else "불가")
 
@@ -10245,7 +10352,6 @@ def _t100_hybrid_live_operation_v63():
     headline = ""
 
     if status == "6310 변신 후 운용중":
-        # 이미 6310 상태: 현재 T100 평가금액을 60% 슬롯으로 보고 전체 기준금액을 역산한다.
         total_basis = float(current_t100) / split_t100_ratio if split_t100_ratio > 0 else float(current_t100)
         target_t100 = total_basis * split_t100_ratio
         wait_cash = total_basis * split_wait_cash_ratio
@@ -10254,7 +10360,6 @@ def _t100_hybrid_live_operation_v63():
         headline = f"6310 유지: 현재 T100 {_fmt_won(current_t100)}를 60% 슬롯으로 보고, 대기현금 {_fmt_won(wait_cash)} / 생활비잠금 {_fmt_won(lock_cash)}를 유지하세요."
         mode_name = "6310 유지"
     elif do_6310:
-        # 1순위에서 6310으로 변신: 현재 T100 총액을 100% 기준으로 6/3/1 분할한다.
         total_basis = float(current_t100)
         target_t100 = total_basis * split_t100_ratio
         wait_cash = total_basis * split_wait_cash_ratio
@@ -10263,7 +10368,6 @@ def _t100_hybrid_live_operation_v63():
         headline = f"6310 전환: T100을 {_fmt_won(abs(sell_t100))} 매도해서 대기현금 {_fmt_won(wait_cash)}, 생활비잠금 {_fmt_won(lock_cash)}로 나누세요."
         mode_name = "6310 전환"
     elif risk_signal:
-        # 1순위 방어: 현재 T100 평가금액을 기준으로 70/30으로 줄인다.
         total_basis = float(current_t100)
         target_t100 = total_basis * defense_t100_ratio
         wait_cash = total_basis * defense_cash_ratio
@@ -10277,7 +10381,6 @@ def _t100_hybrid_live_operation_v63():
         headline = f"방어 전환: {' / '.join(reason_parts)} 신호. T100을 {_fmt_won(abs(sell_t100))} 매도해 방어현금 {_fmt_won(wait_cash)}를 확보하세요."
         mode_name = "1순위 방어"
     else:
-        # 1순위 공격: 현재 T100 평가금액 그대로 유지하고 선택자산에 균등 배분한다.
         total_basis = float(current_t100)
         target_t100 = float(current_t100)
         wait_cash = 0.0
@@ -10298,7 +10401,7 @@ def _t100_hybrid_live_operation_v63():
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("오늘 모드", mode_name)
-    c2.metric("계산 기준", _fmt_won(total_basis))
+    c2.metric("T100 계산 기준", _fmt_won(total_basis))
     c3.metric("목표 T100", _fmt_won(target_t100))
     c4.metric("계좌 예수금", _fmt_won(account_cash))
 
@@ -10313,7 +10416,6 @@ def _t100_hybrid_live_operation_v63():
     else:
         _ = st.dataframe(target_df, use_container_width=True, height=240)
 
-    # v66: 목표금액을 실제 주문수량으로 자동 환산한다.
     st.subheader("4-1) 실제 주문수량 계산")
     st.caption("금액은 1주 단위 때문에 딱 맞지 않습니다. 앱은 목표금액을 넘기지 않도록 매수/매도 주수를 계산하고, 남는 금액은 현금으로 둡니다.")
     code_map_v66 = {
@@ -10420,7 +10522,9 @@ def _t100_hybrid_live_operation_v63():
     else:
         _ = st.dataframe(rebalance_df, use_container_width=True, height=160)
 
-    st.caption("예: 투입원금 1,000만 / T100 평가금액 1,720만 / 예수금 300만 → 6310 가능. 체크하면 1,720만을 6:3:1로 나눠 T100 1,032만, 대기현금 516만, 생활비잠금 172만을 출력합니다.")
+    st.caption("추가입금 예: 어제 평가금액 1,000만, 오늘 T100 실제 추가매수액 500만이면 오늘 판정기준은 1,500만입니다. 장마감 평가가 1,425만 이하이면 하루 -5% 방어 ON입니다.")
+
+
 
 
 # =====================================================
