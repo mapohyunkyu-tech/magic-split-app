@@ -10103,7 +10103,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v75: 투입원금 / 어제 평가금 / 오늘 평가금 / 오늘 추가매수액을 분리해서 방어판정을 계산합니다.")
+    st.caption("v76: 투입원금 / 어제 평가금 / 오늘 평가금 / 오늘 추가매수액 분리 + 저장/초기화 오류 수정.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10127,6 +10127,14 @@ def _t100_hybrid_live_operation_v63():
         "t100_v65_status": "1순위 운용중",
         "t100_v65_assets": ["KODEX200", "NASDAQ100"],
     }
+
+    # v76 fix: Streamlit은 이미 화면에 만든 위젯 key를 같은 실행 안에서 다시 바꾸면 오류가 난다.
+    # 저장 버튼에서 직접 t100_v65_base를 수정하지 않고, 다음 rerun 시작 시점에 먼저 반영한다.
+    pending_widget_updates = st.session_state.pop("_t100_v76_pending_widget_updates", None)
+    if isinstance(pending_widget_updates, dict):
+        for _k, _v in pending_widget_updates.items():
+            st.session_state[_k] = _v
+
     if st.button("천만원 실험값으로 초기화", key="t100_v65_reset"):
         for k, v in defaults.items():
             st.session_state[k] = v
@@ -10269,9 +10277,16 @@ def _t100_hybrid_live_operation_v63():
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v75 입출금 보정 방어판정 저장",
+                "메모": "v76 입출금 보정 방어판정 저장",
             })
-            st.session_state["t100_v65_base"] = int(round(base_after))
+            st.session_state["_t100_v76_pending_widget_updates"] = {
+                "t100_v65_base": int(round(base_after)),
+                # 저장 후 입출금/매매 입력칸은 다음 실행에서 0으로 초기화한다.
+                "t100_v75_strategy_deposit": 0,
+                "t100_v75_strategy_withdrawal": 0,
+                "t100_v75_t100_buy": 0,
+                "t100_v75_t100_sell": 0,
+            }
             st.success(f"{today_str} 기록을 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다.")
             try:
                 st.rerun()
