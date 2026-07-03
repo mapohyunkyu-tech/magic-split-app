@@ -10114,7 +10114,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v77: 투입원금/평가금/추가매수액 분리 + 초기화 후 구버전 기록 재복사 방지 수정.")
+    st.caption("v78: 현재 상황 통합판 추가 · 투입원금/어제평가/오늘평가/-5%/5일-6%를 한 화면에 표시합니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10196,7 +10196,7 @@ def _t100_hybrid_live_operation_v63():
     base_after = max(0.0, float(base_before) + float(strategy_deposit) - float(strategy_withdrawal))
     st.metric("저장 후 누적 투입원금", _fmt_won(base_after))
 
-    st.subheader("2) 자동 위험신호")
+    st.subheader("2) 현재 상황 통합판")
     hist = _load_t100_hybrid_history_v63()
     prev_eval, prev_label, prior_returns, prior_count = _get_t100_hybrid_prior_values_v75(hist, today_str, float(current_t100))
 
@@ -10221,11 +10221,33 @@ def _t100_hybrid_live_operation_v63():
     five_hit = bool(five_available) and (five_ret <= five_day_trigger)
     risk_signal = bool(daily_hit or five_hit)
 
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric(f"어제 평가금액 · {prev_label}", _fmt_won(prev_eval))
-    s2.metric("오늘 판정기준", _fmt_won(decision_basis))
-    s3.metric("1일 / 5일 변동", f"{day_ret*100:.2f}% / " + (f"{five_ret*100:.2f}%" if five_available else "기록부족"))
-    s4.metric("방어신호", "ON" if risk_signal else "OFF")
+    # v78: 사용자가 한눈에 볼 수 있는 현재 상황 통합판
+    st.markdown("#### 현재 운용상태")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("현재 누적 투입원금", _fmt_won(base_after))
+    c2.metric(f"어제 평가금액 · {prev_label}", _fmt_won(prev_eval))
+    c3.metric("오늘 평가금액", _fmt_won(current_t100))
+    c4.metric("오늘 판정기준", _fmt_won(decision_basis))
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("1일 변동률", f"{day_ret*100:.2f}%" if prior_count >= 1 else "기준일")
+    d2.metric("하루 -5%", "걸림" if daily_hit else "아님")
+    d3.metric("5일 누적", f"{five_ret*100:.2f}%" if five_available else "기록부족")
+    d4.metric("5일 -6%", "걸림" if five_hit else "아님")
+    d5.metric("최종 방어신호", "ON" if risk_signal else "OFF")
+
+    if risk_signal:
+        st.error("방어 ON: 다음 거래일은 총 운용금 기준 T100 70% / 현금 30%로 맞춥니다.")
+    else:
+        st.success("방어 OFF: 다음 거래일은 T100 100% 운용 기준입니다.")
+
+    with st.expander("방어판정 계산식 보기", expanded=False):
+        st.write(f"1일 변동률 = 오늘 평가금액 {_fmt_won(current_t100)} ÷ 오늘 판정기준 {_fmt_won(decision_basis)} - 1 = {day_ret*100:.2f}%")
+        st.write(f"오늘 판정기준 = 어제 평가금액 {_fmt_won(prev_eval)} + 오늘 T100 실제 추가매수액 {_fmt_won(t100_buy_today)} - 오늘 T100 현금화매도액 {_fmt_won(t100_sell_today)}")
+        if five_available:
+            st.write(f"5일 누적 변동률 = 최근 5개 1일 변동률 누적 = {five_ret*100:.2f}%")
+        else:
+            st.write(f"5일 누적 변동률 = {five_label}")
 
     if prior_count == 0:
         st.info("저장기록이 아직 없습니다. 오늘 기록을 저장하면 내일부터 어제 평가금액을 자동으로 씁니다.")
@@ -10295,7 +10317,7 @@ def _t100_hybrid_live_operation_v63():
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v76 입출금 보정 방어판정 저장",
+                "메모": "v78 현재상황 통합판 저장",
             })
             st.session_state["_t100_v76_pending_widget_updates"] = {
                 "t100_v65_base": int(round(base_after)),
