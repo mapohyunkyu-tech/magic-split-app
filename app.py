@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v80_US_ETF_T100_BACKTEST_20260703"
+APP_VERSION = "v81_RESTORE_T100_LIVE_PLUS_US_ETF_DATA_FIX_20260703"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6066,7 +6066,7 @@ def _bt_prepare_external_close_series(data, asset_name="CTA"):
     except Exception:
         return pd.Series(dtype=float)
 
-def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", gold_code="411060", dollar_code="261240", bond_code="114260|152380", cta_code="DBMF|KMLM|CTA", cta_close_df=None):
+def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio=0.70, mode="월간 듀얼모멘텀 상위2", cash_annual_rate=3.0, static_cash_weight=50.0, static_gold_weight=30.0, static_nasdaq_weight=20.0, kodex200_code="069500", kosdaq150_code="229200", nasdaq_code="133690", sp500_code="360750|379800|143850", gold_code="411060", dollar_code="261240", bond_code="114260|152380", cta_code="DBMF|KMLM|CTA", cta_close_df=None):
     """대장주 엔진 + 방공호/부스터 통합 백테스트.
 
     지원 모드
@@ -6087,7 +6087,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
     - Turbo 공격 ETF 전략: 기존 064-C10 오류본을 방공호가 아닌 공격전략으로 재정의한다.
       T10/T100 = Turbo 공격 ETF 엔진 100% / CTA 0%, T90-C10 = Turbo 90% + CTA 10%,
       T80-C10-CASH10 = Turbo 80% + CTA 10% + CASH 10%, T70-D20-C10 = Turbo 70% + 진짜방어 20% + CTA 10%.
-      Turbo 엔진은 KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 사용한다.
+      Turbo 기본 엔진은 KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 사용한다. 확장형은 S&P500/BOND까지 후보에 추가해 검증한다.
     - 5/3/2 생존형 복리: 50% 대장주 + 30% 진짜방공호 + 20% 공격형 듀얼부스터.
       매월 상위 5:3:2를 강제 리밸런싱하지 않고 각 칸 안에서 복리로 굴린다.
       분기 첫 거래일에 밴드만 점검한다.
@@ -6109,6 +6109,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
 
         mode_upper = mode.upper()
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
+        split_turbo_extended = split_turbo and (("확장" in mode) or ("SP500" in mode_upper) or ("S&P" in mode_upper) or ("BOND" in mode_upper))
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
@@ -6193,6 +6194,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
             {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
             {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|381170", "type": "asset", "market": "KR"},
+            {"name": "SP500", "code": f"{sp500_code}|360750|379800|143850", "type": "asset", "market": "KR"},
             {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
             {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
             {"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"},
@@ -6290,7 +6292,11 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                     for p in picks:
                         weights[p] = weights.get(p, 0.0) + w
             elif component_mode == "aggressive_dual":
-                cols = [c for c in ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR"] if price_df is not None and c in price_df.columns]
+                # v67: 기본 T100은 기존 5개 후보 유지. 확장형 모드에서만 S&P500/BOND 추가.
+                turbo_asset_pool = ["KODEX200", "KOSDAQ150", "NASDAQ100", "GOLD", "DOLLAR"]
+                if split_turbo_extended:
+                    turbo_asset_pool = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND"]
+                cols = [c for c in turbo_asset_pool if price_df is not None and c in price_df.columns]
                 sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
                 asof = prev_date if prev_date is not None else date
                 picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
@@ -6735,12 +6741,12 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "기본자산시장": "국내상장ETF/국내현금성프록시",
             "CTA시장": "미국상장관리선물ETF",
             "CTA역할": "Turbo전략완충재" if split_turbo else "방공호내보완재_부스터아님",
-            "Turbo엔진허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR" if split_turbo else "",
+            "Turbo엔진허용자산": ("KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND" if split_turbo_extended else "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR") if split_turbo else "",
             "방공호허용자산": "CASH/GOLD/DOLLAR/BOND/CTA",
             "방공호금지자산": "KODEX200/KOSDAQ150/NASDAQ100/기타주식형ETF",
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
-            "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
+            "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, SP500 {sp500_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -6754,6 +6760,41 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         return out, summary
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
+
+
+def _bt_make_bunker_only_daily_df(start_date, end_date, total_initial=100_000_000, max_signal_days=None):
+    """방공호/Turbo 전용 빠른 백테스트용 daily_df를 만든다.
+
+    섹터 개별주 백테스트를 생략하고 기준일/총자산만 만든다.
+    T100/Turbo/073/064 계열은 build_bunker_7030_backtest가 자체 ETF 가격으로 계산한다.
+    """
+    try:
+        sd = pd.to_datetime(start_date)
+        ed = pd.to_datetime(end_date)
+        if sd >= ed:
+            return pd.DataFrame(columns=["기준일", "총자산"])
+        dates = []
+        try:
+            ss = _bt_load_naver_close_series("069500", sd, ed, lookback_days=5200)
+            if ss is not None and len(ss) > 0:
+                idx = pd.DatetimeIndex(pd.to_datetime(ss.index, errors="coerce")).dropna().sort_values().drop_duplicates()
+                idx = idx[(idx >= sd) & (idx <= ed)]
+                if len(idx) > 0 and idx.min() <= sd + pd.DateOffset(days=45):
+                    dates = [d.strftime("%Y-%m-%d") for d in idx]
+        except Exception:
+            dates = []
+        if not dates:
+            dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(sd, ed)]
+        if max_signal_days and len(dates) > int(max_signal_days):
+            dates = dates[-int(max_signal_days):]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
+    except Exception:
+        dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(start_date, end_date)]
+        out = pd.DataFrame({"기준일": dates})
+        out["총자산"] = float(total_initial or 100_000_000)
+        return out
 
 def _bt_market_collapse_state(benchmark_df, asof_date, mode="OFF"):
     """KODEX200 숫자 기반 시장붕괴 차단 필터.
@@ -9898,10 +9939,1126 @@ st.title("📈 매직스플릿 관리기 안정형")
 st.caption(f"{APP_VERSION}")
 st.caption("요양원 목록은 Google Sheets에 저장됩니다. 서버가 재시작돼도 목록은 유지됩니다.")
 
+try:
+    # v11: 앱 시작 때 3개 탭을 전부 읽지 않는다.
+    # Google Sheets 429 쿼터 방지를 위해 연결 확인만 하고,
+    # 실제 탭은 메뉴에서 필요할 때만 읽는다.
+    get_spreadsheet()
+    st.success("Google Sheets 연결 완료")
+except Exception as e:
+    if is_quota_error(e):
+        st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요.")
+    else:
+        st.error("Google Sheets 연결 실패")
+        st.exception(e)
+    st.stop()
+
+
 
 # =====================================================
-# v80. 미국 ETF T100 백테스트
+# 7-1. T100 하이브리드 1↔3 운용모드 v75
 # =====================================================
+
+def _fmt_won(v):
+    try:
+        return f"{float(v):,.0f}원"
+    except Exception:
+        return str(v)
+
+
+def _fmt_pct(v):
+    try:
+        if v == "" or pd.isna(v):
+            return "-"
+        return f"{float(v)*100:.2f}%"
+    except Exception:
+        return "-"
+
+
+# v75: 추가입금/매도현금화가 있는 날도 방어판정을 정상 계산한다.
+# - 투입원금: 사용자가 실제 전략에 넣은 누적 돈. 추가입금/인출 때만 바뀐다.
+# - 전일평가금액/당일평가금액: T100 ETF 평가금액. 매일 바뀐다.
+# - 1일 방어판정 기준금액 = 전일 T100 평가금액 + 오늘 T100 실제 추가매수액 - 오늘 T100 실제 현금화매도액
+#   예: 어제 1,000만, 오늘 500만을 실제 T100에 샀으면 기준금액 1,500만. 장마감 1,380만이면 -8%라 방어 ON.
+T100_HYBRID_HISTORY_COLUMNS = [
+    "기준일",
+    "투입원금",
+    "전일평가금액",
+    "당일평가금액",
+    "추가입금",
+    "인출",
+    "T100추가매수",
+    "T100현금화매도",
+    "판정기준금액",
+    "1일변동률",
+    "5일누적변동률",
+    "방어신호",
+    # 구버전 호환 컬럼
+    "운용기준금액",
+    "T100평가금액",
+    "전략CASH",
+    "생활비잠금현금",
+    "계좌예수금메모",
+    "운용모드",
+    "메모",
+]
+T100_HYBRID_LEGACY_HISTORY_PATH = Path("t100_hybrid_live_history.csv")
+try:
+    T100_HYBRID_DATA_DIR = Path.home() / "magic_split_data"
+    T100_HYBRID_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    T100_HYBRID_HISTORY_PATH = T100_HYBRID_DATA_DIR / "t100_hybrid_live_history.csv"
+    T100_HYBRID_CLEAR_MARKER_PATH = T100_HYBRID_DATA_DIR / ".t100_hybrid_history_cleared"
+except Exception:
+    T100_HYBRID_DATA_DIR = Path(".")
+    T100_HYBRID_HISTORY_PATH = T100_HYBRID_LEGACY_HISTORY_PATH
+    T100_HYBRID_CLEAR_MARKER_PATH = Path(".t100_hybrid_history_cleared")
+
+
+def _empty_t100_hybrid_history_v74():
+    return pd.DataFrame(columns=T100_HYBRID_HISTORY_COLUMNS)
+
+
+def _migrate_t100_hybrid_history_v74():
+    """예전 앱 폴더에 저장된 기록이 있으면 새 고정 데이터 폴더로 1회 복사한다.
+    v77: 사용자가 전체 초기화한 뒤에는 구버전 파일을 다시 자동복사하지 않는다.
+    """
+    try:
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            return
+        if (not T100_HYBRID_HISTORY_PATH.exists()) and T100_HYBRID_LEGACY_HISTORY_PATH.exists() and T100_HYBRID_HISTORY_PATH != T100_HYBRID_LEGACY_HISTORY_PATH:
+            T100_HYBRID_HISTORY_PATH.write_bytes(T100_HYBRID_LEGACY_HISTORY_PATH.read_bytes())
+    except Exception:
+        pass
+
+
+def _load_t100_hybrid_history_v63():
+    """고정 데이터 폴더에 저장된 T100 하이브리드 운용기록을 읽는다. v63~v74 기록도 v75 형식으로 보정한다."""
+    try:
+        _migrate_t100_hybrid_history_v74()
+        if not T100_HYBRID_HISTORY_PATH.exists():
+            return _empty_t100_hybrid_history_v74()
+        df = pd.read_csv(T100_HYBRID_HISTORY_PATH, encoding="utf-8-sig")
+
+        # 구버전 기록 보정: 운용기준금액/T100평가금액만 있던 기록을 당일평가금액으로 승격
+        if "당일평가금액" not in df.columns:
+            if "T100평가금액" in df.columns:
+                df["당일평가금액"] = df["T100평가금액"]
+            elif "운용기준금액" in df.columns:
+                df["당일평가금액"] = df["운용기준금액"]
+        if "운용기준금액" not in df.columns and "당일평가금액" in df.columns:
+            df["운용기준금액"] = df["당일평가금액"]
+        if "T100평가금액" not in df.columns and "당일평가금액" in df.columns:
+            df["T100평가금액"] = df["당일평가금액"]
+
+        for col in T100_HYBRID_HISTORY_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[T100_HYBRID_HISTORY_COLUMNS]
+        if "기준일" in df.columns:
+            df["기준일"] = pd.to_datetime(df["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
+            df = df.dropna(subset=["기준일"]).sort_values("기준일")
+        return df
+    except Exception:
+        return _empty_t100_hybrid_history_v74()
+
+
+def _save_t100_hybrid_history_v63(record: dict):
+    """동일 기준일 기록은 덮어쓰고 저장한다."""
+    try:
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+    except Exception:
+        pass
+    hist = _load_t100_hybrid_history_v63()
+    day = str(record.get("기준일"))
+    if len(hist) and "기준일" in hist.columns:
+        hist = hist[hist["기준일"].astype(str) != day]
+    for col in T100_HYBRID_HISTORY_COLUMNS:
+        if col not in record:
+            record[col] = ""
+    hist = pd.concat([hist, pd.DataFrame([record])[T100_HYBRID_HISTORY_COLUMNS]], ignore_index=True)
+    hist = hist.sort_values("기준일")
+    hist.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+    return hist
+
+
+def _get_t100_hybrid_latest_saved_values_v79(hist: pd.DataFrame):
+    """최근 저장기록에서 입력칸 기본값으로 쓸 투입원금/당일평가금액/예수금 메모를 가져온다."""
+    if hist is None or len(hist) == 0 or "기준일" not in hist.columns:
+        return None
+    try:
+        tmp = hist.copy()
+        tmp["기준일"] = tmp["기준일"].astype(str)
+        tmp = tmp.sort_values("기준일")
+        last = tmp.iloc[-1]
+
+        def _num_from_row(*cols, default=0):
+            for col in cols:
+                if col in last.index:
+                    val = pd.to_numeric(pd.Series([last[col]]), errors="coerce").iloc[0]
+                    if pd.notna(val):
+                        return int(round(float(val)))
+            return int(default)
+
+        latest_base = _num_from_row("투입원금", default=10_000_000)
+        latest_value = _num_from_row("당일평가금액", "T100평가금액", "운용기준금액", default=latest_base)
+        latest_cash = _num_from_row("계좌예수금메모", "전략CASH", default=0)
+        return {
+            "date": str(last.get("기준일", "")),
+            "base": latest_base,
+            "value": latest_value,
+            "cash": latest_cash,
+        }
+    except Exception:
+        return None
+
+
+def _apply_t100_hybrid_latest_saved_to_inputs_v79(latest: dict):
+    """number_input 생성 전에 호출해서 최근 저장값을 입력칸 기본값에 반영한다."""
+    if not latest:
+        return False
+    st.session_state["t100_v65_base"] = int(latest.get("base", 10_000_000))
+    st.session_state["t100_v65_value"] = int(latest.get("value", latest.get("base", 10_000_000)))
+    st.session_state["t100_v65_cash"] = int(latest.get("cash", 0))
+    return True
+
+
+def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, current_value: float):
+    """저장기록에서 전일 평가금액과 최근 1일변동률 기록을 불러온다."""
+    if hist is None or len(hist) == 0 or "기준일" not in hist.columns:
+        return float(current_value), "저장기록 없음", [], 0
+    tmp = hist.copy()
+    tmp["기준일"] = tmp["기준일"].astype(str)
+    if "당일평가금액" not in tmp.columns:
+        if "T100평가금액" in tmp.columns:
+            tmp["당일평가금액"] = tmp["T100평가금액"]
+        elif "운용기준금액" in tmp.columns:
+            tmp["당일평가금액"] = tmp["운용기준금액"]
+        else:
+            tmp["당일평가금액"] = np.nan
+    tmp["당일평가금액"] = pd.to_numeric(tmp["당일평가금액"], errors="coerce")
+    tmp = tmp.dropna(subset=["당일평가금액"])
+    tmp = tmp[tmp["기준일"] < today_str].sort_values("기준일")
+    if len(tmp) == 0:
+        return float(current_value), "이전 기록 없음", [], 0
+    prev_row = tmp.iloc[-1]
+    prev_value = float(prev_row["당일평가금액"])
+    prev_label = str(prev_row["기준일"])
+
+    # v75 이후 기록은 1일변동률을 저장한다. 구버전은 비어 있을 수 있으므로 숫자만 사용.
+    prior_returns = []
+    if "1일변동률" in tmp.columns:
+        ret_series = pd.to_numeric(tmp["1일변동률"], errors="coerce").dropna()
+        prior_returns = [float(x) for x in ret_series.tail(4).tolist()]
+    return prev_value, prev_label, prior_returns, len(tmp)
+
+
+def _t100_hybrid_live_operation_v63():
+    st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
+    st.caption("v79: 최근 저장값을 투입원금/오늘평가 입력칸에 자동 불러오고, 현재 상황 통합판을 표시합니다.")
+
+    with st.expander("운용 방식", expanded=True):
+        st.markdown("""
+- **투입원금**: 내가 실제 전략에 넣은 돈의 누적입니다. 추가입금/인출할 때만 바뀝니다.
+- **-5% 방어판정**: 투입원금 기준이 아니라 `오늘 T100 평가금액 ÷ 오늘 판정기준금액 - 1`로 계산합니다.
+- **오늘 판정기준금액**: `어제 T100 평가금액 + 오늘 T100 실제 추가매수액 - 오늘 T100 현금화매도액`입니다.
+- 예: 어제 평가금액 1,000만, 오늘 500만을 실제 T100에 추가매수했다면 오늘 판정기준은 1,500만입니다. 장마감 평가금액이 1,380만이면 -8%라서 방어 ON입니다.
+- **전략 추가입금**은 투입원금을 늘리는 돈이고, **T100 실제 추가매수액**은 그중 오늘 ETF를 실제로 산 금액입니다. 방어날에 일부만 사고 나머지를 현금으로 남기면 실제 산 금액만 T100 추가매수액에 넣습니다.
+- **5일 누적 -6%**는 최근 저장된 `1일변동률`을 누적해서 계산합니다. 추가입금이 있어도 실제 추가매수액을 보정하므로 수익으로 착각하지 않습니다.
+- 운용기록은 사용자 홈 폴더의 `magic_split_data`에 저장되어 새 ZIP을 덮어써도 유지됩니다.
+""")
+
+    defaults = {
+        "t100_v65_base": 10_000_000,
+        "t100_v65_value": 10_000_000,
+        "t100_v65_cash": 0,
+        "t100_v75_strategy_deposit": 0,
+        "t100_v75_strategy_withdrawal": 0,
+        "t100_v75_t100_buy": 0,
+        "t100_v75_t100_sell": 0,
+        "t100_v65_status": "1순위 운용중",
+        "t100_v65_assets": ["KODEX200", "NASDAQ100"],
+    }
+
+    # v76 fix: Streamlit은 이미 화면에 만든 위젯 key를 같은 실행 안에서 다시 바꾸면 오류가 난다.
+    # 저장 버튼에서 직접 t100_v65_base를 수정하지 않고, 다음 rerun 시작 시점에 먼저 반영한다.
+    pending_widget_updates = st.session_state.pop("_t100_v76_pending_widget_updates", None)
+    if isinstance(pending_widget_updates, dict):
+        for _k, _v in pending_widget_updates.items():
+            st.session_state[_k] = _v
+
+    # v79: 새 ZIP/새 세션에서도 최근 저장값을 입력칸에 자동 반영한다.
+    hist_for_latest_prefill = _load_t100_hybrid_history_v63()
+    latest_saved_for_input = _get_t100_hybrid_latest_saved_values_v79(hist_for_latest_prefill)
+    if latest_saved_for_input and not st.session_state.get("_t100_v79_latest_prefill_done", False):
+        if "t100_v65_base" not in st.session_state and "t100_v65_value" not in st.session_state:
+            _apply_t100_hybrid_latest_saved_to_inputs_v79(latest_saved_for_input)
+        st.session_state["_t100_v79_latest_prefill_done"] = True
+
+    if latest_saved_for_input:
+        p0, p1 = st.columns([1, 2])
+        with p0:
+            if st.button("최근 저장값 입력칸 불러오기", key="t100_v79_load_latest_inputs"):
+                _apply_t100_hybrid_latest_saved_to_inputs_v79(latest_saved_for_input)
+                st.session_state["_t100_v79_latest_prefill_done"] = True
+                st.success(
+                    f"최근 저장값({latest_saved_for_input.get('date', '')})을 입력칸에 불러왔습니다: "
+                    f"투입원금 {_fmt_won(latest_saved_for_input.get('base', 0))}, "
+                    f"오늘평가 {_fmt_won(latest_saved_for_input.get('value', 0))}"
+                )
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+        with p1:
+            st.caption(
+                f"최근 저장값: {latest_saved_for_input.get('date', '')} · "
+                f"투입원금 {_fmt_won(latest_saved_for_input.get('base', 0))} · "
+                f"당일평가 {_fmt_won(latest_saved_for_input.get('value', 0))}"
+            )
+
+    if st.button("천만원 실험값으로 초기화", key="t100_v65_reset"):
+        for k, v in defaults.items():
+            st.session_state[k] = v
+        st.success("천만원 실험값으로 초기화했습니다.")
+        try:
+            st.rerun()
+        except Exception:
+            pass
+
+    # 고정 규칙
+    lock_trigger = 0.50
+    defense_t100_ratio = 0.70
+    defense_cash_ratio = 0.30
+    split_t100_ratio = 0.60
+    split_wait_cash_ratio = 0.30
+    split_lock_cash_ratio = 0.10
+    daily_cap_trigger = -0.05
+    five_day_trigger = -0.06
+
+    st.subheader("1) 오늘 입력")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        base_before = st.number_input("T100 누적 투입원금 · 오늘 입출금 전", min_value=0, value=int(st.session_state.get("t100_v65_base", 10_000_000)), step=100_000, key="t100_v65_base")
+    with a2:
+        current_t100 = st.number_input("오늘 장마감 T100 평가금액", min_value=0, value=int(st.session_state.get("t100_v65_value", 10_000_000)), step=100_000, key="t100_v65_value")
+    with a3:
+        account_cash = st.number_input("계좌 예수금 · 참고", min_value=0, value=int(st.session_state.get("t100_v65_cash", 0)), step=100_000, key="t100_v65_cash")
+
+    dep1, dep2, dep3, dep4 = st.columns(4)
+    with dep1:
+        strategy_deposit = st.number_input("오늘 전략 추가입금", min_value=0, value=int(st.session_state.get("t100_v75_strategy_deposit", 0)), step=100_000, key="t100_v75_strategy_deposit")
+    with dep2:
+        strategy_withdrawal = st.number_input("오늘 전략 인출", min_value=0, value=int(st.session_state.get("t100_v75_strategy_withdrawal", 0)), step=100_000, key="t100_v75_strategy_withdrawal")
+    with dep3:
+        t100_buy_today = st.number_input("오늘 T100 실제 추가매수액", min_value=0, value=int(st.session_state.get("t100_v75_t100_buy", 0)), step=100_000, key="t100_v75_t100_buy")
+    with dep4:
+        t100_sell_today = st.number_input("오늘 T100 현금화매도액", min_value=0, value=int(st.session_state.get("t100_v75_t100_sell", 0)), step=100_000, key="t100_v75_t100_sell")
+
+    b1, b2 = st.columns(2)
+    with b1:
+        status_list = ["1순위 운용중", "6310 변신 후 운용중"]
+        status_default = st.session_state.get("t100_v65_status", "1순위 운용중")
+        status = st.selectbox("현재 상태", status_list, index=status_list.index(status_default) if status_default in status_list else 0, key="t100_v65_status")
+    with b2:
+        record_date = st.date_input("오늘 기준일", value=datetime.now().date(), key="t100_v65_date")
+    today_str = record_date.strftime("%Y-%m-%d") if hasattr(record_date, "strftime") else str(record_date)
+
+    base_after = max(0.0, float(base_before) + float(strategy_deposit) - float(strategy_withdrawal))
+    st.metric("저장 후 누적 투입원금", _fmt_won(base_after))
+
+    st.subheader("2) 현재 상황 통합판")
+    hist = _load_t100_hybrid_history_v63()
+    prev_eval, prev_label, prior_returns, prior_count = _get_t100_hybrid_prior_values_v75(hist, today_str, float(current_t100))
+
+    if prior_count >= 1:
+        decision_basis = max(0.0, float(prev_eval) + float(t100_buy_today) - float(t100_sell_today))
+        day_ret = (float(current_t100) / decision_basis - 1.0) if decision_basis > 0 else 0.0
+    else:
+        decision_basis = float(current_t100)
+        day_ret = 0.0
+
+    ret_for_5d = list(prior_returns[-4:]) + [float(day_ret)] if prior_count >= 1 else []
+    if len(ret_for_5d) >= 5:
+        five_ret = float(np.prod([1.0 + r for r in ret_for_5d[-5:]]) - 1.0)
+        five_label = "최근 5거래일 보정수익률 누적"
+        five_available = True
+    else:
+        five_ret = 0.0
+        five_label = f"기록 {len(ret_for_5d)}개뿐 · 5일신호 미사용"
+        five_available = False
+
+    daily_hit = (prior_count >= 1) and (day_ret <= daily_cap_trigger)
+    five_hit = bool(five_available) and (five_ret <= five_day_trigger)
+    risk_signal = bool(daily_hit or five_hit)
+
+    # v78: 사용자가 한눈에 볼 수 있는 현재 상황 통합판
+    st.markdown("#### 현재 운용상태")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("현재 누적 투입원금", _fmt_won(base_after))
+    c2.metric(f"어제 평가금액 · {prev_label}", _fmt_won(prev_eval))
+    c3.metric("오늘 평가금액", _fmt_won(current_t100))
+    c4.metric("오늘 판정기준", _fmt_won(decision_basis))
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("1일 변동률", f"{day_ret*100:.2f}%" if prior_count >= 1 else "기준일")
+    d2.metric("하루 -5%", "걸림" if daily_hit else "아님")
+    d3.metric("5일 누적", f"{five_ret*100:.2f}%" if five_available else "기록부족")
+    d4.metric("5일 -6%", "걸림" if five_hit else "아님")
+    d5.metric("최종 방어신호", "ON" if risk_signal else "OFF")
+
+    if risk_signal:
+        st.error("방어 ON: 다음 거래일은 총 운용금 기준 T100 70% / 현금 30%로 맞춥니다.")
+    else:
+        st.success("방어 OFF: 다음 거래일은 T100 100% 운용 기준입니다.")
+
+    with st.expander("방어판정 계산식 보기", expanded=False):
+        st.write(f"1일 변동률 = 오늘 평가금액 {_fmt_won(current_t100)} ÷ 오늘 판정기준 {_fmt_won(decision_basis)} - 1 = {day_ret*100:.2f}%")
+        st.write(f"오늘 판정기준 = 어제 평가금액 {_fmt_won(prev_eval)} + 오늘 T100 실제 추가매수액 {_fmt_won(t100_buy_today)} - 오늘 T100 현금화매도액 {_fmt_won(t100_sell_today)}")
+        if five_available:
+            st.write(f"5일 누적 변동률 = 최근 5개 1일 변동률 누적 = {five_ret*100:.2f}%")
+        else:
+            st.write(f"5일 누적 변동률 = {five_label}")
+
+    if prior_count == 0:
+        st.info("저장기록이 아직 없습니다. 오늘 기록을 저장하면 내일부터 어제 평가금액을 자동으로 씁니다.")
+    elif not five_available:
+        st.info(f"5일 누적 기록 부족: {five_label}. 지금은 하루 -5%만 판정합니다.")
+
+    if float(strategy_deposit) > 0 or float(strategy_withdrawal) > 0 or float(t100_buy_today) > 0 or float(t100_sell_today) > 0:
+        st.info(
+            f"오늘 입출금/매매 보정 적용: 판정기준 = 어제 평가 {_fmt_won(prev_eval)} + T100추가매수 {_fmt_won(t100_buy_today)} - T100현금화매도 {_fmt_won(t100_sell_today)} = {_fmt_won(decision_basis)}"
+        )
+
+    with st.expander("운용기록 저장 위치 / 백업", expanded=False):
+        st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
+        st.code(str(T100_HYBRID_HISTORY_PATH))
+        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+            st.caption("전체 초기화 상태: 구버전 운용기록 자동복사를 막고 있습니다. 새로 저장하거나 백업을 복원하면 자동으로 해제됩니다.")
+        hist_backup = _load_t100_hybrid_history_v63()
+        st.download_button(
+            "T100 운용기록 백업 CSV 다운로드",
+            data=hist_backup.to_csv(index=False).encode("utf-8-sig"),
+            file_name="t100_hybrid_live_history_backup.csv",
+            mime="text/csv",
+            key="t100_v74_history_backup_download",
+        )
+        uploaded_history = st.file_uploader("백업 CSV 복원", type=["csv"], key="t100_v74_history_restore_upload")
+        if uploaded_history is not None and st.button("업로드한 운용기록으로 복원", key="t100_v74_history_restore_button"):
+            try:
+                try:
+                    restore_df = pd.read_csv(uploaded_history, encoding="utf-8-sig")
+                except Exception:
+                    uploaded_history.seek(0)
+                    restore_df = pd.read_csv(uploaded_history, encoding="cp949")
+                # 구버전 CSV도 로더가 보정하게 원본 컬럼을 최대한 살려 저장
+                try:
+                    if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+                        T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+                except Exception:
+                    pass
+                restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+                st.success("T100 운용기록을 복원했습니다.")
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"복원 실패: {e}")
+
+    save1, save2, save3 = st.columns(3)
+    with save1:
+        if st.button("오늘 운용기록 저장/갱신", type="primary", key="t100_v65_save"):
+            _save_t100_hybrid_history_v63({
+                "기준일": today_str,
+                "투입원금": int(round(base_after)),
+                "전일평가금액": int(round(prev_eval)) if prior_count >= 1 else "",
+                "당일평가금액": int(round(current_t100)),
+                "추가입금": int(round(strategy_deposit)),
+                "인출": int(round(strategy_withdrawal)),
+                "T100추가매수": int(round(t100_buy_today)),
+                "T100현금화매도": int(round(t100_sell_today)),
+                "판정기준금액": int(round(decision_basis)),
+                "1일변동률": float(day_ret) if prior_count >= 1 else "",
+                "5일누적변동률": float(five_ret) if five_available else "",
+                "방어신호": "ON" if risk_signal else "OFF",
+                "운용기준금액": int(round(current_t100)),
+                "T100평가금액": int(round(current_t100)),
+                "전략CASH": 0,
+                "생활비잠금현금": 0,
+                "계좌예수금메모": int(round(account_cash)),
+                "운용모드": str(status),
+                "메모": "v79 최근 저장값 자동불러오기 + 현재상황 통합판 저장",
+            })
+            st.session_state["_t100_v76_pending_widget_updates"] = {
+                "t100_v65_base": int(round(base_after)),
+                "t100_v65_value": int(round(current_t100)),
+                "t100_v65_cash": int(round(account_cash)),
+                # 저장 후 입출금/매매 입력칸은 다음 실행에서 0으로 초기화한다.
+                "t100_v75_strategy_deposit": 0,
+                "t100_v75_strategy_withdrawal": 0,
+                "t100_v75_t100_buy": 0,
+                "t100_v75_t100_sell": 0,
+            }
+            st.success(f"{today_str} 기록을 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다.")
+            try:
+                st.rerun()
+            except Exception:
+                pass
+    with save2:
+        if st.button("오늘 기록 삭제", key="t100_v65_delete_today"):
+            hist2 = _load_t100_hybrid_history_v63()
+            if len(hist2) and "기준일" in hist2.columns:
+                hist2 = hist2[hist2["기준일"].astype(str) != today_str]
+                hist2.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+            st.warning(f"{today_str} 기록을 삭제했습니다.")
+            try:
+                st.rerun()
+            except Exception:
+                pass
+    with save3:
+        if st.button("운용기록 전체 초기화", key="t100_v65_clear"):
+            # v77: 고정 저장파일을 지운 뒤 구버전 앱 폴더 파일이 다시 자동복사되는 문제 방지
+            try:
+                if T100_HYBRID_HISTORY_PATH.exists():
+                    T100_HYBRID_HISTORY_PATH.unlink()
+            except Exception:
+                pass
+            try:
+                if T100_HYBRID_LEGACY_HISTORY_PATH.exists() and T100_HYBRID_LEGACY_HISTORY_PATH != T100_HYBRID_HISTORY_PATH:
+                    T100_HYBRID_LEGACY_HISTORY_PATH.unlink()
+            except Exception:
+                pass
+            try:
+                T100_HYBRID_CLEAR_MARKER_PATH.write_text("cleared", encoding="utf-8")
+            except Exception:
+                pass
+            st.session_state["_t100_v76_pending_widget_updates"] = {
+                "t100_v65_base": 10_000_000,
+                "t100_v65_value": 10_000_000,
+                "t100_v65_cash": 0,
+                "t100_v75_strategy_deposit": 0,
+                "t100_v75_strategy_withdrawal": 0,
+                "t100_v75_t100_buy": 0,
+                "t100_v75_t100_sell": 0,
+            }
+            st.warning("운용기록을 전체 초기화했습니다. 구버전 기록 자동복사도 차단했습니다.")
+            try:
+                st.rerun()
+            except Exception:
+                pass
+
+    hist_view = _load_t100_hybrid_history_v63()
+    if len(hist_view):
+        with st.expander("최근 저장기록", expanded=False):
+            recent_hist = hist_view.tail(10).copy()
+            # 보기 좋게 % 컬럼 추가
+            if "1일변동률" in recent_hist.columns:
+                recent_hist["1일변동률표시"] = recent_hist["1일변동률"].apply(_fmt_pct)
+            if "5일누적변동률" in recent_hist.columns:
+                recent_hist["5일누적표시"] = recent_hist["5일누적변동률"].apply(_fmt_pct)
+            show_cols = [c for c in ["기준일", "투입원금", "전일평가금액", "당일평가금액", "추가입금", "T100추가매수", "T100현금화매도", "판정기준금액", "1일변동률표시", "5일누적표시", "방어신호", "운용모드"] if c in recent_hist.columns]
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(recent_hist[show_cols], height=260, pin_rank=False)
+            else:
+                _ = st.dataframe(recent_hist[show_cols], use_container_width=True, height=260)
+
+    st.subheader("3) 6310 가능 여부")
+    base_amount = float(base_after)
+    lock_target = float(base_amount) * (1.0 + lock_trigger)
+    lock_possible = float(current_t100) >= lock_target if float(base_amount) > 0 else False
+    lock_profit = float(current_t100) - float(base_amount)
+    lock_need = max(0.0, lock_target - float(current_t100))
+
+    l1, l2, l3, l4 = st.columns(4)
+    l1.metric("T100 누적 투입원금", _fmt_won(base_amount))
+    l2.metric("오늘 T100 평가", _fmt_won(current_t100))
+    l3.metric("6310 기준", _fmt_won(lock_target))
+    l4.metric("6310 가능", "가능" if lock_possible else "불가")
+
+    if lock_possible:
+        st.success(f"6310 변신 가능: 투입원금 대비 수익 {_fmt_won(lock_profit)} / 수익률 {(float(current_t100)/float(base_amount)-1)*100:.2f}%")
+    else:
+        st.info(f"6310 아직 불가: 목표까지 {_fmt_won(lock_need)} 남았습니다.")
+
+    do_6310 = False
+    if status == "1순위 운용중":
+        do_6310 = st.checkbox("6310으로 전환하기", value=False, disabled=not lock_possible, key="t100_v65_do_6310")
+    else:
+        st.info("현재 상태가 6310 변신 후 운용중이므로 6310 유지 계산을 합니다.")
+
+    st.subheader("4) 오늘 결론")
+    all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]
+    default_assets = st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
+    t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v65_assets")
+    if not t100_assets:
+        t100_assets = ["CASH"]
+
+    rows = []
+    reb_rows = []
+    headline = ""
+
+    if status == "6310 변신 후 운용중":
+        total_basis = float(current_t100) / split_t100_ratio if split_t100_ratio > 0 else float(current_t100)
+        target_t100 = total_basis * split_t100_ratio
+        wait_cash = total_basis * split_wait_cash_ratio
+        lock_cash = total_basis * split_lock_cash_ratio
+        sell_t100 = target_t100 - float(current_t100)
+        headline = f"6310 유지: 현재 T100 {_fmt_won(current_t100)}를 60% 슬롯으로 보고, 대기현금 {_fmt_won(wait_cash)} / 생활비잠금 {_fmt_won(lock_cash)}를 유지하세요."
+        mode_name = "6310 유지"
+    elif do_6310:
+        total_basis = float(current_t100)
+        target_t100 = total_basis * split_t100_ratio
+        wait_cash = total_basis * split_wait_cash_ratio
+        lock_cash = total_basis * split_lock_cash_ratio
+        sell_t100 = target_t100 - float(current_t100)
+        headline = f"6310 전환: T100을 {_fmt_won(abs(sell_t100))} 매도해서 대기현금 {_fmt_won(wait_cash)}, 생활비잠금 {_fmt_won(lock_cash)}로 나누세요."
+        mode_name = "6310 전환"
+    elif risk_signal:
+        total_basis = float(current_t100)
+        target_t100 = total_basis * defense_t100_ratio
+        wait_cash = total_basis * defense_cash_ratio
+        lock_cash = 0.0
+        sell_t100 = target_t100 - float(current_t100)
+        reason_parts = []
+        if daily_hit:
+            reason_parts.append(f"하루 {day_ret*100:.2f}%")
+        if five_hit:
+            reason_parts.append(f"5일 {five_ret*100:.2f}%")
+        headline = f"방어 전환: {' / '.join(reason_parts)} 신호. T100을 {_fmt_won(abs(sell_t100))} 매도해 방어현금 {_fmt_won(wait_cash)}를 확보하세요."
+        mode_name = "1순위 방어"
+    else:
+        total_basis = float(current_t100)
+        target_t100 = float(current_t100)
+        wait_cash = 0.0
+        lock_cash = 0.0
+        sell_t100 = 0.0
+        headline = "1순위 공격 유지: 방어신호가 없으니 현재 T100 평가금액을 그대로 굴립니다."
+        mode_name = "1순위 공격"
+
+    if mode_name in ["1순위 공격", "1순위 방어", "6310 전환", "6310 유지"]:
+        per_asset = target_t100 / len(t100_assets) if t100_assets else target_t100
+        per_weight = (target_t100 / total_basis * 100.0 / len(t100_assets)) if total_basis > 0 and t100_assets else 0.0
+        for a in t100_assets:
+            rows.append({"구분": "T100 내부자산", "자산": a, "목표비중%": round(per_weight, 2), "목표금액": int(round(per_asset)), "비고": mode_name})
+    if wait_cash > 0:
+        rows.append({"구분": "대기/방어현금", "자산": "CASH", "목표비중%": round(wait_cash / total_basis * 100, 2) if total_basis else 0, "목표금액": int(round(wait_cash)), "비고": "방어 30% 또는 6310 대기 30%"})
+    if lock_cash > 0:
+        rows.append({"구분": "생활비/잠금현금", "자산": "CASH", "목표비중%": round(lock_cash / total_basis * 100, 2) if total_basis else 0, "목표금액": int(round(lock_cash)), "비고": "6310의 10%"})
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("오늘 모드", mode_name)
+    c2.metric("T100 계산 기준", _fmt_won(total_basis))
+    c3.metric("목표 T100", _fmt_won(target_t100))
+    c4.metric("계좌 예수금", _fmt_won(account_cash))
+
+    if mode_name in ["6310 전환", "1순위 방어"]:
+        st.warning(headline)
+    else:
+        st.success(headline)
+
+    target_df = pd.DataFrame(rows)
+    if 'show_pinned_dataframe' in globals():
+        _ = show_pinned_dataframe(target_df, height=240, pin_rank=False)
+    else:
+        _ = st.dataframe(target_df, use_container_width=True, height=240)
+
+    st.subheader("4-1) 실제 주문수량 계산")
+    st.caption("금액은 1주 단위 때문에 딱 맞지 않습니다. 앱은 목표금액을 넘기지 않도록 매수/매도 주수를 계산하고, 남는 금액은 현금으로 둡니다.")
+    code_map_v66 = {
+        "KODEX200": "069500",
+        "KOSDAQ150": "229200",
+        "NASDAQ100": "133690",
+        "SP500": "360750",
+        "GOLD": "411060",
+        "DOLLAR": "261240",
+        "CASH": "현금",
+    }
+    t100_target_rows = target_df[target_df["구분"].astype(str).eq("T100 내부자산")].copy() if len(target_df) else pd.DataFrame()
+    order_rows = []
+    if len(t100_target_rows) == 0:
+        st.info("T100 내부자산 목표가 없습니다.")
+    else:
+        st.markdown("현재가와 보유수량을 넣으면, 목표금액에 맞춰 **몇 주 사고/팔지** 계산합니다.")
+        for _, rr in t100_target_rows.iterrows():
+            asset = str(rr.get("자산", ""))
+            target_amt = float(rr.get("목표금액", 0) or 0)
+            code = code_map_v66.get(asset, "")
+            c1, c2, c3 = st.columns([1.1, 1.2, 1.2])
+            with c1:
+                st.write(f"**{asset}** `{code}`")
+                st.caption(f"목표금액 {_fmt_won(target_amt)}")
+            with c2:
+                price = st.number_input(f"{asset} 현재가", min_value=0, value=int(st.session_state.get(f"t100_v66_price_{asset}", 0)), step=10, key=f"t100_v66_price_{asset}")
+            with c3:
+                qty = st.number_input(f"{asset} 현재 보유수량", min_value=0, value=int(st.session_state.get(f"t100_v66_qty_{asset}", 0)), step=1, key=f"t100_v66_qty_{asset}")
+            current_amt = float(price) * float(qty)
+            diff = target_amt - current_amt
+            if float(price) <= 0:
+                action = "현재가 입력 필요"
+                order_qty = 0
+                order_amt = 0
+                after_qty = qty
+                after_amt = current_amt
+                gap = target_amt - after_amt
+            elif diff > 0:
+                order_qty = int(diff // float(price))
+                order_amt = order_qty * float(price)
+                after_qty = int(qty) + order_qty
+                after_amt = after_qty * float(price)
+                gap = target_amt - after_amt
+                action = "매수" if order_qty > 0 else "대기"
+            elif diff < 0:
+                order_qty = int(abs(diff) // float(price))
+                order_amt = order_qty * float(price)
+                after_qty = int(qty) - order_qty
+                after_amt = after_qty * float(price)
+                gap = target_amt - after_amt
+                action = "매도" if order_qty > 0 else "대기"
+            else:
+                action = "유지"
+                order_qty = 0
+                order_amt = 0
+                after_qty = qty
+                after_amt = current_amt
+                gap = 0
+            order_rows.append({
+                "자산": asset,
+                "코드": code,
+                "현재가": int(price),
+                "현재수량": int(qty),
+                "현재평가": int(round(current_amt)),
+                "목표금액": int(round(target_amt)),
+                "행동": action,
+                "주문수량": int(order_qty),
+                "예상주문금액": int(round(order_amt)),
+                "주문후수량": int(after_qty),
+                "주문후평가": int(round(after_amt)),
+                "목표대비잔차": int(round(gap)),
+            })
+        order_df = pd.DataFrame(order_rows)
+        if len(order_df):
+            show_cols = ["자산", "코드", "현재가", "현재수량", "현재평가", "목표금액", "행동", "주문수량", "예상주문금액", "주문후평가", "목표대비잔차"]
+            if 'show_pinned_dataframe' in globals():
+                _ = show_pinned_dataframe(order_df[show_cols], height=240, pin_rank=False)
+            else:
+                _ = st.dataframe(order_df[show_cols], use_container_width=True, height=240)
+            cash_leftover = 0
+            try:
+                cash_leftover = int(order_df.loc[order_df["행동"].eq("매수"), "목표대비잔차"].clip(lower=0).sum())
+            except Exception:
+                cash_leftover = 0
+            st.caption(f"매수 후 목표에 못 맞춘 잔돈은 현금으로 남깁니다. 예상 잔돈 합계: {_fmt_won(cash_leftover)}")
+
+    if mode_name == "6310 전환":
+        reb_rows.append({"해야할일": "T100 매도", "금액": int(round(abs(sell_t100))), "설명": "매도 후 30%는 대기현금, 10%는 생활비/잠금현금"})
+        reb_rows.append({"해야할일": "대기현금 확보", "금액": int(round(wait_cash)), "설명": "6310의 30%"})
+        reb_rows.append({"해야할일": "생활비/잠금 분리", "금액": int(round(lock_cash)), "설명": "6310의 10%"})
+    elif mode_name == "1순위 방어":
+        reb_rows.append({"해야할일": "T100 매도", "금액": int(round(abs(sell_t100))), "설명": "70/30 방어로 전환"})
+        reb_rows.append({"해야할일": "방어현금 확보", "금액": int(round(wait_cash)), "설명": "방어 30%"})
+    elif mode_name == "6310 유지":
+        reb_rows.append({"해야할일": "6310 유지", "금액": 0, "설명": "T100 평가금액을 60% 슬롯으로 보고 대기현금/잠금현금 유지"})
+    else:
+        reb_rows.append({"해야할일": "대기", "금액": 0, "설명": "현재 T100 유지"})
+
+    rebalance_df = pd.DataFrame(reb_rows)
+    st.subheader("5) 오늘 행동")
+    if 'show_pinned_dataframe' in globals():
+        _ = show_pinned_dataframe(rebalance_df, height=160, pin_rank=False)
+    else:
+        _ = st.dataframe(rebalance_df, use_container_width=True, height=160)
+
+    st.caption("추가입금 예: 어제 평가금액 1,000만, 오늘 T100 실제 추가매수액 500만이면 오늘 판정기준은 1,500만입니다. 장마감 평가가 1,425만 이하이면 하루 -5% 방어 ON입니다.")
+
+
+
+
+# =====================================================
+# v69: T100 A분할 월간 백테스트 유틸
+# =====================================================
+
+def build_t100_a_scalein_backtest(
+    start_date,
+    end_date,
+    total_initial=120_000_000,
+    entry_per_asset=30_000_000,
+    add_per_asset=5_000_000,
+    add_step_pct=5.0,
+    max_add_count=6,
+    take_profit_pct=5.0,
+    rebuy_first_on_tp=True,
+    cash_annual_rate=3.0,
+    fee_rate=0.0,
+    monthly_compound=True,
+    extended_universe=False,
+    kodex200_code="069500",
+    kosdaq150_code="229200",
+    nasdaq_code="133690",
+    sp500_code="360750|379800",
+    gold_code="411060|132030|319640",
+    dollar_code="261240|138230",
+    bond_code="114260|152380",
+):
+    """T100 A안 v73: 월초 상위2 ETF에 종목당 1차 진입, -5%마다 추가매수, 각 차수 +5% 익절.
+
+    규칙:
+    - 월 1회 리밸런싱: 매월 첫 검증 거래일에 기존 포지션 정리 후 새 상위2 진입.
+    - 1차: 종목당 entry_per_asset 매수.
+    - 증액복리 ON이면 매월 시작 총자산/초기자금 비율만큼 1차금액과 추가금액을 자동 확대/축소한다.
+    - 추가: 직전 활성차수 매수가 대비 -5%마다 월별 증액 적용 add_per_asset, 종목별 최대 max_add_count회.
+    - 익절: 각 차수별 매수가 대비 take_profit_pct% 도달 시 해당 차수만 매도.
+    - 1차는 익절되면 같은 날 entry_per_asset 규모로 즉시 재진입(옵션).
+    - 2차 이상은 한 달 안에서 해당 단계가 한 번 트리거되면 반복 재매수하지 않음.
+    - 다음 달 리밸런싱일에는 남은 모든 차수를 정리하고 새 월의 상위2로 교체.
+    """
+    try:
+        start_ts = pd.to_datetime(start_date)
+        end_ts = pd.to_datetime(end_date)
+        candidates = [
+            {"name": "KODEX200", "code": f"{kodex200_code}|069500|102110", "type": "asset", "market": "KR"},
+            {"name": "KOSDAQ150", "code": f"{kosdaq150_code}|229200|233740", "type": "asset", "market": "KR"},
+            {"name": "NASDAQ100", "code": f"{nasdaq_code}|133690|379810|367380|381170", "type": "asset", "market": "KR"},
+            {"name": "GOLD", "code": f"{gold_code}|411060|132030|319640", "type": "asset", "market": "KR"},
+            {"name": "DOLLAR", "code": f"{dollar_code}|261240|138230", "type": "asset", "market": "KR"},
+        ]
+        if bool(extended_universe):
+            candidates.insert(3, {"name": "SP500", "code": f"{sp500_code}|360750|379800|143850", "type": "asset", "market": "KR"})
+            candidates.append({"name": "BOND", "code": f"{bond_code}|114260|152380", "type": "asset", "market": "KR"})
+
+        calendar_candidates = [{"name":"KODEX200","code":"069500|102110","type":"asset","market":"KR"}]
+        cal_df, _cal_status = _bt_bunker_asset_prices(calendar_candidates, [], start_ts, end_ts, return_status=True)
+        if cal_df is not None and len(cal_df) > 0:
+            cal_idx = pd.DatetimeIndex(cal_df.index)
+            cal_idx = cal_idx[(cal_idx >= start_ts) & (cal_idx <= end_ts)]
+        else:
+            cal_idx = pd.bdate_range(start_ts, end_ts)
+        dates = list(pd.DatetimeIndex(cal_idx).sort_values().drop_duplicates())
+        if len(dates) == 0:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"오류":"검증 거래일이 없습니다."}
+
+        price_df, status_df = _bt_bunker_asset_prices(candidates, dates, start_ts, end_ts, return_status=True)
+        if price_df is None or len(price_df) == 0:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), status_df, {"오류":"ETF 가격 데이터를 불러오지 못했습니다."}
+        price_df = price_df.sort_index().ffill()
+        trade_dates = [d for d in dates if d in price_df.index or len(price_df.loc[price_df.index <= d]) > 0]
+        if len(trade_dates) == 0:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), status_df, {"오류":"사용 가능한 거래일이 없습니다."}
+
+        total_initial = float(total_initial or 0)
+        base_entry_per_asset = float(entry_per_asset or 0)
+        base_add_per_asset = float(add_per_asset or 0)
+        entry_per_asset = base_entry_per_asset
+        add_per_asset = base_add_per_asset
+        monthly_compound = bool(monthly_compound)
+        add_step_pct = float(add_step_pct or 5.0) / 100.0
+        max_add_count = int(max_add_count or 0)
+        take_profit_pct = float(take_profit_pct or 5.0) / 100.0
+        rebuy_first_on_tp = bool(rebuy_first_on_tp)
+        fee_rate = float(fee_rate or 0.0)
+        daily_cash_rate = (1.0 + float(cash_annual_rate or 0.0) / 100.0) ** (1.0 / 252.0) - 1.0
+
+        cash = total_initial
+        positions = {}  # asset -> {monthly_ref, triggered_levels:set, slots:list[dict]}
+        rows, trade_rows, monthly_rows = [], [], []
+        peak = total_initial
+        max_dd = 0.0
+        last_month = None
+        last_total = total_initial
+        prev_date = None
+        slot_seq = 0
+
+        def get_px(asset, date):
+            if asset not in price_df.columns:
+                return np.nan
+            part = pd.to_numeric(price_df.loc[price_df.index <= pd.to_datetime(date), asset], errors="coerce").dropna()
+            return float(part.iloc[-1]) if len(part) else np.nan
+
+        def portfolio_value(date):
+            val = float(cash)
+            for a, apos in positions.items():
+                px = get_px(a, date)
+                if pd.isna(px) or px <= 0:
+                    continue
+                for sl in apos.get("slots", []):
+                    if bool(sl.get("active", True)):
+                        val += float(sl.get("qty", 0.0)) * px
+            return val
+
+        def total_asset_value(asset, date):
+            px = get_px(asset, date)
+            if pd.isna(px) or px <= 0 or asset not in positions:
+                return 0.0
+            return sum(float(sl.get("qty", 0.0)) * px for sl in positions[asset].get("slots", []) if bool(sl.get("active", True)))
+
+        def active_slots(asset=None):
+            if asset is not None:
+                return [sl for sl in positions.get(asset, {}).get("slots", []) if bool(sl.get("active", True))]
+            out = []
+            for a, apos in positions.items():
+                for sl in apos.get("slots", []):
+                    if bool(sl.get("active", True)):
+                        out.append((a, sl))
+            return out
+
+        def buy_slot(date, asset, amount, level=1, kind="매수"):
+            nonlocal cash, positions, slot_seq
+            amount = max(0.0, min(float(amount or 0.0), float(cash)))
+            px = get_px(asset, date)
+            if amount <= 0 or pd.isna(px) or px <= 0:
+                return 0.0
+            fee = amount * fee_rate
+            net = max(0.0, amount - fee)
+            qty = net / px
+            if qty <= 0:
+                return 0.0
+            if asset not in positions:
+                positions[asset] = {"monthly_ref": px, "triggered_levels": set(), "slots": [], "add_amount": base_add_per_asset, "entry_amount": base_entry_per_asset, "month_scale": 1.0}
+            slot_seq += 1
+            slot = {"slot_id": slot_seq, "level": int(level), "qty": qty, "entry_price": px, "invested": amount, "entry_date": pd.to_datetime(date).strftime("%Y-%m-%d"), "active": True}
+            positions[asset]["slots"].append(slot)
+            cash -= amount
+            trade_rows.append({"기준일": pd.to_datetime(date).strftime("%Y-%m-%d"), "구분": kind, "자산": asset, "차수": int(level), "가격": px, "수량": qty, "금액": amount, "수수료": fee, "실현손익": 0.0, "메모": f"{kind} / 차수 {level}"})
+            return amount
+
+        def sell_slot(date, asset, slot, kind="익절", reason=""):
+            nonlocal cash
+            px = get_px(asset, date)
+            if pd.isna(px) or px <= 0 or not bool(slot.get("active", True)):
+                return 0.0
+            qty = float(slot.get("qty", 0.0))
+            gross = qty * px
+            fee = gross * fee_rate
+            cash += gross - fee
+            invested = float(slot.get("invested", 0.0))
+            pnl = gross - fee - invested
+            slot["active"] = False
+            trade_rows.append({"기준일": pd.to_datetime(date).strftime("%Y-%m-%d"), "구분": kind, "자산": asset, "차수": int(slot.get("level", 0)), "가격": px, "수량": qty, "금액": gross, "수수료": fee, "실현손익": pnl, "메모": reason or f"{kind} / 차수 {slot.get('level')}"})
+            return gross
+
+        def sell_all(date, reason="월간리밸런싱"):
+            nonlocal positions
+            for a in list(positions.keys()):
+                for sl in list(positions.get(a, {}).get("slots", [])):
+                    if bool(sl.get("active", True)):
+                        sell_slot(date, a, sl, kind="월말정리", reason=reason)
+            positions = {}
+
+        for i, d in enumerate(trade_dates):
+            d = pd.to_datetime(d)
+            if i > 0:
+                cash *= (1.0 + daily_cash_rate)
+            month_key = d.strftime("%Y-%m")
+            new_month = (month_key != last_month)
+
+            if new_month:
+                if last_month is not None and len(active_slots()) > 0:
+                    sell_all(d, reason="월초 새 리밸런싱 전 정리")
+                month_start_total = portfolio_value(d)
+                month_scale = (month_start_total / total_initial) if (monthly_compound and total_initial > 0) else 1.0
+                # 월별 증액복리: 총자산이 커지면 1차/추가금도 같은 비율로 커진다.
+                month_entry_per_asset = base_entry_per_asset * month_scale
+                month_add_per_asset = base_add_per_asset * month_scale
+                asof = prev_date if prev_date is not None else d
+                cols = [c for c in ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND"] if c in price_df.columns]
+                sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index)
+                picks, detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
+                picks = [p for p in picks if p in cols]
+                if len(picks) == 0 and detail is not None and len(detail) > 0:
+                    dd = detail.copy()
+                    dd["score"] = pd.to_numeric(dd.get("score", np.nan), errors="coerce")
+                    dd = dd.dropna(subset=["score"]).sort_values("score", ascending=False)
+                    picks = [x for x in dd["asset"].astype(str).tolist() if x in cols][:2]
+                bought = 0.0
+                for pck in picks[:2]:
+                    px = get_px(pck, d)
+                    if not pd.isna(px) and px > 0:
+                        positions[pck] = {"monthly_ref": px, "triggered_levels": set(), "slots": [], "add_amount": month_add_per_asset, "entry_amount": month_entry_per_asset, "month_scale": month_scale}
+                    bought += buy_slot(d, pck, month_entry_per_asset, level=1, kind="월초1차")
+                monthly_rows.append({"월": month_key, "리밸런싱일": d.strftime("%Y-%m-%d"), "선택1": picks[0] if len(picks) > 0 else "CASH", "선택2": picks[1] if len(picks) > 1 else "", "월시작총자산": month_start_total, "증액배율": month_scale, "종목당1차금액": month_entry_per_asset, "종목당추가금액": month_add_per_asset, "월초매수금액": bought, "리밸런싱후현금": cash})
+                last_month = month_key
+
+            # 1) 차수별 +5% 익절. 1차는 익절 후 즉시 재진입 옵션.
+            for a in list(positions.keys()):
+                px = get_px(a, d)
+                if pd.isna(px) or px <= 0:
+                    continue
+                # 같은 날 반복 재진입->즉시익절 루프를 막기 위해, 최초 스냅샷 슬롯만 평가.
+                snapshot = list(active_slots(a))
+                for sl in snapshot:
+                    ep = float(sl.get("entry_price", np.nan))
+                    if pd.isna(ep) or ep <= 0:
+                        continue
+                    if px >= ep * (1.0 + take_profit_pct):
+                        lvl = int(sl.get("level", 0))
+                        sell_slot(d, a, sl, kind=f"익절{lvl}차", reason=f"매수가 대비 +{take_profit_pct*100:.1f}% 익절")
+                        if lvl == 1 and rebuy_first_on_tp:
+                            buy_slot(d, a, entry_per_asset, level=1, kind="1차재진입")
+
+            # 2) 월중 추가매수 v72: 직전 활성차수 매수가 대비 -5%마다 순차 진입.
+            #    기존 v70은 월초 기준가 대비 -5/-10/-15%를 한 번에 계산해서,
+            #    하루에 3차/4차가 동시에 들어가는 문제가 있었다.
+            #    실전 차수 운용은 한 거래일에 한 종목당 최대 1개 차수만 추가한다.
+            for a in list(positions.keys()):
+                apos = positions.get(a, {})
+                px = get_px(a, d)
+                if pd.isna(px) or px <= 0:
+                    continue
+
+                triggered = set(apos.get("triggered_levels", set()))
+                act = [sl for sl in apos.get("slots", []) if bool(sl.get("active", True))]
+                if len(act) == 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                active_levels = sorted(set(int(sl.get("level", 0)) for sl in act if int(sl.get("level", 0)) >= 1))
+                if len(active_levels) == 0:
+                    continue
+
+                # 추가차수가 모두 청산되어 1차만 남아 있으면 새 1차 사이클로 보고 추가차수 기록을 리셋한다.
+                if active_levels == [1] and len([sl for sl in act if int(sl.get("level", 0)) >= 2]) == 0:
+                    triggered = set()
+
+                # 아직 사지 않은 가장 낮은 추가차수만 검토한다. 예: 2차 -> 3차 -> 4차 순서.
+                next_level = None
+                for lv in range(2, max_add_count + 2):
+                    if lv not in triggered and lv not in active_levels:
+                        next_level = lv
+                        break
+                if next_level is None:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                prev_level = next_level - 1
+                prev_slots = [sl for sl in act if int(sl.get("level", 0)) == prev_level]
+                if len(prev_slots) == 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                # 같은 차수 후보가 여러 개면 가장 최근 진입분을 기준으로 한다.
+                prev_slot = sorted(prev_slots, key=lambda sl: str(sl.get("entry_date", "")))[-1]
+                prev_ep = float(prev_slot.get("entry_price", np.nan))
+                if pd.isna(prev_ep) or prev_ep <= 0:
+                    apos["triggered_levels"] = triggered
+                    positions[a] = apos
+                    continue
+
+                trigger = prev_ep * (1.0 - add_step_pct)
+                if px <= trigger and cash > 0:
+                    month_add_amount = float(apos.get("add_amount", base_add_per_asset))
+                    used = buy_slot(d, a, month_add_amount, level=next_level, kind=f"추가{next_level}차")
+                    if used > 0:
+                        triggered.add(next_level)
+
+                apos["triggered_levels"] = triggered
+                positions[a] = apos
+
+            total = portfolio_value(d)
+            peak = max(peak, total)
+            dd = total / peak - 1.0 if peak > 0 else 0.0
+            max_dd = min(max_dd, dd)
+            day_ret = total / last_total - 1.0 if last_total > 0 and i > 0 else 0.0
+            row = {"기준일": d.strftime("%Y-%m-%d"), "총자산": total, "현금": cash, "일수익률": day_ret*100, "누적수익률": (total/total_initial-1.0)*100 if total_initial>0 else 0.0, "MDD": dd*100, "보유자산": ",".join([a for a in positions.keys() if len(active_slots(a))>0]) if len(active_slots()) else "CASH"}
+            for a in positions.keys():
+                val = total_asset_value(a, d)
+                row[f"{a}_평가금액"] = val
+                row[f"{a}_활성차수"] = "/".join([str(int(sl.get("level",0))) for sl in active_slots(a)])
+                row[f"{a}_추가단계"] = len(set([int(sl.get("level",0)) for sl in active_slots(a) if int(sl.get("level",0)) >= 2]))
+            rows.append(row)
+            last_total = total
+            prev_date = d
+
+        daily_df = pd.DataFrame(rows)
+        trade_df = pd.DataFrame(trade_rows)
+        monthly_df = pd.DataFrame(monthly_rows)
+        if len(daily_df) == 0:
+            return daily_df, trade_df, monthly_df, status_df, {"오류":"결과가 비어 있습니다."}
+        final_value = float(daily_df["총자산"].iloc[-1])
+        total_return = final_value / total_initial - 1.0 if total_initial > 0 else 0.0
+        days = max(1, (pd.to_datetime(daily_df["기준일"].iloc[-1]) - pd.to_datetime(daily_df["기준일"].iloc[0])).days)
+        cagr = (final_value / total_initial) ** (365.25 / days) - 1.0 if total_initial > 0 and final_value > 0 else np.nan
+        worst_day = float(pd.to_numeric(daily_df["일수익률"], errors="coerce").min()) if len(daily_df) else np.nan
+        add_count = int((trade_df["구분"].astype(str).str.contains("추가")).sum()) if len(trade_df) else 0
+        tp_count = int((trade_df["구분"].astype(str).str.contains("익절")).sum()) if len(trade_df) else 0
+        rebuy_count = int((trade_df["구분"].astype(str) == "1차재진입").sum()) if len(trade_df) else 0
+        monthly_count = int((trade_df["구분"].astype(str) == "월초1차").sum()) if len(trade_df) else 0
+        realized_pnl = float(pd.to_numeric(trade_df.get("실현손익", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(trade_df) else 0.0
+        summary = {
+            "전략": "T100_A_3000_하락5%추가_익절5%_1차재진입",
+            "시작일": daily_df["기준일"].iloc[0],
+            "종료일": daily_df["기준일"].iloc[-1],
+            "초기자금": total_initial,
+            "최종자산": final_value,
+            "총수익률(%)": total_return * 100,
+            "연복리(%)": cagr * 100 if not pd.isna(cagr) else np.nan,
+            "MDD(%)": max_dd * 100,
+            "최악하루(%)": worst_day,
+            "월초매수건수": monthly_count,
+            "추가매수건수": add_count,
+            "익절건수": tp_count,
+            "1차재진입건수": rebuy_count,
+            "실현손익합계": realized_pnl,
+            "마지막보유": daily_df["보유자산"].iloc[-1],
+            "설정": f"기준 종목당 1차 {base_entry_per_asset:,.0f}원 / 직전차수 대비 -{add_step_pct*100:.1f}%마다 기준 {base_add_per_asset:,.0f}원 x {max_add_count}회 / 월별증액 {'ON' if monthly_compound else 'OFF'} / +{take_profit_pct*100:.1f}% 익절 / 1차재진입 {'ON' if rebuy_first_on_tp else 'OFF'} / 하루최대1차수 / {'확장형' if extended_universe else '기본형'}",
+        }
+        return daily_df, trade_df, monthly_df, status_df, summary
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"오류": str(e)}
+
+
+
+# =====================================================
+# v81. 미국 ETF T100 백테스트 - 실전운용 보존 + 데이터 로더 강화
+# =====================================================
+
+def _bt_load_yahoo_chart_close_series(ticker, start_date, end_date, lookback_days=260):
+    """Yahoo chart API 백업 로더.
+
+    Stooq/FDR가 비어 있을 때 미국 ETF 일봉을 받아온다.
+    CSV 다운로드 방식은 crumb/cookie 이슈가 있어 chart JSON API를 사용한다.
+    """
+    try:
+        t = str(ticker or "").strip().upper()
+        if not t or t.isdigit():
+            return pd.Series(dtype=float)
+        sd = pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)
+        ed = pd.to_datetime(end_date) + pd.DateOffset(days=30)
+        p1 = int(pd.Timestamp(sd).timestamp())
+        p2 = int(pd.Timestamp(ed).timestamp())
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{t}"
+        params = {
+            "period1": p1,
+            "period2": p2,
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        }
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return pd.Series(dtype=float)
+        js = r.json()
+        result = (((js or {}).get("chart") or {}).get("result") or [])
+        if not result:
+            return pd.Series(dtype=float)
+        item = result[0]
+        ts = item.get("timestamp") or []
+        quote = (((item.get("indicators") or {}).get("quote") or [{}])[0])
+        adj = (((item.get("indicators") or {}).get("adjclose") or [{}])[0]).get("adjclose")
+        close = adj if adj is not None else quote.get("close")
+        if not ts or close is None:
+            return pd.Series(dtype=float)
+        idx = pd.to_datetime(ts, unit="s", errors="coerce").tz_localize(None).normalize()
+        s = pd.Series(pd.to_numeric(close, errors="coerce"), index=idx, dtype=float).dropna().sort_index()
+        s = s[(s.index >= sd) & (s.index <= ed)]
+        s.name = t
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
+
 
 def _us_t100_candidate_presets():
     return {
@@ -9930,6 +11087,54 @@ def _us_t100_candidate_presets():
     }
 
 
+def _us_t100_load_one_series(ticker, start_date, end_date, lookback_days=260):
+    """미국 ETF 1개 가격 로더. FDR → Stooq → Yahoo 순서로 시도."""
+    t = str(ticker or "").strip().upper()
+    tried = []
+    if not t:
+        return pd.Series(dtype=float), "EMPTY", tried
+
+    # 1) FinanceDataReader 직접
+    try:
+        tried.append("FDR")
+        sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)).strftime("%Y-%m-%d")
+        ed = (pd.to_datetime(end_date) + pd.DateOffset(days=30)).strftime("%Y-%m-%d")
+        raw = fdr.DataReader(t, sd, ed)
+        if raw is not None and len(raw) > 0:
+            close = _ohlcv_close_series(raw)
+            if close is None or len(close) == 0:
+                close = pd.to_numeric(raw.get("Close", np.nan), errors="coerce").dropna()
+            close.index = pd.to_datetime(close.index).tz_localize(None) if getattr(close.index, 'tz', None) is not None else pd.to_datetime(close.index)
+            close = pd.to_numeric(close, errors="coerce").dropna().sort_index()
+            if len(close) > 0:
+                close.name = t
+                return close, "FDR", tried
+    except Exception:
+        pass
+
+    # 2) Stooq
+    try:
+        tried.append("Stooq")
+        s = _bt_load_stooq_close_series(t, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            s.name = t
+            return s, "Stooq", tried
+    except Exception:
+        pass
+
+    # 3) Yahoo Chart API
+    try:
+        tried.append("YahooChart")
+        s = _bt_load_yahoo_chart_close_series(t, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            s.name = t
+            return s, "YahooChart", tried
+    except Exception:
+        pass
+
+    return pd.Series(dtype=float), "실패", tried
+
+
 def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=260):
     rows = []
     data = {}
@@ -9937,19 +11142,20 @@ def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=26
         t = str(ticker or "").strip().upper()
         if not t:
             continue
-        try:
-            s = _bt_load_stooq_close_series(t, start_date, end_date, lookback_days=lookback_days)
-            status = "성공" if s is not None and len(s) > 0 else "실패"
-            rows.append({
-                "티커": t, "설명": desc, "상태": status,
-                "행수": int(len(s)) if s is not None else 0,
-                "첫데이터일": s.index.min().strftime("%Y-%m-%d") if s is not None and len(s) else "",
-                "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if s is not None and len(s) else "",
-            })
-            if s is not None and len(s) > 0:
-                data[t] = pd.to_numeric(s, errors="coerce").dropna()
-        except Exception as e:
-            rows.append({"티커": t, "설명": desc, "상태": f"오류:{e}", "행수": 0, "첫데이터일": "", "마지막데이터일": ""})
+        s, source, tried = _us_t100_load_one_series(t, start_date, end_date, lookback_days=lookback_days)
+        status = "성공" if s is not None and len(s) > 0 else "실패"
+        rows.append({
+            "티커": t,
+            "설명": desc,
+            "상태": status,
+            "사용소스": source,
+            "시도": "→".join(tried),
+            "행수": int(len(s)) if s is not None else 0,
+            "첫데이터일": s.index.min().strftime("%Y-%m-%d") if s is not None and len(s) else "",
+            "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if s is not None and len(s) else "",
+        })
+        if s is not None and len(s) > 0:
+            data[t] = pd.to_numeric(s, errors="coerce").dropna()
     if not data:
         return pd.DataFrame(), pd.DataFrame(rows)
     idx = None
@@ -10019,55 +11225,50 @@ def _us_t100_pick(price_df, asof_date, max_assets=2, method="3개월+6개월"):
         else:
             ma = float(s.tail(45).mean()); ma_label = "MA45"
         ok = (not pd.isna(score)) and score > 0 and close > ma
-        rows.append({"자산": col, "점수": score, "1개월": ret21, "3개월": ret63, "6개월": ret126, "추세": ma_label, "종가": close, "MA": ma, "통과": bool(ok)})
+        rows.append({"자산": col, "점수": score, "1개월": ret21, "3개월": ret63, "6개월": ret126, "추세": ma_label, "종가": close, "이평": ma, "선택가능": ok})
     df = pd.DataFrame(rows)
     if len(df) == 0:
         return [], df
-    passed = df[df["통과"]].copy()
-    if len(passed) == 0:
-        # 전부 MA에서 막히면 점수 양수 상위로 완화. 기존 T100 쪽과 같은 현실 보정.
-        passed = df[pd.to_numeric(df["점수"], errors="coerce") > 0].copy()
-    if len(passed) == 0:
-        return [], df.sort_values("점수", ascending=False)
-    passed = passed.sort_values("점수", ascending=False)
-    return list(passed["자산"].head(int(max_assets))), df.sort_values("점수", ascending=False)
+    df = df.sort_values("점수", ascending=False)
+    picks = df[df["선택가능"] == True].head(int(max_assets))["자산"].tolist()
+    if len(picks) == 0:
+        # 모두 음수/이평 아래면 현금으로 도망. 단 백테스트가 완전 비지 않게 가장 강한 자산 1개도 기록용으로만 둔다.
+        picks = []
+    return picks, df
 
 
 def _us_t100_run_backtest(price_df, initial=100000.0, max_assets=2, cash_rate=3.0, use_cap=True, cap1=-5.0, cap5=-6.0, defense_exposure=0.70, mom_method="3개월+6개월"):
-    if price_df is None or len(price_df) < 30:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame([{"오류": "가격 데이터 부족"}])
-    price = price_df.copy().sort_index()
+    price = price_df.copy().sort_index().ffill()
     price = price.dropna(how="all")
     ret = price.pct_change().fillna(0.0)
+    dates = price.index
+    if len(dates) == 0:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     daily_cash = (1.0 + float(cash_rate) / 100.0) ** (1.0 / 252.0) - 1.0
-
     equity = float(initial)
     desired_exposure = 1.0
     current_weights = {"CASH": 1.0}
     last_month = None
     last_picks = []
+    daily_rets = []
     rows = []
     rebal_rows = []
-    daily_rets = []
 
-    dates = list(price.index)
     for i, date in enumerate(dates):
-        date = pd.to_datetime(date)
         prev_date = dates[i - 1] if i > 0 else date
         month_key = date.strftime("%Y-%m")
-        need_rebalance = (i == 0) or (month_key != last_month) or bool(rows and rows[-1].get("내일노출", desired_exposure) != desired_exposure)
+        prev_next_exp = rows[-1].get("내일노출", desired_exposure) if rows else desired_exposure
+        need_rebalance = (i == 0) or (month_key != last_month) or bool(prev_next_exp != desired_exposure)
 
         if need_rebalance:
             asof = prev_date if i > 0 else date
             picks, detail = _us_t100_pick(price, asof, max_assets=max_assets, method=mom_method)
             last_picks = picks
-            weights = {}
             if len(picks) == 0 or desired_exposure <= 0:
                 weights = {"CASH": 1.0}
             else:
                 stock_w = float(desired_exposure) / len(picks)
-                for p in picks:
-                    weights[p] = stock_w
+                weights = {p: stock_w for p in picks}
                 cash_w = 1.0 - float(desired_exposure)
                 if cash_w > 0:
                     weights["CASH"] = cash_w
@@ -10082,9 +11283,7 @@ def _us_t100_run_backtest(price_df, initial=100000.0, max_assets=2, cash_rate=3.
             })
 
         dr = 0.0
-        if i == 0:
-            dr = 0.0
-        else:
+        if i > 0:
             for asset, w in current_weights.items():
                 if asset == "CASH":
                     dr += float(w) * daily_cash
@@ -10095,10 +11294,7 @@ def _us_t100_run_backtest(price_df, initial=100000.0, max_assets=2, cash_rate=3.
         equity = equity * (1.0 + dr)
         daily_rets.append(dr)
         ret1 = dr * 100.0
-        if len(daily_rets) >= 5:
-            ret5 = (np.prod([1.0 + x for x in daily_rets[-5:]]) - 1.0) * 100.0
-        else:
-            ret5 = np.nan
+        ret5 = (np.prod([1.0 + x for x in daily_rets[-5:]]) - 1.0) * 100.0 if len(daily_rets) >= 5 else np.nan
         cap1_on = bool(use_cap and ret1 <= float(cap1))
         cap5_on = bool(use_cap and (not pd.isna(ret5)) and ret5 <= float(cap5))
         defense_on = cap1_on or cap5_on
@@ -10158,8 +11354,8 @@ def _us_t100_make_zip(outputs):
 
 def _render_us_etf_t100_backtest_menu():
     st.header("9. 미국 ETF T100 백테스트")
-    st.caption("v80: 미국 상장 ETF 후보군으로 월간 상위 2개 T100 + CAP5/5일 -6% 방어를 검증합니다.")
-    st.info("데이터는 앱 실행 시 Stooq 일별 가격 CSV를 불러옵니다. 가격 기준 백테스트라 배당/세금/환전수수료는 별도 반영해야 합니다.")
+    st.caption("v81: v79 실전운용판은 그대로 보존하고, 미국 ETF 데이터 로더를 FDR→Stooq→YahooChart 3단으로 강화했습니다.")
+    st.info("미국 ETF 가격 데이터는 FDR, Stooq, Yahoo Chart API 순서로 자동 시도합니다. 가격 기준이라 배당/세금/환전수수료는 별도입니다.")
 
     presets = _us_t100_candidate_presets()
     col_a, col_b, col_c = st.columns(3)
@@ -10213,10 +11409,10 @@ def _render_us_etf_t100_backtest_menu():
         for name, cands in run_items:
             with st.spinner(f"{name} 데이터 로딩/백테스트 중..."):
                 price_df, status_df = _us_t100_load_price_frame(cands, start_date, end_date, lookback_days=260)
+                st.markdown(f"##### 데이터 로딩 상태 · {name}")
+                show_pinned_dataframe(status_df, height=220) if 'show_pinned_dataframe' in globals() else st.dataframe(status_df, use_container_width=True)
                 if price_df is None or len(price_df) == 0:
-                    st.warning(f"{name}: 가격 데이터 없음")
-                    if status_df is not None and len(status_df):
-                        st.dataframe(status_df, use_container_width=True)
+                    st.warning(f"{name}: 가격 데이터 없음. 위 상태표의 사용소스/시도 컬럼을 확인하세요.")
                     continue
                 daily, rebals, summary = _us_t100_run_backtest(
                     price_df,
@@ -10245,40 +11441,261 @@ def _render_us_etf_t100_backtest_menu():
             summary_all = pd.concat(all_summary, ignore_index=True)
             summary_all = summary_all.sort_values(["CAGR%", "MDD%"], ascending=[False, False])
             st.subheader("결과 요약")
-            st.dataframe(summary_all, use_container_width=True)
+            show_pinned_dataframe(summary_all, height=300) if 'show_pinned_dataframe' in globals() else st.dataframe(summary_all, use_container_width=True)
             best = summary_all.iloc[0]
             st.success(f"수익률 기준 1위: {best['후보군']} / CAGR {best['CAGR%']:.2f}% / MDD {best['MDD%']:.2f}%")
             zip_outputs[f"US_T100_summary_{today_str()}.csv"] = summary_all
             st.download_button(
                 "미국 ETF T100 결과 ZIP 다운로드",
                 data=_us_t100_make_zip(zip_outputs),
-                file_name=f"magic_split_v80_US_ETF_T100_backtest_{today_str()}.zip",
+                file_name=f"magic_split_v81_US_ETF_T100_backtest_{today_str()}.zip",
                 mime="application/zip",
                 key="download_us_t100_zip",
             )
             st.subheader("최근 리밸런싱/일별 상세")
             first_daily = next((df for k, df in zip_outputs.items() if k.endswith(f"daily_{today_str()}.csv") and df is not None and len(df)), None)
             if first_daily is not None:
-                st.dataframe(first_daily.tail(60), use_container_width=True)
+                show_pinned_dataframe(first_daily.tail(60), height=420) if 'show_pinned_dataframe' in globals() else st.dataframe(first_daily.tail(60), use_container_width=True)
         else:
             st.error("백테스트 결과가 없습니다. 데이터 로딩 상태를 확인하세요.")
 
 
-try:
-    # v11: 앱 시작 때 3개 탭을 전부 읽지 않는다.
-    # Google Sheets 429 쿼터 방지를 위해 연결 확인만 하고,
-    # 실제 탭은 메뉴에서 필요할 때만 읽는다.
-    get_spreadsheet()
-    st.success("Google Sheets 연결 완료")
-except Exception as e:
-    if is_quota_error(e):
-        st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요.")
-    else:
-        st.error("Google Sheets 연결 실패")
-        st.exception(e)
-    st.stop()
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. 도움말"])
+
+
+# =====================================================
+# v82. 미국 ETF 데이터 로더 재수정
+# - v79 실전운용판 보존
+# - FDR/Stooq/Yahoo 실패 원인 상태표 표시
+# - Stooq/Yahoo 다중 URL 시도
+# =====================================================
+
+def _us82_norm_series_from_ohlcv(raw, ticker):
+    try:
+        if raw is None or len(raw) == 0:
+            return pd.Series(dtype=float)
+        df = raw.copy()
+        close_col = None
+        for c in ["Adj Close", "AdjClose", "Close", "close", "종가"]:
+            if c in df.columns:
+                close_col = c
+                break
+        if close_col is None:
+            return pd.Series(dtype=float)
+        idx = pd.to_datetime(df.index, errors="coerce")
+        try:
+            if getattr(idx, 'tz', None) is not None:
+                idx = idx.tz_localize(None)
+        except Exception:
+            pass
+        s = pd.Series(pd.to_numeric(df[close_col], errors="coerce").values, index=idx, dtype=float).dropna().sort_index()
+        s = s[~s.index.isna()]
+        s.name = str(ticker).upper()
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _us82_load_fdr(ticker, start_date, end_date, lookback_days=260):
+    t = str(ticker or "").strip().upper()
+    sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)).strftime("%Y-%m-%d")
+    ed = (pd.to_datetime(end_date) + pd.DateOffset(days=30)).strftime("%Y-%m-%d")
+    variants = [t, f"{t}.US", f"US:{t}"]
+    errors = []
+    for sym in variants:
+        try:
+            raw = fdr.DataReader(sym, sd, ed)
+            s = _us82_norm_series_from_ohlcv(raw, t)
+            if len(s) > 0:
+                return s, f"FDR:{sym}", ""
+            errors.append(f"{sym}=빈값")
+        except Exception as e:
+            errors.append(f"{sym}={type(e).__name__}:{str(e)[:80]}")
+    return pd.Series(dtype=float), "", " | ".join(errors)
+
+
+def _us82_load_stooq(ticker, start_date, end_date, lookback_days=260):
+    t = str(ticker or "").strip().lower()
+    if not t:
+        return pd.Series(dtype=float), "", "빈티커"
+    sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)).strftime("%Y%m%d")
+    ed = (pd.to_datetime(end_date) + pd.DateOffset(days=30)).strftime("%Y%m%d")
+    symbols = []
+    if "." in t:
+        symbols.append(t)
+    else:
+        symbols += [f"{t}.us", t]
+    errors = []
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
+    for sym in symbols:
+        try:
+            url = f"https://stooq.com/q/d/l/?s={sym}&d1={sd}&d2={ed}&i=d"
+            r = requests.get(url, headers=headers, timeout=20)
+            txt = r.text or ""
+            if r.status_code != 200:
+                errors.append(f"{sym}=HTTP{r.status_code}")
+                continue
+            if "Date" not in txt or "Close" not in txt:
+                errors.append(f"{sym}=CSV아님:{txt[:60].replace(chr(10),' ')}")
+                continue
+            df = pd.read_csv(io.StringIO(txt))
+            if df is None or len(df) == 0 or "Date" not in df.columns or "Close" not in df.columns:
+                errors.append(f"{sym}=빈CSV")
+                continue
+            idx = pd.to_datetime(df["Date"], errors="coerce")
+            s = pd.Series(pd.to_numeric(df["Close"], errors="coerce").values, index=idx, dtype=float).dropna().sort_index()
+            s = s[~s.index.isna()]
+            if len(s) > 0:
+                s.name = str(ticker).strip().upper()
+                return s, f"Stooq:{sym}", ""
+            errors.append(f"{sym}=시리즈빈값")
+        except Exception as e:
+            errors.append(f"{sym}={type(e).__name__}:{str(e)[:80]}")
+    return pd.Series(dtype=float), "", " | ".join(errors)
+
+
+def _us82_load_yahoo_chart(ticker, start_date, end_date, lookback_days=260):
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return pd.Series(dtype=float), "", "빈티커"
+    sd = pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)
+    ed = pd.to_datetime(end_date) + pd.DateOffset(days=30)
+    p1 = int(pd.Timestamp(sd).timestamp())
+    p2 = int(pd.Timestamp(ed).timestamp())
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    urls = [
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{t}",
+        f"https://query2.finance.yahoo.com/v8/finance/chart/{t}",
+    ]
+    params = {
+        "period1": p1,
+        "period2": p2,
+        "interval": "1d",
+        "events": "history",
+        "includeAdjustedClose": "true",
+    }
+    errors = []
+    for url in urls:
+        host = "query1" if "query1" in url else "query2"
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=25)
+            if r.status_code != 200:
+                errors.append(f"{host}=HTTP{r.status_code}:{(r.text or '')[:80].replace(chr(10),' ')}")
+                continue
+            js = r.json()
+            chart = (js or {}).get("chart") or {}
+            if chart.get("error"):
+                errors.append(f"{host}=ERR:{str(chart.get('error'))[:100]}")
+                continue
+            result = chart.get("result") or []
+            if not result:
+                errors.append(f"{host}=result없음")
+                continue
+            item = result[0]
+            ts = item.get("timestamp") or []
+            indicators = item.get("indicators") or {}
+            quote = (indicators.get("quote") or [{}])[0]
+            adj = (indicators.get("adjclose") or [{}])[0].get("adjclose")
+            close = adj if adj is not None else quote.get("close")
+            if not ts or close is None:
+                errors.append(f"{host}=timestamp/close없음")
+                continue
+            idx = pd.to_datetime(ts, unit="s", errors="coerce").tz_localize(None).normalize()
+            s = pd.Series(pd.to_numeric(close, errors="coerce"), index=idx, dtype=float).dropna().sort_index()
+            s = s[(s.index >= sd) & (s.index <= ed)]
+            if len(s) > 0:
+                s.name = t
+                return s, f"YahooChart:{host}", ""
+            errors.append(f"{host}=기간필터후빈값")
+        except Exception as e:
+            errors.append(f"{host}={type(e).__name__}:{str(e)[:100]}")
+    return pd.Series(dtype=float), "", " | ".join(errors)
+
+
+def _us82_load_yfinance(ticker, start_date, end_date, lookback_days=260):
+    t = str(ticker or "").strip().upper()
+    try:
+        import yfinance as yf
+    except Exception as e:
+        return pd.Series(dtype=float), "", f"yfinance없음:{type(e).__name__}"
+    try:
+        sd = (pd.to_datetime(start_date) - pd.DateOffset(days=max(int(lookback_days), 260) + 180)).strftime("%Y-%m-%d")
+        ed = (pd.to_datetime(end_date) + pd.DateOffset(days=30)).strftime("%Y-%m-%d")
+        raw = yf.download(t, start=sd, end=ed, auto_adjust=True, progress=False, threads=False)
+        s = _us82_norm_series_from_ohlcv(raw, t)
+        if len(s) > 0:
+            return s, "yfinance", ""
+        return pd.Series(dtype=float), "", "yfinance빈값"
+    except Exception as e:
+        return pd.Series(dtype=float), "", f"yfinance={type(e).__name__}:{str(e)[:100]}"
+
+
+def _us_t100_load_one_series(ticker, start_date, end_date, lookback_days=260):
+    """v82 미국 ETF 1개 가격 로더. 실패 원인을 tried에 남긴다."""
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return pd.Series(dtype=float), "EMPTY", ["빈티커"]
+    tried = []
+    for label, fn in [
+        ("FDR", _us82_load_fdr),
+        ("Stooq", _us82_load_stooq),
+        ("YahooChart", _us82_load_yahoo_chart),
+        ("yfinance", _us82_load_yfinance),
+    ]:
+        s, source, err = fn(t, start_date, end_date, lookback_days=lookback_days)
+        if s is not None and len(s) > 0:
+            s.name = t
+            tried.append(f"{label}=성공")
+            return s, source or label, tried
+        tried.append(f"{label}=실패({err or '빈값'})")
+    return pd.Series(dtype=float), "실패", tried
+
+
+def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=260):
+    rows = []
+    data = {}
+    for ticker, desc in candidates:
+        t = str(ticker or "").strip().upper()
+        if not t:
+            continue
+        s, source, tried = _us_t100_load_one_series(t, start_date, end_date, lookback_days=lookback_days)
+        status = "성공" if s is not None and len(s) > 0 else "실패"
+        rows.append({
+            "티커": t,
+            "설명": desc,
+            "상태": status,
+            "사용소스": source,
+            "시도/실패원인": " || ".join(tried),
+            "행수": int(len(s)) if s is not None else 0,
+            "첫데이터일": s.index.min().strftime("%Y-%m-%d") if s is not None and len(s) else "",
+            "마지막데이터일": s.index.max().strftime("%Y-%m-%d") if s is not None and len(s) else "",
+        })
+        if s is not None and len(s) > 0:
+            data[t] = pd.to_numeric(s, errors="coerce").dropna()
+    status_df = pd.DataFrame(rows)
+    if not data:
+        return pd.DataFrame(), status_df
+    idx = None
+    for s in data.values():
+        si = pd.DatetimeIndex(pd.to_datetime(s.index, errors="coerce")).dropna().sort_values()
+        idx = si if idx is None else idx.union(si)
+    idx = pd.DatetimeIndex(idx).sort_values().drop_duplicates()
+    sd = pd.to_datetime(start_date)
+    ed = pd.to_datetime(end_date)
+    idx = idx[(idx >= sd) & (idx <= ed)]
+    price = pd.DataFrame(index=idx)
+    for t, s in data.items():
+        price[t] = pd.to_numeric(s, errors="coerce").reindex(idx).ffill()
+    price = price.dropna(how="all")
+    # 각 열별 시작 전 결측은 유지하되, 최소 2개 이상 데이터가 있는 열만 사용
+    valid_cols = [c for c in price.columns if price[c].dropna().shape[0] >= 2]
+    price = price[valid_cols].dropna(how="all") if valid_cols else pd.DataFrame()
+    return price, status_df
+
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "11. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -11490,10 +12907,11 @@ elif menu == "6. 섹터전략 백테스트":
                     "스트레스검증 720거래일",
                     "2021부터 전체검증",
                     "2020부터 전체검증",
+                    "2010부터 장기검증",
                     "사용자지정",
                 ],
-                index=6,
-                key="bt_period_preset",
+                index=7,
+                key="bt_period_preset_v68_restore_2010",
             )
         preset_days_map = {
             "빠른검증 60거래일": 60,
@@ -11503,31 +12921,38 @@ elif menu == "6. 섹터전략 백테스트":
             "스트레스검증 720거래일": 720,
             "2021부터 전체검증": 1500,
             "2020부터 전체검증": 1800,
+            "2010부터 장기검증": 4300,
         }
         preset_start_map = {
             "2021부터 전체검증": datetime(2021, 1, 4).date(),
             "2020부터 전체검증": datetime(2020, 1, 2).date(),
+            "2010부터 장기검증": datetime(2010, 1, 4).date(),
         }
         default_signal_days = preset_days_map.get(period_preset, 240)
         default_start_date = preset_start_map.get(
             period_preset,
             (datetime.now() - timedelta(days=int(default_signal_days * 1.8))).date(),
         )
+        fixed_long_period = period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]
         with c1:
-            start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date")
+            if fixed_long_period:
+                start_date = default_start_date
+                st.text_input("시작일", value=str(start_date), disabled=True, key="bt_start_date_fixed_v68")
+            else:
+                start_date = st.date_input("시작일", value=default_start_date, key="bt_start_date_v68")
         with c2:
-            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date")
+            end_date = st.date_input("종료일", value=datetime.now().date(), key="bt_end_date_v68")
         with c3:
             max_signal_days = st.number_input(
-                "최대 검증 거래일",
+                "최대 검증 거래일 (2010용 최대 5000)",
                 min_value=5,
-                max_value=3000,
+                max_value=5000,
                 value=int(default_signal_days),
                 step=5,
-                key="bt_max_days",
+                key="bt_max_days_v68_5000_restore",
             )
-        if period_preset in ["2020부터 전체검증", "2021부터 전체검증"]:
-            st.info("장기검증 모드: KODEX200 거래일 캘린더 기준으로 2020/2021년부터 검증합니다. 개별 종목은 데이터가 생기는 날부터 자동 편입됩니다. 오래 걸리면 빠른 백테스트를 켜고 실행하세요.")
+        if period_preset in ["2020부터 전체검증", "2021부터 전체검증", "2010부터 장기검증"]:
+            st.info("장기검증 모드: 2010/2020/2021 시작일은 강제 고정합니다. T100/Turbo만 볼 때는 아래 '방공호/Turbo만 빠른 실행'을 먼저 누르세요. 섹터 개별주 백테스트 전체를 같이 돌리면 느리거나 중간에 끊길 수 있습니다.")
         if max_signal_days <= 60:
             st.warning("최근 60거래일 이하는 상승장/하락장 편향이 큽니다. 실전 판단은 480거래일 이상, 스트레스 검증은 720거래일 이상으로 확인하세요.")
 
@@ -11566,6 +12991,7 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T10/T100 Turbo 확장형 SP500+BOND",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
@@ -11582,10 +13008,10 @@ elif menu == "6. 섹터전략 백테스트":
         with bk3:
             st.caption("073: 방어구역 70% + 부스터 30%. 부스터 35% 초과는 방공호 잠금, 40% 초과는 즉시 잠금.")
             st.caption("064: 방어구역 60% + 부스터 40%. 부스터 45% 초과는 방공호 잠금, 50% 초과는 즉시 잠금.")
-            st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시.")
+            st.caption("기본 073/064 자산은 국내 상장 ETF만 사용합니다: KODEX200/KOSDAQ150/국내 NASDAQ100/GOLD/DOLLAR + CASH 프록시. v67 확장형은 SP500/BOND 후보를 추가 비교합니다.")
             st.caption("C10/C15: 미국 상장 CTA/관리선물 ETF는 부스터가 아니라 방어구역 안에 넣어 GOLD/DOLLAR/CASH/BOND 의존도를 낮춥니다. 방공호에는 KODEX200/KOSDAQ150/NASDAQ100을 넣지 않습니다.")
             st.caption("CTA 자료는 네가 올릴 필요 없이 앱이 DBMF|KMLM|CTA 순서로 자동 조회합니다. CSV 업로드는 자동조회 실패 때만 쓰는 백업입니다.")
-            st.caption("Turbo 모드는 방공호가 아닙니다. v33 기본값은 C10을 제거한 T10/T100, 즉 Turbo 공격 ETF 엔진 100% / CTA 0% 백테스트입니다.")
+            st.caption("Turbo 모드는 방공호가 아닙니다. 기본 T100은 기존 후보, 확장형 T100은 SP500+BOND를 추가한 후보군으로 비교합니다.")
 
         cta1, cta2 = st.columns(2)
         with cta1:
@@ -11830,6 +13256,94 @@ elif menu == "6. 섹터전략 백테스트":
                 "성장주붕괴필터": growth_collapse_mode,
             }
         ]), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 2010 장기검증 안전 실행")
+        st.caption("T100/Turbo/073/064만 확인할 때는 이 버튼을 먼저 쓰세요. 섹터 개별주 백테스트를 생략하고 ETF 방공호/Turbo만 바로 계산해서 훨씬 빠릅니다.")
+        if st.button("방공호/Turbo만 빠른 실행", type="secondary", key="run_bunker_turbo_only_v68"):
+            if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
+                st.error("시작일은 종료일보다 앞서야 합니다.")
+            else:
+                prog_b = st.progress(0)
+                status_b = st.empty()
+                try:
+                    status_b.caption("방공호/Turbo 전용 거래일 생성 중...")
+                    stub_daily_df = _bt_make_bunker_only_daily_df(
+                        start_date=str(start_date),
+                        end_date=str(end_date),
+                        total_initial=float(initial_cash),
+                        max_signal_days=int(max_signal_days),
+                    )
+                    prog_b.progress(0.25)
+                    status_b.caption(f"ETF 가격 조회 및 {bunker_mode} 계산 중... ({len(stub_daily_df):,}행)")
+                    bunker_daily_df, bunker_summary = build_bunker_7030_backtest(
+                        stub_daily_df,
+                        total_initial=float(initial_cash),
+                        leader_ratio=float(leader_alloc_ratio) / 100.0,
+                        mode=bunker_mode,
+                        cash_annual_rate=bunker_cash_rate,
+                        cta_code=cta_code,
+                        cta_close_df=cta_close_df,
+                    )
+                    prog_b.progress(1.0)
+                    status_b.empty()
+                    prog_b.empty()
+                    if bunker_summary.get("오류"):
+                        st.error(f"방공호/Turbo 빠른 실행 실패: {bunker_summary.get('오류')}")
+                    else:
+                        st.success("방공호/Turbo 빠른 실행 완료")
+                        bunker_summary_df = pd.DataFrame([bunker_summary])
+                        q1, q2, q3, q4, q5 = st.columns(5)
+                        q1.metric("총수익률", f"{bunker_summary.get('통합총수익률', 0)}%")
+                        q2.metric("최종자산", fmt_won(bunker_summary.get("최종통합총자산", 0)))
+                        q3.metric("연복리", f"{bunker_summary.get('연복리', 'N/A')}%")
+                        q4.metric("MDD", f"{bunker_summary.get('통합최대낙폭', 0)}%")
+                        q5.metric("최악 하루", f"{bunker_summary.get('최악하루손실', 'N/A')}%")
+                        st.caption(f"실제검증 {bunker_daily_df['기준일'].iloc[0] if len(bunker_daily_df) else ''} ~ {bunker_daily_df['기준일'].iloc[-1] if len(bunker_daily_df) else ''} / 행수 {len(bunker_daily_df):,}")
+                        show_pinned_dataframe(bunker_summary_df, height=180)
+                        show_pinned_dataframe(bunker_daily_df.tail(120), height=320, pin_rank=False)
+                        mode_text = str(bunker_mode)
+                        mode_upper = mode_text.upper()
+                        if "T100" in mode_text and ("확장" in mode_text or "SP500" in mode_upper or "S&P" in mode_upper or "BOND" in mode_upper):
+                            tag = "T10_T100_TURBO_EXTENDED_SP500_BOND"
+                        elif "T100" in mode_text and ("프록시" in mode_text or "PROXY" in mode_upper):
+                            tag = "T10_T100_TURBO_NO_CTA_PROXY"
+                        elif "T100" in mode_text:
+                            tag = "T10_T100_TURBO_NO_CTA"
+                        elif "T90" in mode_text:
+                            tag = "T90_C10_TURBO_CTA"
+                        elif "T80" in mode_text:
+                            tag = "T80_C10_CASH10_TURBO"
+                        elif "T70" in mode_text:
+                            tag = "T70_D20_C10_TURBO"
+                        elif "064" in mode_text or "0/6/4" in mode_text:
+                            tag = "064_C10" if "C10" in mode_upper else "064"
+                        elif "073" in mode_text or "0/7/3" in mode_text:
+                            tag = "073_C10" if "C10" in mode_upper else "073"
+                        else:
+                            tag = "BUNKER_TURBO_ONLY"
+                        export_buffer = io.BytesIO()
+                        with zipfile.ZipFile(export_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr(f"magic_split_bunker_{tag}_summary_{today_str()}.csv", bunker_summary_df.to_csv(index=False).encode("utf-8-sig"))
+                            zf.writestr(f"magic_split_bunker_{tag}_daily_{today_str()}.csv", bunker_daily_df.to_csv(index=False).encode("utf-8-sig"))
+                            try:
+                                status_text = str(bunker_summary.get("방공호데이터상태", ""))
+                                if status_text:
+                                    rows_status = [{"상태": part} for part in status_text.split(" | ")]
+                                    zf.writestr(f"magic_split_bunker_{tag}_data_status_{today_str()}.csv", pd.DataFrame(rows_status).to_csv(index=False).encode("utf-8-sig"))
+                            except Exception:
+                                pass
+                        export_buffer.seek(0)
+                        st.download_button(
+                            "방공호/Turbo 빠른 실행 CSV 다운로드",
+                            data=export_buffer.getvalue(),
+                            file_name=f"magic_split_bunker_turbo_only_{tag}_{today_str()}.zip",
+                            mime="application/zip",
+                            key="download_bunker_turbo_only_v68",
+                        )
+                except Exception as e:
+                    prog_b.empty()
+                    status_b.empty()
+                    st.error(f"방공호/Turbo 빠른 실행 중 오류: {e}")
 
         if st.button("섹터전략 백테스트 실행", type="primary", key="run_sector_strategy_backtest"):
             if pd.to_datetime(start_date) >= pd.to_datetime(end_date):
@@ -12439,6 +13953,9 @@ elif menu == "7. 실전 운영판":
 # 8. 실전 보유장부
 # =====================================================
 
+elif menu == "7-1. T100 하이브리드 운용모드":
+    _t100_hybrid_live_operation_v63()
+
 elif menu == "8. 실전 보유장부":
     st.header("8. 실전 보유장부")
     st.caption("실제로 산 종목의 차수, 매수가, 매수금액, 주수와 오늘 신호에 따른 팔아라/줄여라를 관리합니다.")
@@ -12874,7 +14391,6 @@ elif menu == "8. 실전 보유장부":
         st.markdown("##### 매도기록")
         show_pinned_dataframe(sell_df, height=260, pin_rank=False)
 
-
 # =====================================================
 # 9. 미국 ETF T100 백테스트
 # =====================================================
@@ -12882,12 +14398,104 @@ elif menu == "8. 실전 보유장부":
 elif menu == "9. 미국 ETF T100 백테스트":
     _render_us_etf_t100_backtest_menu()
 
+
 # =====================================================
-# 10. 도움말
+# 10. T100 A분할 백테스트
+# =====================================================
+
+elif menu == "10. T100 A분할 백테스트":
+    st.header("10. T100 A분할 백테스트")
+    st.caption("A안 v73: 월초 T100 상위 2개 ETF에 종목당 3,000만원 1차 진입, -5%마다 500만원 추가, 각 차수 +5% 익절. 월마다 총자산이 늘면 1차/추가금도 자동 증액합니다.")
+
+    st.subheader("1) 백테스트 설정")
+    a1, a2, a3, a4 = st.columns(4)
+    with a1:
+        a_start = st.date_input("시작일", value=datetime(2010, 1, 4).date(), key="v69_a_start")
+    with a2:
+        a_end = st.date_input("종료일", value=datetime.now().date(), key="v69_a_end")
+    with a3:
+        a_initial = st.number_input("총자금", min_value=10_000_000, max_value=5_000_000_000, value=120_000_000, step=10_000_000, format="%d", key="v69_a_initial")
+    with a4:
+        a_ext = st.checkbox("SP500+BOND 확장 후보 사용", value=False, key="v69_a_extended")
+
+    b1, b2, b3, b4 = st.columns(4)
+    with b1:
+        a_entry = st.number_input("월초 1종목당 진입금", min_value=1_000_000, max_value=300_000_000, value=30_000_000, step=1_000_000, format="%d", key="v69_a_entry")
+    with b2:
+        a_add = st.number_input("-5%마다 1회 추가금", min_value=100_000, max_value=100_000_000, value=5_000_000, step=500_000, format="%d", key="v69_a_add")
+    with b3:
+        a_step = st.number_input("추가매수 간격(%)", min_value=1.0, max_value=20.0, value=5.0, step=0.5, key="v69_a_step")
+    with b4:
+        a_max = st.number_input("최대 추가횟수", min_value=0, max_value=20, value=6, step=1, key="v69_a_max")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        a_tp = st.number_input("차수별 익절률(%)", min_value=1.0, max_value=30.0, value=5.0, step=0.5, key="v70_a_tp")
+    with c2:
+        a_rebuy_first = st.checkbox("1차 익절 후 즉시 재진입", value=True, key="v70_a_rebuy_first")
+        a_monthly_compound = st.checkbox("월별 증액복리 적용", value=True, key="v73_a_monthly_compound")
+    with c3:
+        a_cash_rate = st.number_input("대기현금 연수익률 가정(%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5, key="v70_a_cash_rate")
+    with c4:
+        a_fee = st.number_input("수수료/세금 비율", min_value=0.0, max_value=0.01, value=0.0003, step=0.0001, format="%.4f", key="v70_a_fee")
+
+    st.info(f"기준 필요자금 감각: 월초 2종목 {int(a_entry)*2:,.0f}원 + 추가매수 최대 {int(a_add)*int(a_max)*2:,.0f}원 = {int(a_entry)*2 + int(a_add)*int(a_max)*2:,.0f}원 / 월별 증액복리 {'ON' if a_monthly_compound else 'OFF'} / 익절은 차수별 +{float(a_tp):.1f}%, 1차 재진입 {'ON' if a_rebuy_first else 'OFF'}")
+
+    if st.button("T100 A분할 v73 백테스트 실행", type="primary", key="v70_run_a_scalein"):
+        with st.spinner("T100 A분할 백테스트 계산 중..."):
+            daily_a, trades_a, monthly_a, status_a, summary_a = build_t100_a_scalein_backtest(
+                a_start,
+                a_end,
+                total_initial=float(a_initial),
+                entry_per_asset=float(a_entry),
+                add_per_asset=float(a_add),
+                add_step_pct=float(a_step),
+                max_add_count=int(a_max),
+                take_profit_pct=float(a_tp),
+                rebuy_first_on_tp=bool(a_rebuy_first),
+                cash_annual_rate=float(a_cash_rate),
+                fee_rate=float(a_fee),
+                extended_universe=bool(a_ext),
+            )
+        if "오류" in summary_a:
+            st.error(f"T100 A분할 백테스트 실패: {summary_a.get('오류')}")
+        else:
+            summary_df = pd.DataFrame([summary_a])
+            st.subheader("2) 요약")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("최종자산", f"{summary_a['최종자산']:,.0f}원")
+            m2.metric("총수익률", f"{summary_a['총수익률(%)']:.2f}%")
+            m3.metric("연복리", f"{summary_a['연복리(%)']:.2f}%")
+            m4.metric("MDD", f"{summary_a['MDD(%)']:.2f}%")
+            show_pinned_dataframe(summary_df, height=120)
+
+            tab1, tab2, tab3, tab4 = st.tabs(["일별", "매매내역", "월별선택", "데이터상태"])
+            with tab1:
+                show_pinned_dataframe(daily_a.tail(500), height=520)
+            with tab2:
+                show_pinned_dataframe(trades_a.tail(1000), height=520)
+            with tab3:
+                show_pinned_dataframe(monthly_a.tail(300), height=520)
+            with tab4:
+                show_pinned_dataframe(status_a, height=360)
+
+            export_buffer = io.BytesIO()
+            with zipfile.ZipFile(export_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"magic_split_T100_A_SCALEIN_TP5_REBUY_summary_{today_str()}.csv", summary_df.to_csv(index=False).encode("utf-8-sig"))
+                zf.writestr(f"magic_split_T100_A_SCALEIN_TP5_REBUY_daily_{today_str()}.csv", daily_a.to_csv(index=False).encode("utf-8-sig"))
+                zf.writestr(f"magic_split_T100_A_SCALEIN_TP5_REBUY_trades_{today_str()}.csv", trades_a.to_csv(index=False).encode("utf-8-sig"))
+                zf.writestr(f"magic_split_T100_A_SCALEIN_TP5_REBUY_monthly_{today_str()}.csv", monthly_a.to_csv(index=False).encode("utf-8-sig"))
+                zf.writestr(f"magic_split_T100_A_SCALEIN_TP5_REBUY_data_status_{today_str()}.csv", status_a.to_csv(index=False).encode("utf-8-sig"))
+            export_buffer.seek(0)
+            st.download_button("T100 A분할 결과 ZIP 다운로드", data=export_buffer.getvalue(), file_name=f"magic_split_T100_A_SCALEIN_TP5_REBUY_result_{today_str()}.zip", mime="application/zip", key="v69_download_a_scalein")
+
+
+# =====================================================
+# 9. 도움말
 # =====================================================
 
 else:
-    st.header("9. 도움말")
+    st.header("11. 도움말")
     st.markdown(f"""
 ### 버전
 
