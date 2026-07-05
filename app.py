@@ -9956,7 +9956,7 @@ except Exception as e:
 
 
 # =====================================================
-# 7-1. T100 하이브리드 1↔3 운용모드 v75
+# 7-1. T100 하이브리드 1↔3 운용모드 v84
 # =====================================================
 
 def _fmt_won(v):
@@ -9993,6 +9993,16 @@ T100_HYBRID_HISTORY_COLUMNS = [
     "1일변동률",
     "5일누적변동률",
     "방어신호",
+    # v84 운용상태 컬럼
+    "원시방어신호",
+    "실전방어신호",
+    "방어시작일",
+    "방어유지일수",
+    "방어복귀가능",
+    "6310시작일",
+    "6310유지일수",
+    "6310복귀가능",
+    "권장모드",
     # 구버전 호환 컬럼
     "운용기준금액",
     "T100평가금액",
@@ -10155,7 +10165,7 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
 
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v83: v79 실전운용판 유지 + 눌림목 한방 보조계좌를 추가했습니다.")
+    st.caption("v84: 1순위 개선안(방어 최소 20거래일) + 6310 잠금(최소 60거래일) 실전판입니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10165,6 +10175,8 @@ def _t100_hybrid_live_operation_v63():
 - 예: 어제 평가금액 1,000만, 오늘 500만을 실제 T100에 추가매수했다면 오늘 판정기준은 1,500만입니다. 장마감 평가금액이 1,380만이면 -8%라서 방어 ON입니다.
 - **전략 추가입금**은 투입원금을 늘리는 돈이고, **T100 실제 추가매수액**은 그중 오늘 ETF를 실제로 산 금액입니다. 방어날에 일부만 사고 나머지를 현금으로 남기면 실제 산 금액만 T100 추가매수액에 넣습니다.
 - **5일 누적 -6%**는 최근 저장된 `1일변동률`을 누적해서 계산합니다. 추가입금이 있어도 실제 추가매수액을 보정하므로 수익으로 착각하지 않습니다.
+- **1순위 개선안**: 방어신호가 켜지면 T100 70% / 현금 30%로 낮추고, 최소 20거래일은 방어를 유지합니다. 이후 30일선 회복 또는 고점 대비 -5% 이내 회복 시 공격 복귀 가능합니다.
+- **6310 잠금**: 수익 +50% 도달 시 T100 60% / 대기현금 30% / 생활비잠금 10%로 전환합니다. 6310은 최소 60거래일 유지 후 회복 조건이 맞으면 1순위 복귀 가능합니다.
 - 운용기록은 사용자 홈 폴더의 `magic_split_data`에 저장되어 새 ZIP을 덮어써도 유지됩니다.
 """)
 
@@ -10235,6 +10247,11 @@ def _t100_hybrid_live_operation_v63():
     split_lock_cash_ratio = 0.10
     daily_cap_trigger = -0.05
     five_day_trigger = -0.06
+    # v84: 백테스트 탐색 결과 반영
+    defense_min_hold_days = 20
+    defense_recovery_ma_days = 30
+    defense_recovery_drawdown = -0.05
+    split_min_hold_days = 60
 
     st.subheader("1) 오늘 입력")
     a1, a2, a3 = st.columns(3)
@@ -10257,7 +10274,7 @@ def _t100_hybrid_live_operation_v63():
 
     b1, b2 = st.columns(2)
     with b1:
-        status_list = ["1순위 운용중", "6310 변신 후 운용중"]
+        status_list = ["1순위 운용중", "방어모드 유지중", "6310 변신 후 운용중"]
         status_default = st.session_state.get("t100_v65_status", "1순위 운용중")
         status = st.selectbox("현재 상태", status_list, index=status_list.index(status_default) if status_default in status_list else 0, key="t100_v65_status")
     with b2:
@@ -10290,7 +10307,71 @@ def _t100_hybrid_live_operation_v63():
 
     daily_hit = (prior_count >= 1) and (day_ret <= daily_cap_trigger)
     five_hit = bool(five_available) and (five_ret <= five_day_trigger)
-    risk_signal = bool(daily_hit or five_hit)
+    raw_risk_signal = bool(daily_hit or five_hit)
+
+    # v84: 방어/6310 유지기간과 회복조건 계산
+    hist_before_today = hist.copy() if hist is not None and len(hist) else pd.DataFrame()
+    if len(hist_before_today) and "기준일" in hist_before_today.columns:
+        hist_before_today["기준일"] = hist_before_today["기준일"].astype(str)
+        hist_before_today = hist_before_today[hist_before_today["기준일"] < today_str].sort_values("기준일")
+    eval_series = []
+    if len(hist_before_today) and "당일평가금액" in hist_before_today.columns:
+        eval_series = pd.to_numeric(hist_before_today["당일평가금액"], errors="coerce").dropna().astype(float).tolist()
+    eval_series_with_today = eval_series + [float(current_t100)]
+    ma30_value = float(np.mean(eval_series_with_today[-defense_recovery_ma_days:])) if len(eval_series_with_today) >= defense_recovery_ma_days else np.nan
+    high_value = float(np.max(eval_series_with_today)) if len(eval_series_with_today) else float(current_t100)
+    drawdown_from_high = (float(current_t100) / high_value - 1.0) if high_value > 0 else 0.0
+    ma_recovered = bool(pd.notna(ma30_value) and float(current_t100) >= ma30_value)
+    dd_recovered = bool(drawdown_from_high >= defense_recovery_drawdown)
+    recovery_ok = bool(ma_recovered or dd_recovered)
+
+    def _latest_state_start(_hist, keyword_list):
+        """최근 연속 권장모드/운용모드 중 keyword가 들어간 시작일과 일수."""
+        try:
+            if _hist is None or len(_hist) == 0:
+                return None, 0
+            t = _hist.copy()
+            t["기준일"] = t["기준일"].astype(str)
+            t = t[t["기준일"] < today_str].sort_values("기준일")
+            if len(t) == 0:
+                return None, 0
+            mode_col = "권장모드" if "권장모드" in t.columns else "운용모드"
+            modes = t[mode_col].fillna("").astype(str).tolist()
+            dates = t["기준일"].astype(str).tolist()
+            cnt = 0
+            start = None
+            for m, d in zip(reversed(modes), reversed(dates)):
+                hit = any(k in m for k in keyword_list)
+                if hit:
+                    cnt += 1
+                    start = d
+                else:
+                    break
+            return start, cnt
+        except Exception:
+            return None, 0
+
+    prev_defense_start, prev_defense_days = _latest_state_start(hist_before_today, ["방어"])
+    defense_active_before = (status == "방어모드 유지중") or (prev_defense_days > 0)
+    if raw_risk_signal and not defense_active_before:
+        defense_start_date = today_str
+        defense_hold_days = 1
+    elif defense_active_before:
+        defense_start_date = prev_defense_start or today_str
+        defense_hold_days = int(prev_defense_days) + 1
+    else:
+        defense_start_date = ""
+        defense_hold_days = 0
+    defense_min_hold_ok = defense_hold_days >= defense_min_hold_days if defense_hold_days else False
+    defense_can_return = bool(defense_min_hold_ok and recovery_ok)
+    risk_signal = bool(raw_risk_signal or (defense_active_before and not defense_can_return))
+
+    prev_6310_start, prev_6310_days = _latest_state_start(hist_before_today, ["6310"])
+    split_active_before = (status == "6310 변신 후 운용중") or (prev_6310_days > 0)
+    split_hold_days = int(prev_6310_days) + 1 if split_active_before else 0
+    split_start_date = prev_6310_start if split_active_before else ""
+    split_min_hold_ok = split_hold_days >= split_min_hold_days if split_hold_days else False
+    split_can_return = bool(split_active_before and split_min_hold_ok and recovery_ok)
 
     # v78: 사용자가 한눈에 볼 수 있는 현재 상황 통합판
     st.markdown("#### 현재 운용상태")
@@ -10305,16 +10386,32 @@ def _t100_hybrid_live_operation_v63():
     d2.metric("하루 -5%", "걸림" if daily_hit else "아님")
     d3.metric("5일 누적", f"{five_ret*100:.2f}%" if five_available else "기록부족")
     d4.metric("5일 -6%", "걸림" if five_hit else "아님")
-    d5.metric("최종 방어신호", "ON" if risk_signal else "OFF")
+    d5.metric("실전 방어신호", "ON" if risk_signal else "OFF")
 
     if risk_signal:
         st.error("방어 ON: 다음 거래일은 총 운용금 기준 T100 70% / 현금 30%로 맞춥니다.")
     else:
         st.success("방어 OFF: 다음 거래일은 T100 100% 운용 기준입니다.")
 
+    st.markdown("#### v84 개선룰 상태")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("원시 방어신호", "ON" if raw_risk_signal else "OFF")
+    r2.metric("방어 유지일수", f"{defense_hold_days}일" if defense_hold_days else "-")
+    r3.metric("30일선 회복", "예" if ma_recovered else ("계산부족" if pd.isna(ma30_value) else "아니오"))
+    r4.metric("고점대비", f"{drawdown_from_high*100:.2f}%")
+    if defense_active_before and not defense_can_return:
+        st.info(f"방어 유지중: 최소 {defense_min_hold_days}거래일 + 회복조건 필요. 현재 {defense_hold_days}거래일, 복귀가능 {'예' if defense_can_return else '아니오'}")
+    if split_active_before:
+        s1, s2, s3 = st.columns(3)
+        s1.metric("6310 유지일수", f"{split_hold_days}일")
+        s2.metric("6310 최소유지", "통과" if split_min_hold_ok else f"{split_min_hold_days}일 필요")
+        s3.metric("1순위 복귀가능", "예" if split_can_return else "아니오")
+
     with st.expander("방어판정 계산식 보기", expanded=False):
         st.write(f"1일 변동률 = 오늘 평가금액 {_fmt_won(current_t100)} ÷ 오늘 판정기준 {_fmt_won(decision_basis)} - 1 = {day_ret*100:.2f}%")
         st.write(f"오늘 판정기준 = 어제 평가금액 {_fmt_won(prev_eval)} + 오늘 T100 실제 추가매수액 {_fmt_won(t100_buy_today)} - 오늘 T100 현금화매도액 {_fmt_won(t100_sell_today)}")
+        st.write(f"실전 방어신호 = 원시 방어신호({'ON' if raw_risk_signal else 'OFF'}) 또는 방어 최소유지 미충족({defense_hold_days}/{defense_min_hold_days}일)")
+        st.write(f"공격 복귀조건 = 30일선 회복({'예' if ma_recovered else '아니오'}) 또는 고점대비 -5% 이내({drawdown_from_high*100:.2f}%)")
         if five_available:
             st.write(f"5일 누적 변동률 = 최근 5개 1일 변동률 누적 = {five_ret*100:.2f}%")
         else:
@@ -10382,13 +10479,22 @@ def _t100_hybrid_live_operation_v63():
                 "1일변동률": float(day_ret) if prior_count >= 1 else "",
                 "5일누적변동률": float(five_ret) if five_available else "",
                 "방어신호": "ON" if risk_signal else "OFF",
+                "원시방어신호": "ON" if raw_risk_signal else "OFF",
+                "실전방어신호": "ON" if risk_signal else "OFF",
+                "방어시작일": defense_start_date,
+                "방어유지일수": int(defense_hold_days),
+                "방어복귀가능": "예" if defense_can_return else "아니오",
+                "6310시작일": split_start_date,
+                "6310유지일수": int(split_hold_days),
+                "6310복귀가능": "예" if split_can_return else "아니오",
+                "권장모드": "6310 유지" if status == "6310 변신 후 운용중" else ("1순위 방어" if risk_signal else "1순위 공격"),
                 "운용기준금액": int(round(current_t100)),
                 "T100평가금액": int(round(current_t100)),
                 "전략CASH": 0,
                 "생활비잠금현금": 0,
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
-                "메모": "v83 최근 저장값 자동불러오기 + 현재상황 통합판 + 눌림목 보조판",
+                "메모": "v84 1순위 개선안 최소20일 방어 + 6310 최소60일 잠금",
             })
             st.session_state["_t100_v76_pending_widget_updates"] = {
                 "t100_v65_base": int(round(base_after)),
@@ -10457,13 +10563,13 @@ def _t100_hybrid_live_operation_v63():
                 recent_hist["1일변동률표시"] = recent_hist["1일변동률"].apply(_fmt_pct)
             if "5일누적변동률" in recent_hist.columns:
                 recent_hist["5일누적표시"] = recent_hist["5일누적변동률"].apply(_fmt_pct)
-            show_cols = [c for c in ["기준일", "투입원금", "전일평가금액", "당일평가금액", "추가입금", "T100추가매수", "T100현금화매도", "판정기준금액", "1일변동률표시", "5일누적표시", "방어신호", "운용모드"] if c in recent_hist.columns]
+            show_cols = [c for c in ["기준일", "투입원금", "전일평가금액", "당일평가금액", "추가입금", "T100추가매수", "T100현금화매도", "판정기준금액", "1일변동률표시", "5일누적표시", "원시방어신호", "실전방어신호", "방어유지일수", "6310유지일수", "권장모드", "운용모드"] if c in recent_hist.columns]
             if 'show_pinned_dataframe' in globals():
                 _ = show_pinned_dataframe(recent_hist[show_cols], height=260, pin_rank=False)
             else:
                 _ = st.dataframe(recent_hist[show_cols], use_container_width=True, height=260)
 
-    st.subheader("3) 6310 가능 여부")
+    st.subheader("3) 6310 가능 여부 · 최소 60거래일 잠금")
     base_amount = float(base_after)
     lock_target = float(base_amount) * (1.0 + lock_trigger)
     lock_possible = float(current_t100) >= lock_target if float(base_amount) > 0 else False
@@ -10485,7 +10591,7 @@ def _t100_hybrid_live_operation_v63():
     if status == "1순위 운용중":
         do_6310 = st.checkbox("6310으로 전환하기", value=False, disabled=not lock_possible, key="t100_v65_do_6310")
     else:
-        st.info("현재 상태가 6310 변신 후 운용중이므로 6310 유지 계산을 합니다.")
+        st.info(f"현재 상태가 6310 변신 후 운용중입니다. 최소 {split_min_hold_days}거래일 유지 후 회복조건이 맞으면 1순위 복귀 가능합니다. 현재 {split_hold_days}거래일 / 복귀가능: {'예' if split_can_return else '아니오'}")
 
     st.subheader("4) 오늘 결론")
     all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]
