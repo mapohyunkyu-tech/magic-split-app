@@ -10327,6 +10327,91 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
     return prev_value, prev_label, prior_returns, len(tmp)
 
 
+# =====================================================
+# v89: 7-1 실전 운용용 확장형 과열회피 +70% 자산선택기
+# =====================================================
+def _t100_live_pick_extended_overheat70_v89(asof_date=None, max_assets=2):
+    """실전 운용판에서 이번 달 T100 자산을 자동 추천한다.
+
+    룰:
+    - 후보: KODEX200 / KOSDAQ150 / NASDAQ100 / SP500 / GOLD / DOLLAR / BOND
+    - 월간 듀얼모멘텀 상위 2개 선택
+    - 단, 최근 6개월(126거래일) 수익률이 +70% 이상인 자산은 과열로 제외
+    - 이 함수는 자산 선택만 한다. v84 방어/6310 비중룰은 적용하지 않는 "단독" 모드다.
+    """
+    try:
+        end_ts = pd.to_datetime(asof_date if asof_date is not None else datetime.now().date())
+        start_ts = end_ts - pd.DateOffset(days=620)
+        candidates = [
+            {"name": "KODEX200", "code": "069500|102110", "type": "asset", "market": "KR"},
+            {"name": "KOSDAQ150", "code": "229200|233740", "type": "asset", "market": "KR"},
+            {"name": "NASDAQ100", "code": "133690|379810|367380|381170", "type": "asset", "market": "KR"},
+            {"name": "SP500", "code": "360750|379800|143850", "type": "asset", "market": "KR"},
+            {"name": "GOLD", "code": "411060|132030|319640", "type": "asset", "market": "KR"},
+            {"name": "DOLLAR", "code": "261240|138230", "type": "asset", "market": "KR"},
+            {"name": "BOND", "code": "114260|152380", "type": "asset", "market": "KR"},
+        ]
+        # KODEX200 거래일을 캘린더로 쓰고, 실패하면 평일 캘린더로 fallback.
+        try:
+            cal_df, _cal_status = _bt_bunker_asset_prices([candidates[0]], [], start_ts, end_ts, return_status=True)
+            if cal_df is not None and len(cal_df) > 0:
+                dates = list(pd.DatetimeIndex(cal_df.index).sort_values().drop_duplicates())
+            else:
+                dates = list(pd.bdate_range(start_ts, end_ts))
+        except Exception:
+            dates = list(pd.bdate_range(start_ts, end_ts))
+        price_df, status_df = _bt_bunker_asset_prices(candidates, dates, start_ts, end_ts, return_status=True)
+        if price_df is None or len(price_df) == 0:
+            return [], pd.DataFrame(), status_df, "", "ETF 가격 데이터를 불러오지 못했습니다."
+        price_df = price_df.sort_index().ffill()
+        usable_idx = pd.DatetimeIndex(price_df.dropna(how="all").index)
+        usable_idx = usable_idx[usable_idx <= end_ts]
+        if len(usable_idx) == 0:
+            return [], pd.DataFrame(), status_df, "", "사용 가능한 기준일이 없습니다."
+        asof = usable_idx.max()
+        picks, detail_df = _bt_pick_bunker_dual_momentum(
+            price_df,
+            asof,
+            max_assets=int(max_assets),
+            return_detail=True,
+            overheat_exclude=True,
+            overheat_return_threshold=70.0,
+        )
+        # 전부 탈락하면 현금 대기. 임의 대체 진입을 하지 않는다.
+        if not picks:
+            picks = ["CASH"]
+        if detail_df is not None and len(detail_df):
+            d = detail_df.copy()
+            rename = {
+                "asset": "자산",
+                "score": "점수",
+                "ret21": "1개월%",
+                "ret63": "3개월%",
+                "ret126": "6개월%",
+                "trend_ma": "추세선",
+                "close": "종가",
+                "ma": "이평값",
+                "pass": "편입통과",
+                "overheat_excluded": "과열제외",
+                "overheat_threshold": "과열기준%",
+            }
+            d = d.rename(columns=rename)
+            for c in ["점수", "1개월%", "3개월%", "6개월%", "종가", "이평값"]:
+                if c in d.columns:
+                    d[c] = pd.to_numeric(d[c], errors="coerce").round(2)
+            if "과열제외" in d.columns:
+                d["과열판정"] = np.where(d["과열제외"].astype(bool), "6개월 +70% 이상 제외", "정상")
+            if "편입통과" in d.columns:
+                d["편입판정"] = np.where(d["편입통과"].astype(bool), "편입후보", "탈락")
+            sort_cols = [c for c in ["편입통과", "점수"] if c in d.columns]
+            if sort_cols:
+                d = d.sort_values(sort_cols, ascending=[False, False] if len(sort_cols) == 2 else [False])
+            detail_df = d
+        return picks, detail_df, status_df, asof.strftime("%Y-%m-%d"), ""
+    except Exception as e:
+        return [], pd.DataFrame(), pd.DataFrame(), "", f"확장형 과열회피 자산선택 실패: {e}"
+
+
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
     st.caption("v84: 1순위 개선안(방어 최소 20거래일) + 6310 잠금(최소 60거래일) 실전판입니다.")
@@ -10341,6 +10426,7 @@ def _t100_hybrid_live_operation_v63():
 - **5일 누적 -6%**는 최근 저장된 `1일변동률`을 누적해서 계산합니다. 추가입금이 있어도 실제 추가매수액을 보정하므로 수익으로 착각하지 않습니다.
 - **1순위 개선안**: 방어신호가 켜지면 T100 70% / 현금 30%로 낮추고, 최소 20거래일은 방어를 유지합니다. 이후 30일선 회복 또는 고점 대비 -5% 이내 회복 시 공격 복귀 가능합니다.
 - **6310 잠금**: 수익 +50% 도달 시 T100 60% / 대기현금 30% / 생활비잠금 10%로 전환합니다. 6310은 최소 60거래일 유지 후 회복 조건이 맞으면 1순위 복귀 가능합니다.
+- **v89 확장형 과열회피 +70% 단독**: 7개 ETF 후보(KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND) 중 월간 듀얼모멘텀 상위 2개를 고르되, 최근 6개월 +70% 이상 급등한 자산은 다음 달 후보에서 제외합니다. 이 모드는 v84 방어/6310 비중룰을 섞지 않고 자산선택만 과열회피형으로 바꿉니다.
 - 운용기록은 사용자 홈 폴더의 `magic_split_data`에 저장되어 새 ZIP을 덮어써도 유지됩니다.
 """)
 
@@ -10759,8 +10845,45 @@ def _t100_hybrid_live_operation_v63():
 
     st.subheader("4) 오늘 결론")
     all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]
-    default_assets = st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
-    t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v65_assets")
+    asset_pick_mode = st.radio(
+        "T100 자산선택 방식",
+        options=["수동/v84 기본", "확장형 과열회피 6개월 +70% 단독"],
+        index=0,
+        horizontal=True,
+        key="t100_v89_asset_pick_mode",
+    )
+
+    auto_picks = []
+    auto_detail_df = pd.DataFrame()
+    auto_status_df = pd.DataFrame()
+    auto_asof = ""
+    if asset_pick_mode == "확장형 과열회피 6개월 +70% 단독":
+        with st.spinner("확장형 과열회피 +70% 자산선택 계산 중..."):
+            auto_picks, auto_detail_df, auto_status_df, auto_asof, auto_error = _t100_live_pick_extended_overheat70_v89(record_date, max_assets=2)
+        if auto_error:
+            st.warning(auto_error)
+        else:
+            st.success(f"확장형 과열회피 +70% 선택 기준일: {auto_asof} / 추천 자산: {', '.join(auto_picks)}")
+            st.caption("룰: KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND 중 월간 듀얼모멘텀 상위 2개. 단, 6개월 수익률 +70% 이상 자산은 과열 제외.")
+        if len(auto_detail_df):
+            with st.expander("확장형 과열회피 +70% 상세 점수표", expanded=False):
+                show_cols = [c for c in ["자산", "편입판정", "과열판정", "점수", "1개월%", "3개월%", "6개월%", "추세선", "종가", "이평값"] if c in auto_detail_df.columns]
+                if 'show_pinned_dataframe' in globals():
+                    show_pinned_dataframe(auto_detail_df[show_cols], height=320)
+                else:
+                    st.dataframe(auto_detail_df[show_cols], use_container_width=True, height=320)
+        if len(auto_status_df):
+            with st.expander("ETF 데이터 로딩 상태", expanded=False):
+                st.dataframe(auto_status_df, use_container_width=True, height=220)
+
+    default_assets = auto_picks if (asset_pick_mode == "확장형 과열회피 6개월 +70% 단독" and auto_picks) else st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
+    t100_assets = st.multiselect(
+        "이번 달 T100 선택 자산",
+        all_assets,
+        default=[a for a in default_assets if a in all_assets] or ["CASH"],
+        key="t100_v65_assets" if asset_pick_mode == "수동/v84 기본" else "t100_v89_overheat_assets",
+        help="확장형 과열회피 모드에서는 자동 추천값이 기본으로 들어갑니다. 필요하면 수동으로 조정할 수 있습니다.",
+    )
     if not t100_assets:
         t100_assets = ["CASH"]
 
@@ -10842,6 +10965,7 @@ def _t100_hybrid_live_operation_v63():
         "SP500": "360750",
         "GOLD": "411060",
         "DOLLAR": "261240",
+        "BOND": "114260",
         "CASH": "현금",
     }
     t100_target_rows = target_df[target_df["구분"].astype(str).eq("T100 내부자산")].copy() if len(target_df) else pd.DataFrame()
