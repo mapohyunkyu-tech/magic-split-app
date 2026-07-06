@@ -769,6 +769,86 @@ def _safe_pykrx_import():
         ) from e
 
 
+def _pykrx_get_ticker_list_safe(stock, ymd: str, market: str) -> set[str]:
+    """Return ticker list for a market if pykrx supports it. Empty set means unknown."""
+    for kwargs in ({"market": market},):
+        try:
+            tickers = stock.get_market_ticker_list(ymd, **kwargs)
+            return {_normalize_code(x) for x in tickers}
+        except Exception:
+            pass
+    try:
+        tickers = stock.get_market_ticker_list(ymd)
+        return {_normalize_code(x) for x in tickers}
+    except Exception:
+        return set()
+
+
+def _pykrx_ohlcv_by_ticker_safe(stock, ymd: str, market: str) -> tuple[pd.DataFrame, list[str]]:
+    """pykrx version/network-safe OHLCV caller.
+
+    Some pykrx versions support market=, some environments temporarily fail KRX calls.
+    The old app swallowed every exception, so the user only saw 'empty data'.
+    This wrapper keeps diagnostic messages and tries more than one call shape.
+    """
+    errors: list[str] = []
+    calls = [
+        ("keyword market", lambda: stock.get_market_ohlcv_by_ticker(ymd, market=market)),
+        ("positional market", lambda: stock.get_market_ohlcv_by_ticker(ymd, market)),
+        ("no market", lambda: stock.get_market_ohlcv_by_ticker(ymd)),
+    ]
+    ticker_filter = None
+    for label, fn in calls:
+        try:
+            df = fn()
+            if df is None or df.empty:
+                errors.append(f"{label}: empty")
+                continue
+            df = df.reset_index().rename(columns={"티커": "code", **KOR_COL_RENAME})
+            if "code" not in df.columns:
+                df = df.rename(columns={df.columns[0]: "code"})
+            df["code"] = df["code"].map(_normalize_code)
+            # If we fell back to no-market mode, filter to the selected market when possible.
+            if label == "no market":
+                if ticker_filter is None:
+                    ticker_filter = _pykrx_get_ticker_list_safe(stock, ymd, market)
+                if ticker_filter:
+                    df = df[df["code"].isin(ticker_filter)]
+            return df, errors
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}: {str(e)[:160]}")
+    return pd.DataFrame(), errors
+
+
+def _pykrx_cap_by_ticker_safe(stock, ymd: str, market: str) -> tuple[pd.DataFrame, list[str]]:
+    errors: list[str] = []
+    calls = [
+        ("keyword market", lambda: stock.get_market_cap_by_ticker(ymd, market=market)),
+        ("positional market", lambda: stock.get_market_cap_by_ticker(ymd, market)),
+        ("no market", lambda: stock.get_market_cap_by_ticker(ymd)),
+    ]
+    ticker_filter = None
+    for label, fn in calls:
+        try:
+            df = fn()
+            if df is None or df.empty:
+                errors.append(f"{label}: empty")
+                continue
+            df = df.reset_index().rename(columns={"티커": "code", **KOR_COL_RENAME})
+            if "code" not in df.columns:
+                df = df.rename(columns={df.columns[0]: "code"})
+            df["code"] = df["code"].map(_normalize_code)
+            if label == "no market":
+                if ticker_filter is None:
+                    ticker_filter = _pykrx_get_ticker_list_safe(stock, ymd, market)
+                if ticker_filter:
+                    df = df[df["code"].isin(ticker_filter)]
+            return df, errors
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}: {str(e)[:160]}")
+    return pd.DataFrame(), errors
+
+
 def collect_krx_daily_panel(
     start: str,
     end: str,
@@ -782,19 +862,29 @@ def collect_krx_daily_panel(
     Build an IDIO-compatible daily panel using pykrx.
 
     Notes:
-    - This is a free-data quick-test builder, not a perfect institutional database.
+    - Free-data quick-test builder, not a perfect institutional database.
     - Sector falls back to market when no sector map is supplied.
     - Management issue / trading halt history is not perfectly reconstructed here.
+    - v3.1 patch: shows pykrx diagnostics instead of silently returning an empty panel.
     """
     stock = _safe_pykrx_import()
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    dates = pd.bdate_range(pd.to_datetime(start), pd.to_datetime(end))
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    if end_dt < start_dt:
+        raise ValueError("종료일이 시작일보다 빠릅니다.")
+
+    dates = pd.bdate_range(start_dt, end_dt)
     if max_dates:
         dates = dates[-int(max_dates):]
+    if len(dates) == 0:
+        raise ValueError("수집할 영업일이 없습니다. 시작일/종료일을 확인하세요.")
 
     frames = []
+    error_samples: list[str] = []
+    empty_count = 0
     progress = st.progress(0)
     status = st.empty()
     total_steps = len(dates) * max(len(markets), 1)
@@ -809,27 +899,27 @@ def collect_krx_daily_panel(
             status.write(f"KRX 자동수집 중: {ymd} / {market}")
             cache_path = cache_dir / f"krx_{ymd}_{market}.csv"
             if cache_path.exists():
-                day = pd.read_csv(cache_path, dtype={"code": str})
-                if not day.empty:
-                    frames.append(day)
-                continue
+                try:
+                    day = pd.read_csv(cache_path, dtype={"code": str})
+                    if not day.empty:
+                        frames.append(day)
+                    else:
+                        empty_count += 1
+                    continue
+                except Exception:
+                    cache_path.unlink(missing_ok=True)
 
             try:
-                ohlcv = stock.get_market_ohlcv_by_ticker(ymd, market=market)
+                ohlcv, errs = _pykrx_ohlcv_by_ticker_safe(stock, ymd, market)
                 if ohlcv is None or ohlcv.empty:
+                    empty_count += 1
+                    if errs and len(error_samples) < 20:
+                        error_samples.append(f"{ymd}/{market} OHLCV 실패: " + " | ".join(errs[:3]))
                     continue
-                ohlcv = ohlcv.reset_index().rename(columns={"티커": "code", **KOR_COL_RENAME})
-                if "code" not in ohlcv.columns:
-                    ohlcv = ohlcv.rename(columns={ohlcv.columns[0]: "code"})
-                ohlcv["code"] = ohlcv["code"].map(_normalize_code)
 
                 # Market cap by ticker. If this call fails, market_cap remains NaN.
-                try:
-                    cap = stock.get_market_cap_by_ticker(ymd, market=market)
-                    cap = cap.reset_index().rename(columns={"티커": "code", **KOR_COL_RENAME})
-                    if "code" not in cap.columns:
-                        cap = cap.rename(columns={cap.columns[0]: "code"})
-                    cap["code"] = cap["code"].map(_normalize_code)
+                cap, cap_errs = _pykrx_cap_by_ticker_safe(stock, ymd, market)
+                if cap is not None and not cap.empty:
                     cap_cols = [c for c in ["code", "market_cap"] if c in cap.columns]
                     day = ohlcv.merge(cap[cap_cols], on="code", how="left", suffixes=("", "_cap"))
                     if "market_cap_cap" in day.columns and "market_cap" not in day.columns:
@@ -837,14 +927,15 @@ def collect_krx_daily_panel(
                     elif "market_cap_cap" in day.columns:
                         day["market_cap"] = day["market_cap"].fillna(day["market_cap_cap"])
                         day = day.drop(columns=["market_cap_cap"])
-                except Exception:
+                else:
                     day = ohlcv.copy()
                     if "market_cap" not in day.columns:
                         day["market_cap"] = np.nan
+                    if cap_errs and len(error_samples) < 20:
+                        error_samples.append(f"{ymd}/{market} 시총 실패: " + " | ".join(cap_errs[:3]))
 
                 day["date"] = pd.to_datetime(d)
                 day["market"] = market
-                # name lookup is slow, so cache per code.
                 codes = day["code"].dropna().unique().tolist()
                 for c in codes:
                     if c not in name_cache:
@@ -852,7 +943,6 @@ def collect_krx_daily_panel(
                 day["name"] = day["code"].map(name_cache).fillna(day["code"])
                 day["sector"] = day["code"].map(sector_map).fillna(day["market"])
 
-                # Column cleanup
                 for col in ["open", "high", "low", "close", "volume", "trading_value", "market_cap"]:
                     if col not in day.columns:
                         day[col] = np.nan
@@ -860,27 +950,39 @@ def collect_krx_daily_panel(
                 for col in ["open", "high", "low", "close", "volume", "trading_value", "market_cap"]:
                     day[col] = pd.to_numeric(day[col], errors="coerce")
                 day = day[(day["close"] > 0) & (day["open"] > 0)]
+                if day.empty:
+                    empty_count += 1
+                    continue
                 day.to_csv(cache_path, index=False, encoding="utf-8-sig")
-                if not day.empty:
-                    frames.append(day)
+                frames.append(day)
                 if sleep_sec > 0:
                     time.sleep(float(sleep_sec))
             except Exception as e:
-                # Market holiday or temporary KRX failure. Skip but keep going.
-                status.write(f"건너뜀: {ymd} / {market} / {e}")
+                if len(error_samples) < 20:
+                    error_samples.append(f"{ymd}/{market}: {type(e).__name__}: {str(e)[:200]}")
                 continue
 
     progress.empty()
     status.empty()
     if not frames:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        msg = "자동수집 결과가 없습니다."
+        if error_samples:
+            msg += "\n\npykrx 호출 진단:\n- " + "\n- ".join(error_samples[:10])
+        msg += (
+            "\n\n확인할 것:\n"
+            "1) Streamlit Cloud가 아니라 로컬 PC에서 먼저 최근 N영업일 50~250으로 테스트\n"
+            "2) requirements.txt에 pykrx 포함\n"
+            "3) 종료일이 미래/휴일이어도 과거 영업일은 수집되어야 하므로, 진단 메시지의 pykrx 오류가 핵심\n"
+            "4) 무료 pykrx는 장기간 전체수집이 느리므로 캐시를 쌓으며 나눠서 실행"
+        )
+        raise ValueError(msg)
+
     out = pd.concat(frames, ignore_index=True)
     out["date"] = pd.to_datetime(out["date"])
     out["code"] = out["code"].map(_normalize_code)
     out = out.drop_duplicates(["date", "code"], keep="last")
     out = out.sort_values(["date", "code"]).reset_index(drop=True)
     return out
-
 
 def run_idio_from_dataframe(
     data: pd.DataFrame,
@@ -1122,7 +1224,7 @@ def render_streamlit_app():
         with b2:
             sleep_sec = st.number_input("호출 간 대기초", value=0.15, min_value=0.0, max_value=2.0, step=0.05)
         with b3:
-            max_dates_raw = st.number_input("최근 N영업일만 수집(0=전체)", value=0, min_value=0, step=50)
+            max_dates_raw = st.number_input("최근 N영업일만 수집(0=전체)", value=250, min_value=0, step=50)
             max_dates = None if int(max_dates_raw) == 0 else int(max_dates_raw)
         with b4:
             cache_dir = st.text_input("캐시 폴더", value="./idio_krx_cache")
