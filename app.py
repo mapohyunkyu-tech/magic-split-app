@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v81_RESTORE_T100_LIVE_PLUS_US_ETF_DATA_FIX_20260703"
+APP_VERSION = "v87_T100_OVERHEAT_AVOID_THRESHOLD_FIX_20260706"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6122,9 +6122,17 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         overheat_avoid_mode = ("과열회피" in mode) or ("급등회피" in mode) or ("OVERHEAT" in mode_upper)
         overheat_threshold = 70.0
         try:
-            m_overheat = re.search(r"(?:과열회피|급등회피|OVERHEAT)[^0-9]*(30|40|50|60|70|80|90|100|120|150|200)", mode, re.I)
-            if m_overheat:
-                overheat_threshold = float(m_overheat.group(1))
+            # v87 FIX:
+            # 기존 정규식은 "과열회피 6개월 +50%"에서 '6개월' 숫자를 먼저 만나
+            # +50/+70/+100 값을 읽지 못하고 전부 기본값 70으로 돌아가는 문제가 있었다.
+            # 우선 +50%, +70%, +100%처럼 + 뒤의 수치를 읽고, 없으면 마지막 허용 수치를 사용한다.
+            m_plus = re.search(r"\+(30|40|50|60|70|80|90|100|120|150|200)\s*%?", mode, re.I)
+            if m_plus:
+                overheat_threshold = float(m_plus.group(1))
+            else:
+                nums = re.findall(r"(30|40|50|60|70|80|90|100|120|150|200)", mode, re.I)
+                if nums:
+                    overheat_threshold = float(nums[-1])
         except Exception:
             overheat_threshold = 70.0
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
