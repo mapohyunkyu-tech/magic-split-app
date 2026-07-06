@@ -12199,7 +12199,7 @@ def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=26
     price = price[valid_cols].dropna(how="all") if valid_cols else pd.DataFrame()
     return price, status_df
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "11. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "12. 대장주 4슬롯 백테스트", "11. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -14999,6 +14999,460 @@ elif menu == "10. T100 A분할 백테스트":
             export_buffer.seek(0)
             st.download_button("T100 A분할 결과 ZIP 다운로드", data=export_buffer.getvalue(), file_name=f"magic_split_T100_A_SCALEIN_TP5_REBUY_result_{today_str()}.zip", mime="application/zip", key="v69_download_a_scalein")
 
+
+
+# =====================================================
+# 12. 대장주 4슬롯 백테스트
+# =====================================================
+
+elif menu == "12. 대장주 4슬롯 백테스트":
+    st.header("12. T100 강세장 대장주 4슬롯 백테스트")
+    st.caption("확장형 과열회피 +70% T100 결과 CSV를 기준으로, KODEX200/KOSDAQ150 같은 한국 위험자산이 선택된 달에만 국내 대장주 4슬롯을 운용합니다. GOLD/DOLLAR/BOND 구간은 내부 종목이 없으므로 신규 진입하지 않습니다.")
+
+    st.warning("주의: 이 메뉴는 개별주 전략 검증용입니다. 종목 유니버스가 2026-06-29 기준 대표주 목록이라 과거 생존편향이 있을 수 있습니다. 결과는 ETF 백테스트보다 보수적으로 해석하세요.")
+
+    def _v90_fmt_code(x):
+        s = str(x).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        s = re.sub(r"[^0-9]", "", s)
+        return s.zfill(6) if s else ""
+
+    def _v90_parse_assets(s):
+        txt = str(s).upper()
+        found = []
+        for a in ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]:
+            if a in txt:
+                found.append(a)
+        return found
+
+    @st.cache_data(show_spinner=False)
+    def _v90_read_krx_listing():
+        try:
+            lst = fdr.StockListing("KRX")
+            lst = lst.copy()
+            if "Code" in lst.columns:
+                lst["코드"] = lst["Code"].astype(str).str.zfill(6)
+            elif "Symbol" in lst.columns:
+                lst["코드"] = lst["Symbol"].astype(str).str.zfill(6)
+            else:
+                return pd.DataFrame(columns=["코드", "Market"])
+            if "Market" not in lst.columns:
+                lst["Market"] = ""
+            return lst[["코드", "Market"]].drop_duplicates()
+        except Exception:
+            return pd.DataFrame(columns=["코드", "Market"])
+
+    @st.cache_data(show_spinner=False)
+    def _v90_fetch_close(code, start_date, end_date):
+        code = _v90_fmt_code(code)
+        try:
+            px = fdr.DataReader(code, start_date, end_date)
+            if px is None or len(px) == 0:
+                return pd.Series(dtype="float64")
+            col = "Close" if "Close" in px.columns else px.columns[-1]
+            s = pd.to_numeric(px[col], errors="coerce").dropna()
+            s.name = code
+            return s
+        except Exception:
+            return pd.Series(dtype="float64")
+
+    def _v90_build_t100_monthly_regime(t100_daily_df):
+        d = t100_daily_df.copy()
+        if "기준일" not in d.columns:
+            raise ValueError("T100 daily CSV에 '기준일' 컬럼이 필요합니다.")
+        hold_col = None
+        for c in ["수익부스터보유", "방공호보유", "보유자산", "마지막보유"]:
+            if c in d.columns:
+                hold_col = c
+                break
+        if hold_col is None:
+            raise ValueError("T100 daily CSV에 '수익부스터보유' 또는 보유자산 컬럼이 필요합니다.")
+        d["기준일"] = pd.to_datetime(d["기준일"], errors="coerce")
+        d = d.dropna(subset=["기준일"]).sort_values("기준일")
+        d["월"] = d["기준일"].dt.to_period("M").astype(str)
+        last = d.groupby("월").tail(1).copy()
+        rows = []
+        for _, r in last.iterrows():
+            assets = _v90_parse_assets(r.get(hold_col, ""))
+            # 다음 달에 적용되는 월말 판단값
+            rows.append({
+                "월말기준일": r["기준일"],
+                "신호월": r["월"],
+                "다음운용월": (r["기준일"] + pd.offsets.MonthBegin(1)).strftime("%Y-%m"),
+                "T100보유": str(r.get(hold_col, "")),
+                "선택자산": ",".join(assets),
+                "KODEX200선택": "KODEX200" in assets,
+                "KOSDAQ150선택": "KOSDAQ150" in assets,
+                "국내위험자산선택": bool(("KODEX200" in assets) or ("KOSDAQ150" in assets)),
+            })
+        return pd.DataFrame(rows)
+
+    def _v90_calc_metrics(daily_df, initial_capital):
+        if daily_df is None or len(daily_df) == 0:
+            return {}
+        d = daily_df.copy()
+        d["기준일"] = pd.to_datetime(d["기준일"])
+        total = pd.to_numeric(d["총자산"], errors="coerce").dropna()
+        if len(total) == 0:
+            return {}
+        final = float(total.iloc[-1])
+        ret = (final / float(initial_capital) - 1.0) * 100.0
+        years = max((d["기준일"].iloc[-1] - d["기준일"].iloc[0]).days / 365.25, 1e-9)
+        cagr = ((final / float(initial_capital)) ** (1.0 / years) - 1.0) * 100.0
+        roll_max = total.cummax()
+        dd = total / roll_max - 1.0
+        mdd = float(dd.min() * 100.0)
+        # 최장회복: 고점 미회복 거래일 최대값
+        peak = -1
+        cur = 0
+        max_recovery = 0
+        for v in total:
+            if v >= peak:
+                peak = v
+                cur = 0
+            else:
+                cur += 1
+                if cur > max_recovery:
+                    max_recovery = cur
+        worst_day = float(total.pct_change().min() * 100.0) if len(total) > 1 else 0.0
+        return {
+            "초기자금": float(initial_capital),
+            "최종자산": final,
+            "총수익률(%)": ret,
+            "연복리(%)": cagr,
+            "MDD(%)": mdd,
+            "최악하루(%)": worst_day,
+            "최장회복거래일": int(max_recovery),
+            "시작일": d["기준일"].iloc[0].strftime("%Y-%m-%d"),
+            "종료일": d["기준일"].iloc[-1].strftime("%Y-%m-%d"),
+        }
+
+    def _v90_pick_leaders(asof_date, price_df, universe_df, allowed_markets, per_market_count, total_slots, include_roles, min_20d_ret, mode_fill):
+        if price_df is None or len(price_df) == 0:
+            return []
+        hist = price_df.loc[:asof_date].dropna(axis=1, how="all")
+        if len(hist) < 70:
+            return []
+        last = hist.iloc[-1]
+        r20 = hist.iloc[-1] / hist.iloc[-21] - 1.0 if len(hist) >= 21 else pd.Series(index=hist.columns, dtype="float64")
+        r60 = hist.iloc[-1] / hist.iloc[-61] - 1.0 if len(hist) >= 61 else pd.Series(index=hist.columns, dtype="float64")
+        rows = []
+        u = universe_df.copy()
+        for _, row in u.iterrows():
+            code = row["코드"]
+            if code not in hist.columns:
+                continue
+            role = str(row.get("섹터역할", ""))
+            if include_roles and role not in include_roles:
+                continue
+            market = str(row.get("Market", ""))
+            if allowed_markets and market not in allowed_markets:
+                continue
+            if pd.isna(last.get(code, np.nan)) or pd.isna(r20.get(code, np.nan)) or pd.isna(r60.get(code, np.nan)):
+                continue
+            if float(r20.get(code, 0)) < min_20d_ret:
+                continue
+            role_bonus = 0.05 if role == "대장주" else (0.03 if role == "2등대표주" else 0.0)
+            score = float(r20.get(code, 0)) * 0.4 + float(r60.get(code, 0)) * 0.6 + role_bonus
+            rows.append({
+                "코드": code,
+                "종목": row.get("종목", code),
+                "섹터": row.get("섹터", ""),
+                "섹터역할": role,
+                "Market": market,
+                "20일수익률": float(r20.get(code, 0)) * 100,
+                "60일수익률": float(r60.get(code, 0)) * 100,
+                "점수": score,
+            })
+        cand = pd.DataFrame(rows)
+        if len(cand) == 0:
+            return []
+        selected = []
+        if mode_fill == "T100자산별 2개" and len(allowed_markets) > 0:
+            for m in allowed_markets:
+                sub = cand[cand["Market"] == m].sort_values("점수", ascending=False).head(per_market_count)
+                selected.extend(sub.to_dict("records"))
+            selected = selected[:total_slots]
+        else:
+            selected = cand.sort_values("점수", ascending=False).head(total_slots).to_dict("records")
+        # 코드 중복 제거
+        out = []
+        seen = set()
+        for r in selected:
+            if r["코드"] not in seen:
+                out.append(r)
+                seen.add(r["코드"])
+        return out
+
+    def _v90_run_leader_backtest(universe_df, t100_daily_df, start_date, end_date, initial_capital, slots, per_market_count, tp_pct, stop_pct, use_stop, fee_rate, include_roles, min_20d_ret, risk_off_exit, mode_fill, integer_shares=True, expensive_policy="슬롯금액 초과 종목 제외"):
+        regime = _v90_build_t100_monthly_regime(t100_daily_df)
+        regime_map = {r["다음운용월"]: r for _, r in regime.iterrows()}
+        codes = universe_df["코드"].dropna().astype(str).map(_v90_fmt_code).drop_duplicates().tolist()
+        px_list = []
+        status = []
+        for code in codes:
+            s = _v90_fetch_close(code, start_date, end_date)
+            if len(s) > 120:
+                px_list.append(s)
+                status.append({"코드": code, "상태": "성공", "데이터수": len(s), "시작일": s.index.min().strftime("%Y-%m-%d"), "종료일": s.index.max().strftime("%Y-%m-%d")})
+            else:
+                status.append({"코드": code, "상태": "부족", "데이터수": len(s), "시작일": "", "종료일": ""})
+        if len(px_list) == 0:
+            raise ValueError("개별주 가격 데이터를 불러오지 못했습니다.")
+        price = pd.concat(px_list, axis=1).sort_index()
+        price = price.loc[(price.index >= pd.to_datetime(start_date)) & (price.index <= pd.to_datetime(end_date))]
+        all_days = price.index
+        if len(all_days) == 0:
+            raise ValueError("테스트 기간에 가격 데이터가 없습니다.")
+        cash = float(initial_capital)
+        positions = {}  # code -> dict
+        daily_rows = []
+        trade_rows = []
+        monthly_rows = []
+        last_month = None
+
+        for dt in all_days:
+            month = dt.strftime("%Y-%m")
+            # 일별 TP/SL 먼저 처리
+            for code in list(positions.keys()):
+                if code not in price.columns or pd.isna(price.loc[dt, code]):
+                    continue
+                p = float(price.loc[dt, code])
+                pos = positions[code]
+                ret = p / pos["진입가"] - 1.0
+                sell_reason = None
+                if ret >= tp_pct:
+                    sell_reason = "익절"
+                elif use_stop and ret <= -abs(stop_pct):
+                    sell_reason = "손절"
+                if sell_reason:
+                    value = pos["수량"] * p * (1 - fee_rate)
+                    pnl = value - pos["매입금액"]
+                    cash += value
+                    trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": sell_reason, "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": ret * 100, "메모": "TP/SL"})
+                    del positions[code]
+
+            # 월초 리밸런싱/신규진입
+            if month != last_month:
+                last_month = month
+                r = regime_map.get(month)
+                allowed_markets = []
+                t100_hold = ""
+                if r is not None:
+                    t100_hold = r.get("T100보유", "")
+                    if bool(r.get("KODEX200선택", False)):
+                        allowed_markets.append("KOSPI")
+                    if bool(r.get("KOSDAQ150선택", False)):
+                        allowed_markets.append("KOSDAQ")
+                allowed_markets = list(dict.fromkeys(allowed_markets))
+                if risk_off_exit and not allowed_markets:
+                    for code in list(positions.keys()):
+                        if code in price.columns and not pd.isna(price.loc[dt, code]):
+                            p = float(price.loc[dt, code])
+                            pos = positions[code]
+                            value = pos["수량"] * p * (1 - fee_rate)
+                            pnl = value - pos["매입금액"]
+                            cash += value
+                            trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "위험자산OFF청산", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
+                            del positions[code]
+                selected = []
+                if allowed_markets:
+                    selected = _v90_pick_leaders(dt, price, universe_df, allowed_markets, per_market_count, slots, include_roles, min_20d_ret, mode_fill)
+                selected_codes = [x["코드"] for x in selected]
+                # 월초에는 선택 밖 종목 청산하고 재선택 종목으로 4분할 재투자
+                for code in list(positions.keys()):
+                    if code not in selected_codes:
+                        if code in price.columns and not pd.isna(price.loc[dt, code]):
+                            p = float(price.loc[dt, code])
+                            pos = positions[code]
+                            value = pos["수량"] * p * (1 - fee_rate)
+                            pnl = value - pos["매입금액"]
+                            cash += value
+                            trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월교체매도", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
+                            del positions[code]
+                # 총자산 기준 4분할 금액 계산
+                pos_value = 0.0
+                for code, pos in positions.items():
+                    if code in price.columns and not pd.isna(price.loc[dt, code]):
+                        pos_value += pos["수량"] * float(price.loc[dt, code])
+                equity = cash + pos_value
+                slot_budget = equity / float(slots)
+                for sel in selected:
+                    code = sel["코드"]
+                    if code in positions:
+                        continue
+                    if code not in price.columns or pd.isna(price.loc[dt, code]):
+                        continue
+                    if cash <= 0:
+                        break
+                    target_amount = min(slot_budget, cash)
+                    if target_amount < 100000:
+                        continue
+                    p = float(price.loc[dt, code])
+                    buy_amount = target_amount
+                    if integer_shares:
+                        # 실전 한국주식은 소수점 수량 매수가 안 되므로 정수 주식으로 계산한다.
+                        # 슬롯금액보다 주가가 비싼 종목은 기본적으로 제외한다. 필요하면 1주 허용 정책을 선택한다.
+                        qty = int((target_amount * (1 - fee_rate)) // p)
+                        if qty <= 0:
+                            one_share_cost = p * (1 + fee_rate)
+                            if expensive_policy == "1주 매수 허용" and cash >= one_share_cost:
+                                qty = 1
+                                buy_amount = one_share_cost
+                            else:
+                                trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "고가주제외", "코드": code, "종목": sel["종목"], "가격": p, "수량": 0, "매매금액": 0.0, "실현손익": 0.0, "수익률(%)": 0.0, "메모": f"슬롯 {target_amount:,.0f}원보다 1주 가격이 높아 제외 / {t100_hold}"})
+                                continue
+                        else:
+                            buy_amount = qty * p * (1 + fee_rate)
+                        if buy_amount > cash:
+                            continue
+                    else:
+                        qty = (buy_amount * (1 - fee_rate)) / p
+                    positions[code] = {"종목": sel["종목"], "섹터": sel.get("섹터", ""), "Market": sel.get("Market", ""), "진입가": p, "수량": qty, "매입금액": buy_amount, "진입일": dt.strftime("%Y-%m-%d")}
+                    cash -= buy_amount
+                    trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월초매수", "코드": code, "종목": sel["종목"], "가격": p, "수량": qty, "매매금액": buy_amount, "실현손익": 0.0, "수익률(%)": 0.0, "메모": f"{t100_hold} / {sel.get('Market','')} / 점수 {sel.get('점수',0):.4f} / 정수주식={integer_shares}"})
+                monthly_rows.append({"월": month, "T100보유": t100_hold, "허용시장": ",".join(allowed_markets), "선택종목": ", ".join([f"{x['종목']}({x['코드']})" for x in selected]), "현금": cash})
+
+            pos_value = 0.0
+            hold_names = []
+            for code, pos in positions.items():
+                if code in price.columns and not pd.isna(price.loc[dt, code]):
+                    v = pos["수량"] * float(price.loc[dt, code])
+                    pos_value += v
+                    hold_names.append(f"{pos['종목']}({code})")
+            total = cash + pos_value
+            daily_rows.append({"기준일": dt.strftime("%Y-%m-%d"), "현금": cash, "주식평가": pos_value, "총자산": total, "보유종목수": len(positions), "보유종목": ", ".join(hold_names)})
+        daily = pd.DataFrame(daily_rows)
+        trades = pd.DataFrame(trade_rows)
+        monthly = pd.DataFrame(monthly_rows)
+        status_df = pd.DataFrame(status)
+        summary = _v90_calc_metrics(daily, initial_capital)
+        return daily, trades, monthly, status_df, pd.DataFrame([summary])
+
+    st.subheader("1) 입력")
+    t100_file = st.file_uploader("확장형 과열회피 +70% daily CSV 업로드", type=["csv"], key="v90_t100_daily_upload")
+    universe_file = st.file_uploader("대표주 유니버스 CSV 업로드(없으면 기본 파일 사용)", type=["csv"], key="v90_universe_upload")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        v90_start = st.date_input("시작일", value=pd.to_datetime("2014-01-01"), key="v90_start")
+    with c2:
+        v90_end = st.date_input("종료일", value=pd.to_datetime(datetime.today().date()), key="v90_end")
+    with c3:
+        v90_initial = st.number_input("초기자금", min_value=1000000, value=40000000, step=1000000, key="v90_initial")
+    with c4:
+        v90_slots = st.number_input("슬롯 수", min_value=1, max_value=10, value=4, step=1, key="v90_slots")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        v90_per_market = st.number_input("T100자산별 선택 수", min_value=1, max_value=5, value=2, step=1, key="v90_per_market")
+    with c6:
+        v90_tp = st.number_input("익절률(%)", min_value=5.0, max_value=300.0, value=100.0, step=5.0, key="v90_tp") / 100.0
+    with c7:
+        v90_use_stop = st.checkbox("손절 사용", value=True, key="v90_use_stop")
+    with c8:
+        v90_stop = st.number_input("손절률(%)", min_value=5.0, max_value=80.0, value=25.0, step=5.0, key="v90_stop") / 100.0
+
+    c9, c10, c11, c12 = st.columns(4)
+    with c9:
+        v90_fee = st.number_input("수수료/세금", min_value=0.0, max_value=0.01, value=0.0003, step=0.0001, format="%.4f", key="v90_fee")
+    with c10:
+        v90_min20 = st.number_input("최소 20일 수익률(%)", min_value=-50.0, max_value=50.0, value=0.0, step=1.0, key="v90_min20") / 100.0
+    with c11:
+        v90_fill_mode = st.selectbox("선택 방식", ["T100자산별 2개", "허용시장 전체 상위4"], index=0, key="v90_fill_mode")
+    with c12:
+        v90_risk_off_exit = st.checkbox("GOLD/DOLLAR/BOND 구간 기존 주식 청산", value=True, key="v90_risk_off_exit")
+
+    role_options = ["대장주", "2등대표주", "회전형중형주", "ETF대체", "핵심대표주", "핵심보유"]
+    v90_roles = st.multiselect("포함할 역할", options=role_options, default=["대장주", "2등대표주"], key="v90_roles")
+
+    c13, c14 = st.columns(2)
+    with c13:
+        v90_integer = st.checkbox("정수 주식 기준으로 백테스트", value=True, key="v90_integer")
+    with c14:
+        v90_expensive_policy = st.selectbox("고가 대장주 처리", ["슬롯금액 초과 종목 제외", "1주 매수 허용"], index=0, key="v90_expensive_policy")
+    st.caption("정수 주식 기준 ON이면 100만원 슬롯에서 1주 가격이 100만원을 넘는 종목은 기본 제외됩니다. '1주 매수 허용'을 고르면 슬롯금액을 초과해도 1주만 매수합니다.")
+
+    if st.button("대장주 4슬롯 백테스트 실행", type="primary", key="v90_run_leader_4slot"):
+        try:
+            if t100_file is None:
+                st.error("먼저 확장형 과열회피 +70% daily CSV를 업로드하세요.")
+            else:
+                t100_daily = pd.read_csv(t100_file)
+                if universe_file is not None:
+                    universe = pd.read_csv(universe_file)
+                else:
+                    default_u = Path("sector_leader_universe_20260629.csv")
+                    if default_u.exists():
+                        universe = pd.read_csv(default_u)
+                    elif Path("/mnt/data/sector_leader_universe_20260629.csv").exists():
+                        universe = pd.read_csv("/mnt/data/sector_leader_universe_20260629.csv")
+                    else:
+                        st.error("대표주 유니버스 CSV가 필요합니다.")
+                        universe = None
+                if universe is not None:
+                    universe = universe.copy()
+                    universe["코드"] = universe["코드"].map(_v90_fmt_code)
+                    universe = universe[universe["코드"] != ""].copy()
+                    if "사용여부" in universe.columns:
+                        universe = universe[universe["사용여부"].astype(str).str.upper().isin(["Y", "YES", "TRUE", "1", "사용", "ON"])]
+                    krx = _v90_read_krx_listing()
+                    if len(krx) > 0:
+                        universe = universe.merge(krx, on="코드", how="left")
+                    if "Market" not in universe.columns:
+                        universe["Market"] = ""
+                    universe["Market"] = universe["Market"].fillna("")
+                    # FDR Market 표기가 KOSPI/KOSDAQ이 아닌 경우 대비
+                    universe.loc[universe["Market"].str.contains("KOSPI", case=False, na=False), "Market"] = "KOSPI"
+                    universe.loc[universe["Market"].str.contains("KOSDAQ", case=False, na=False), "Market"] = "KOSDAQ"
+                    with st.spinner("개별주 가격 수집 및 4슬롯 백테스트 계산 중..."):
+                        daily_v90, trades_v90, monthly_v90, status_v90, summary_v90 = _v90_run_leader_backtest(
+                            universe,
+                            t100_daily,
+                            str(v90_start),
+                            str(v90_end),
+                            float(v90_initial),
+                            int(v90_slots),
+                            int(v90_per_market),
+                            float(v90_tp),
+                            float(v90_stop),
+                            bool(v90_use_stop),
+                            float(v90_fee),
+                            list(v90_roles),
+                            float(v90_min20),
+                            bool(v90_risk_off_exit),
+                            str(v90_fill_mode),
+                            bool(v90_integer),
+                            str(v90_expensive_policy),
+                        )
+                    st.subheader("2) 요약")
+                    srow = summary_v90.iloc[0].to_dict()
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("최종자산", f"{srow.get('최종자산',0):,.0f}원")
+                    m2.metric("총수익률", f"{srow.get('총수익률(%)',0):.2f}%")
+                    m3.metric("연복리", f"{srow.get('연복리(%)',0):.2f}%")
+                    m4.metric("MDD", f"{srow.get('MDD(%)',0):.2f}%")
+                    show_pinned_dataframe(summary_v90, height=120)
+                    tab1, tab2, tab3, tab4 = st.tabs(["일별", "매매내역", "월별선택", "데이터상태"])
+                    with tab1:
+                        show_pinned_dataframe(daily_v90.tail(1000), height=520)
+                    with tab2:
+                        show_pinned_dataframe(trades_v90.tail(1000), height=520)
+                    with tab3:
+                        show_pinned_dataframe(monthly_v90.tail(500), height=520)
+                    with tab4:
+                        show_pinned_dataframe(status_v90, height=420)
+                    export_buffer = io.BytesIO()
+                    with zipfile.ZipFile(export_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        zf.writestr(f"leader_4slot_summary_{today_str()}.csv", summary_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_daily_{today_str()}.csv", daily_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_trades_{today_str()}.csv", trades_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_monthly_{today_str()}.csv", monthly_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_data_status_{today_str()}.csv", status_v90.to_csv(index=False).encode("utf-8-sig"))
+                    export_buffer.seek(0)
+                    st.download_button("대장주 4슬롯 결과 ZIP 다운로드", data=export_buffer.getvalue(), file_name=f"leader_4slot_result_{today_str()}.zip", mime="application/zip", key="v90_download")
+        except Exception as e:
+            st.exception(e)
 
 # =====================================================
 # 9. 도움말
