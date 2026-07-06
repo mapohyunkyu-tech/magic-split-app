@@ -5948,11 +5948,16 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
             return pd.DataFrame(), pd.DataFrame(status)
         return pd.DataFrame()
 
-def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False):
+def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False, overheat_exclude=False, overheat_return_threshold=70.0):
     """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 추세선 위, 점수 양수인 자산 상위 N개.
 
     초반 200일 데이터가 부족한 구간은 MA200 대신 MA120/MA60 순서로 완화한다.
     그래서 2020 초반처럼 검증 시작 직후에도 듀얼이 전부 CASH로 죽지 않는다.
+
+    overheat_exclude=True일 때는 최근 6개월 수익률(ret126)이 threshold 이상인 자산을
+    "이미 너무 오른 자산"으로 보고 이번 월간 편입에서 제외한다.
+    예: KODEX200이 6개월 +70% 이상 급등했으면 다음 달 편입 후보에서 빼고
+    남은 자산 중 점수 상위로 자동 이동한다.
     """
     picks = []
     detail_rows = []
@@ -5985,8 +5990,14 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
                 ma = float(ser.tail(60).mean()); ma_label = "MA60"
             else:
                 ma = float(ser.tail(45).mean()); ma_label = "MA45"
-            ok = (not pd.isna(score)) and close > ma and score > 0
-            d = {"asset": col, "score": score, "ret21": ret21, "ret63": ret63, "ret126": ret126, "trend_ma": ma_label, "close": close, "ma": ma, "pass": bool(ok)}
+            overheat_flag = False
+            try:
+                if bool(overheat_exclude) and (not pd.isna(ret126)) and float(ret126) >= float(overheat_return_threshold):
+                    overheat_flag = True
+            except Exception:
+                overheat_flag = False
+            ok = (not pd.isna(score)) and close > ma and score > 0 and (not overheat_flag)
+            d = {"asset": col, "score": score, "ret21": ret21, "ret63": ret63, "ret126": ret126, "trend_ma": ma_label, "close": close, "ma": ma, "pass": bool(ok), "overheat_excluded": bool(overheat_flag), "overheat_threshold": float(overheat_return_threshold)}
             detail_rows.append(d)
             if ok:
                 rows.append(d)
@@ -6000,7 +6011,7 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
             fallback = []
             for d in detail_rows:
                 sc = d.get("score", np.nan)
-                if not pd.isna(sc) and float(sc) > 0:
+                if not pd.isna(sc) and float(sc) > 0 and (not bool(d.get("overheat_excluded", False))):
                     fallback.append(d)
             fallback = sorted(fallback, key=lambda x: x.get("score", -999), reverse=True)
             picks = [r["asset"] for r in fallback[:int(max_assets)]]
@@ -6108,6 +6119,14 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         mode = str(mode or "월간 듀얼모멘텀 상위2")
 
         mode_upper = mode.upper()
+        overheat_avoid_mode = ("과열회피" in mode) or ("급등회피" in mode) or ("OVERHEAT" in mode_upper)
+        overheat_threshold = 70.0
+        try:
+            m_overheat = re.search(r"(?:과열회피|급등회피|OVERHEAT)[^0-9]*(30|40|50|60|70|80|90|100|120|150|200)", mode, re.I)
+            if m_overheat:
+                overheat_threshold = float(m_overheat.group(1))
+        except Exception:
+            overheat_threshold = 70.0
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
         split_turbo_extended = split_turbo and (("확장" in mode) or ("SP500" in mode_upper) or ("S&P" in mode_upper) or ("BOND" in mode_upper))
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
@@ -6299,7 +6318,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 cols = [c for c in turbo_asset_pool if price_df is not None and c in price_df.columns]
                 sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
                 asof = prev_date if prev_date is not None else date
-                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
+                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True, overheat_exclude=overheat_avoid_mode, overheat_return_threshold=overheat_threshold)
                 if len(picks) == 0:
                     weights = {"CASH": 1.0}
                 else:
@@ -6679,6 +6698,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             status_text = ""
         if split_turbo:
             memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
+            if overheat_avoid_mode:
+                memo_text += f" 과열회피 모드는 최근 6개월 수익률이 +{overheat_threshold:.0f}% 이상인 자산을 다음 월간 편입 후보에서 제외하고 남은 자산으로 재분산합니다."
         elif split_073:
             memo_text = "0/7/3 계열은 대장주를 제외하고 방어구역 70%와 부스터 30%로 운용합니다. C10/C15는 방어구역 안에 CTA를 10~15% 분리합니다. 매월 상위비중 강제 리밸런싱은 하지 않고, 분기마다 방공호65~80/부스터20~35 밴드를 점검하며 부스터40% 초과 시 즉시 35%선까지 잠급니다."
         elif split_064:
@@ -6747,6 +6768,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, SP500 {sp500_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
+            "과열회피사용": "사용" if overheat_avoid_mode else "미사용",
+            "과열회피기준": f"6개월수익률 +{overheat_threshold:.0f}% 이상 제외" if overheat_avoid_mode else "",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -13207,7 +13230,11 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T10/T100 Turbo 과열회피 6개월 +50%",
+                    "T10/T100 Turbo 과열회피 6개월 +70%",
+                    "T10/T100 Turbo 과열회피 6개월 +100%",
                     "T10/T100 Turbo 확장형 SP500+BOND",
+                    "T10/T100 Turbo 확장형 과열회피 6개월 +70%",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
