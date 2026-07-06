@@ -15007,7 +15007,7 @@ elif menu == "10. T100 A분할 백테스트":
 
 elif menu == "12. 대장주 4슬롯 백테스트":
     st.header("12. T100 강세장 대장주 4슬롯 백테스트")
-    st.caption("확장형 과열회피 +70% T100 결과 CSV를 기준으로, KODEX200/KOSDAQ150 같은 한국 위험자산이 선택된 달에만 국내 대장주 4슬롯을 운용합니다. GOLD/DOLLAR/BOND 구간은 내부 종목이 없으므로 신규 진입하지 않습니다.")
+    st.caption("앱 내부에서 확장형 과열회피 +70% T100 결과를 먼저 생성한 뒤, KODEX200/KOSDAQ150 같은 한국 위험자산이 선택된 달에만 국내 대장주 4슬롯을 운용합니다. GOLD/DOLLAR/BOND 구간은 내부 종목이 없으므로 신규 진입하지 않습니다.")
 
     st.warning("주의: 이 메뉴는 개별주 전략 검증용입니다. 종목 유니버스가 2026-06-29 기준 대표주 목록이라 과거 생존편향이 있을 수 있습니다. 결과는 ETF 백테스트보다 보수적으로 해석하세요.")
 
@@ -15331,7 +15331,7 @@ elif menu == "12. 대장주 4슬롯 백테스트":
         return daily, trades, monthly, status_df, pd.DataFrame([summary])
 
     st.subheader("1) 입력")
-    t100_file = st.file_uploader("확장형 과열회피 +70% daily CSV 업로드", type=["csv"], key="v90_t100_daily_upload")
+    st.info("확장형 과열회피 +70% T100 daily는 별도 CSV 업로드 없이 앱 내부에서 자동 생성합니다.")
     universe_file = st.file_uploader("대표주 유니버스 CSV 업로드(없으면 기본 파일 사용)", type=["csv"], key="v90_universe_upload")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -15375,10 +15375,19 @@ elif menu == "12. 대장주 4슬롯 백테스트":
 
     if st.button("대장주 4슬롯 백테스트 실행", type="primary", key="v90_run_leader_4slot"):
         try:
-            if t100_file is None:
-                st.error("먼저 확장형 과열회피 +70% daily CSV를 업로드하세요.")
+            with st.spinner("확장형 과열회피 +70% T100 daily 자동 생성 중..."):
+                seed_daily = _bt_make_bunker_only_daily_df(str(v90_start), str(v90_end), total_initial=100_000_000)
+                t100_daily, t100_summary = build_bunker_7030_backtest(
+                    seed_daily,
+                    total_initial=100_000_000,
+                    leader_ratio=0.0,
+                    mode="T10/T100 Turbo 확장형 과열회피 6개월 +70%",
+                    cash_annual_rate=3.0,
+                )
+            if t100_daily is None or len(t100_daily) == 0:
+                st.error("확장형 과열회피 +70% T100 daily 자동 생성에 실패했습니다. ETF 가격 데이터 조회 상태를 확인하세요.")
             else:
-                t100_daily = pd.read_csv(t100_file)
+                st.caption(f"자동 생성 T100 기간: {t100_daily['기준일'].iloc[0]} ~ {t100_daily['기준일'].iloc[-1]} / 행수 {len(t100_daily):,}개")
                 if universe_file is not None:
                     universe = pd.read_csv(universe_file)
                 else:
