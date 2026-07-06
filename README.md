@@ -1,10 +1,14 @@
-# IDIO 300 v3 Champion 자동수집 백테스터
+# Magic Split T100 Overheat 70 App
 
-Streamlit 실행:
+Streamlit app for the T10/T100 Turbo extended overheat-avoidance mode.
+
+Main file: `app.py`
+
+Run locally:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-처음에는 자동수집 모드에서 최근 N영업일을 50~250으로 작게 설정해서 연결 테스트 후 기간을 늘리세요.
+This package is the overheat 70% app, not the IDIO 300 auto-collector app.

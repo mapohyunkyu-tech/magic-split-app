@@ -1,4 +1,8 @@
 streamlit
 pandas
 numpy
-pykrx
+requests
+yfinance
+FinanceDataReader
+gspread
+google-auth
