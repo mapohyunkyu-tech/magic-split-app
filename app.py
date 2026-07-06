@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v87_T100_OVERHEAT_AVOID_THRESHOLD_FIX_20260706"
+APP_VERSION = "v88_T100_OVERHEAT_V84_HYBRID_COMBO_20260706"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -6138,6 +6138,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
         split_turbo_extended = split_turbo and (("확장" in mode) or ("SP500" in mode_upper) or ("S&P" in mode_upper) or ("BOND" in mode_upper))
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
+        v84_hybrid_mode = split_turbo and (("V84" in mode_upper) or ("복귀" in mode) or ("하이브리드" in mode))
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
         split_turbo_t70_defense = split_turbo and ("T70" in mode_upper)
@@ -6637,6 +6638,134 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         out = pd.DataFrame(rows)
         if len(out) == 0:
             return out, {"오류": "방공호 결과가 없습니다."}
+
+        v84_stats = {}
+        if v84_hybrid_mode and split_turbo:
+            try:
+                # v88: Turbo/과열회피 엔진의 일별 자산곡선 위에 v84 운용비중을 얹는다.
+                # 목적: 과열회피는 '자산 선택', v84는 '노출비중/현금잠금'으로 분리해 백테스트한다.
+                base_curve = pd.to_numeric(out["통합총자산"], errors="coerce").ffill().astype(float)
+                if len(base_curve) > 0 and float(base_curve.iloc[0]) > 0:
+                    base_ret = base_curve.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                    base_ret5 = (base_curve / base_curve.shift(5) - 1.0).replace([np.inf, -np.inf], np.nan)
+                    base_ma30 = base_curve.rolling(30, min_periods=10).mean()
+                    base_peak = base_curve.cummax()
+
+                    total_v = float(total_initial)
+                    state = "1순위공격"
+                    state_days = 0
+                    lock_used = False
+                    transitions = 0
+                    defense_days = 0
+                    lock_days = 0
+                    shock_count = 0
+                    recovery_count = 0
+
+                    totals = []
+                    statuses = []
+                    exposures = []
+                    shock_flags = []
+                    recovery_flags = []
+
+                    for j in range(len(base_curve)):
+                        if state == "6310잠금":
+                            exposure = 0.60
+                        elif state == "방어20":
+                            exposure = 0.70
+                        else:
+                            exposure = 1.00
+
+                        if j > 0:
+                            br = float(base_ret.iloc[j]) if not pd.isna(base_ret.iloc[j]) else 0.0
+                            total_v = float(total_v) * (1.0 + exposure * br + (1.0 - exposure) * float(daily_rate))
+
+                        recover_ok = False
+                        try:
+                            if not pd.isna(base_ma30.iloc[j]) and float(base_curve.iloc[j]) >= float(base_ma30.iloc[j]):
+                                recover_ok = True
+                            if float(base_peak.iloc[j]) > 0 and float(base_curve.iloc[j]) >= float(base_peak.iloc[j]) * 0.95:
+                                recover_ok = True
+                        except Exception:
+                            recover_ok = False
+
+                        shock_on = False
+                        try:
+                            one_day_shock = float(base_ret.iloc[j]) <= -0.05
+                            five_day_shock = (not pd.isna(base_ret5.iloc[j])) and float(base_ret5.iloc[j]) <= -0.06
+                            shock_on = bool(one_day_shock or five_day_shock)
+                        except Exception:
+                            shock_on = False
+
+                        totals.append(float(total_v))
+                        statuses.append(state)
+                        exposures.append(float(exposure))
+                        shock_flags.append("Y" if shock_on else "")
+                        recovery_flags.append("Y" if recover_ok else "")
+
+                        if state == "1순위공격":
+                            if (not lock_used) and float(total_v) >= float(total_initial) * 1.50:
+                                state = "6310잠금"
+                                state_days = 0
+                                lock_used = True
+                                transitions += 1
+                            elif shock_on:
+                                state = "방어20"
+                                state_days = 0
+                                shock_count += 1
+                                transitions += 1
+                        elif state == "방어20":
+                            state_days += 1
+                            defense_days += 1
+                            if state_days >= 20 and recover_ok:
+                                state = "1순위공격"
+                                state_days = 0
+                                recovery_count += 1
+                                transitions += 1
+                        elif state == "6310잠금":
+                            state_days += 1
+                            lock_days += 1
+                            if state_days >= 60 and recover_ok:
+                                state = "1순위공격"
+                                state_days = 0
+                                recovery_count += 1
+                                transitions += 1
+
+                    new_curve = pd.Series(totals, index=out.index, dtype=float)
+                    new_peak = new_curve.cummax()
+                    new_mdd = (new_curve / new_peak - 1.0) * 100.0
+                    exp_ser = pd.Series(exposures, index=out.index, dtype=float)
+                    risk_val = new_curve * exp_ser
+                    cash_val = new_curve * (1.0 - exp_ser)
+
+                    out["v84상태"] = statuses
+                    out["v84투입비중"] = (exp_ser * 100.0).round(1)
+                    out["v84충격방어신호"] = shock_flags
+                    out["v84회복조건"] = recovery_flags
+                    out["통합총자산"] = new_curve.round().astype(int)
+                    out["통합수익률"] = ((new_curve / float(total_initial) - 1.0) * 100.0).round(2)
+                    out["통합MDD"] = new_mdd.round(2)
+                    out["수익부스터평가금액"] = risk_val.round().astype(int)
+                    out["진짜방공호평가금액"] = cash_val.round().astype(int)
+                    out["방어구역평가금액"] = cash_val.round().astype(int)
+                    out["방공호평가금액"] = out["통합총자산"]
+                    out["수익부스터현재비중"] = out["v84투입비중"]
+                    out["진짜방공호현재비중"] = (100.0 - exp_ser * 100.0).round(2)
+                    out["방어구역현재비중"] = (100.0 - exp_ser * 100.0).round(2)
+                    out["방공호보유"] = out["방공호보유"].astype(str) + " / v84[" + out["v84상태"].astype(str) + ",T100노출 " + out["v84투입비중"].astype(str) + "%]"
+                    out["방공호모드"] = mode
+
+                    v84_stats = {
+                        "v84하이브리드사용": "사용",
+                        "v84상태전환횟수": int(transitions),
+                        "v84방어일수": int(defense_days),
+                        "v846310일수": int(lock_days),
+                        "v84충격방어발동횟수": int(shock_count),
+                        "v84복귀횟수": int(recovery_count),
+                        "v84현금연수익률가정": float(cash_annual_rate or 0.0),
+                    }
+            except Exception as _e:
+                v84_stats = {"v84하이브리드사용": "오류", "v84오류": str(_e)}
+
         final_total = float(out["통합총자산"].iloc[-1])
         # v32 핵심 성과지표: Turbo/방공호 공통으로 summary CSV에 저장한다.
         try:
@@ -6708,6 +6837,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
             if overheat_avoid_mode:
                 memo_text += f" 과열회피 모드는 최근 6개월 수익률이 +{overheat_threshold:.0f}% 이상인 자산을 다음 월간 편입 후보에서 제외하고 남은 자산으로 재분산합니다."
+            if v84_hybrid_mode:
+                memo_text += " v84 복귀형은 Turbo 일별 수익률 위에 1일 -5% 또는 5일 -6% 방어, 방어 20거래일 유지, +50% 6310 잠금, 6310 60거래일 후 회복조건 복귀를 반영합니다."
         elif split_073:
             memo_text = "0/7/3 계열은 대장주를 제외하고 방어구역 70%와 부스터 30%로 운용합니다. C10/C15는 방어구역 안에 CTA를 10~15% 분리합니다. 매월 상위비중 강제 리밸런싱은 하지 않고, 분기마다 방공호65~80/부스터20~35 밴드를 점검하며 부스터40% 초과 시 즉시 35%선까지 잠급니다."
         elif split_064:
@@ -6788,6 +6919,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "방공호데이터상태": status_text,
             "메모": memo_text,
         }
+        if v84_stats:
+            summary.update(v84_stats)
         return out, summary
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
@@ -13243,6 +13376,8 @@ elif menu == "6. 섹터전략 백테스트":
                     "T10/T100 Turbo 과열회피 6개월 +100%",
                     "T10/T100 Turbo 확장형 SP500+BOND",
                     "T10/T100 Turbo 확장형 과열회피 6개월 +70%",
+                    "T10/T100 Turbo v84 복귀 하이브리드",
+                    "T10/T100 Turbo 확장형 과열회피 6개월 +70% + v84 복귀형",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
