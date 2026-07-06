@@ -15006,8 +15006,8 @@ elif menu == "10. T100 A분할 백테스트":
 # =====================================================
 
 elif menu == "12. 대장주 4슬롯 백테스트":
-    st.header("12. T100 강세장 대장주 4슬롯 백테스트")
-    st.caption("앱 내부에서 확장형 과열회피 +70% T100 결과를 먼저 생성한 뒤, KODEX200/KOSDAQ150 같은 한국 위험자산이 선택된 달에만 국내 대장주 4슬롯을 운용합니다. GOLD/DOLLAR/BOND 구간은 내부 종목이 없으므로 신규 진입하지 않습니다.")
+    st.header("12. T100 보조 대장주 4슬롯 백테스트")
+    st.caption("앱 내부에서 확장형 과열회피 +70% T100 결과를 먼저 생성한 뒤, 국내 대장주 4슬롯 보조전략을 테스트합니다. GOLD/DOLLAR/BOND 구간에도 보조전략을 계속 굴릴지 선택할 수 있습니다.")
 
     st.warning("주의: 이 메뉴는 개별주 전략 검증용입니다. 종목 유니버스가 2026-06-29 기준 대표주 목록이라 과거 생존편향이 있을 수 있습니다. 결과는 ETF 백테스트보다 보수적으로 해석하세요.")
 
@@ -15185,7 +15185,7 @@ elif menu == "12. 대장주 4슬롯 백테스트":
                 seen.add(r["코드"])
         return out
 
-    def _v90_run_leader_backtest(universe_df, t100_daily_df, start_date, end_date, initial_capital, slots, per_market_count, tp_pct, stop_pct, use_stop, fee_rate, include_roles, min_20d_ret, risk_off_exit, mode_fill, integer_shares=True, expensive_policy="슬롯금액 초과 종목 제외"):
+    def _v90_run_leader_backtest(universe_df, t100_daily_df, start_date, end_date, initial_capital, slots, per_market_count, tp_pct, stop_pct, use_stop, fee_rate, include_roles, min_20d_ret, risk_off_exit, mode_fill, integer_shares=True, expensive_policy="슬롯금액 초과 종목 제외", aux_mode="위험자산 선택 때만 신규진입 / 방어자산이면 청산"):
         regime = _v90_build_t100_monthly_regime(t100_daily_df)
         regime_map = {r["다음운용월"]: r for _, r in regime.iterrows()}
         codes = universe_df["코드"].dropna().astype(str).map(_v90_fmt_code).drop_duplicates().tolist()
@@ -15246,7 +15246,19 @@ elif menu == "12. 대장주 4슬롯 백테스트":
                     if bool(r.get("KOSDAQ150선택", False)):
                         allowed_markets.append("KOSDAQ")
                 allowed_markets = list(dict.fromkeys(allowed_markets))
-                if risk_off_exit and not allowed_markets:
+
+                # 보조전략 운용 범위
+                # 1) 기본: KODEX200/KOSDAQ150 같은 국내 위험자산이 선택된 달에만 신규진입하고, 방어자산 구간은 청산
+                # 2) 보유분만 관리: 방어자산 구간에는 신규진입/월교체를 하지 않고 TP/SL만 본다
+                # 3) 상시 운용: GOLD/DOLLAR/BOND 구간에도 보조전략은 KOSPI/KOSDAQ 전체 대장주에서 계속 굴린다
+                no_domestic_risk_signal = not bool(allowed_markets)
+                if no_domestic_risk_signal and aux_mode == "GOLD/DOLLAR/BOND 구간도 국내 대장주 상시 운용":
+                    allowed_markets = ["KOSPI", "KOSDAQ"]
+                    t100_hold = str(t100_hold) + " / 보조상시운용"
+                hold_only_mode = no_domestic_risk_signal and aux_mode == "위험자산 선택 때만 신규진입 / 방어자산이면 보유분만 관리"
+                force_exit_mode = risk_off_exit and no_domestic_risk_signal and aux_mode == "위험자산 선택 때만 신규진입 / 방어자산이면 청산"
+
+                if force_exit_mode:
                     for code in list(positions.keys()):
                         if code in price.columns and not pd.isna(price.loc[dt, code]):
                             p = float(price.loc[dt, code])
@@ -15257,20 +15269,22 @@ elif menu == "12. 대장주 4슬롯 백테스트":
                             trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "위험자산OFF청산", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
                             del positions[code]
                 selected = []
-                if allowed_markets:
+                if allowed_markets and not hold_only_mode:
                     selected = _v90_pick_leaders(dt, price, universe_df, allowed_markets, per_market_count, slots, include_roles, min_20d_ret, mode_fill)
                 selected_codes = [x["코드"] for x in selected]
                 # 월초에는 선택 밖 종목 청산하고 재선택 종목으로 4분할 재투자
-                for code in list(positions.keys()):
-                    if code not in selected_codes:
-                        if code in price.columns and not pd.isna(price.loc[dt, code]):
-                            p = float(price.loc[dt, code])
-                            pos = positions[code]
-                            value = pos["수량"] * p * (1 - fee_rate)
-                            pnl = value - pos["매입금액"]
-                            cash += value
-                            trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월교체매도", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
-                            del positions[code]
+                # 단, 방어자산 구간 보유분만 관리 모드에서는 강제 월교체를 하지 않는다.
+                if not hold_only_mode:
+                    for code in list(positions.keys()):
+                        if code not in selected_codes:
+                            if code in price.columns and not pd.isna(price.loc[dt, code]):
+                                p = float(price.loc[dt, code])
+                                pos = positions[code]
+                                value = pos["수량"] * p * (1 - fee_rate)
+                                pnl = value - pos["매입금액"]
+                                cash += value
+                                trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월교체매도", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
+                                del positions[code]
                 # 총자산 기준 4분할 금액 계산
                 pos_value = 0.0
                 for code, pos in positions.items():
@@ -15361,7 +15375,19 @@ elif menu == "12. 대장주 4슬롯 백테스트":
     with c11:
         v90_fill_mode = st.selectbox("선택 방식", ["T100자산별 2개", "허용시장 전체 상위4"], index=0, key="v90_fill_mode")
     with c12:
-        v90_risk_off_exit = st.checkbox("GOLD/DOLLAR/BOND 구간 기존 주식 청산", value=True, key="v90_risk_off_exit")
+        v90_risk_off_exit = st.checkbox("방어자산 구간 청산 옵션", value=True, key="v90_risk_off_exit")
+
+    v90_aux_mode = st.selectbox(
+        "GOLD/DOLLAR/BOND 구간 보조전략 운용",
+        [
+            "위험자산 선택 때만 신규진입 / 방어자산이면 청산",
+            "위험자산 선택 때만 신규진입 / 방어자산이면 보유분만 관리",
+            "GOLD/DOLLAR/BOND 구간도 국내 대장주 상시 운용",
+        ],
+        index=0,
+        key="v90_aux_mode",
+    )
+    st.caption("보조전략을 완전히 분리해 보고 싶으면 '상시 운용'을 선택하세요. 방어자산 구간에도 KOSPI/KOSDAQ 대장주 4슬롯을 계속 돌립니다.")
 
     role_options = ["대장주", "2등대표주", "회전형중형주", "ETF대체", "핵심대표주", "핵심보유"]
     v90_roles = st.multiselect("포함할 역할", options=role_options, default=["대장주", "2등대표주"], key="v90_roles")
@@ -15433,6 +15459,7 @@ elif menu == "12. 대장주 4슬롯 백테스트":
                             str(v90_fill_mode),
                             bool(v90_integer),
                             str(v90_expensive_policy),
+                            str(v90_aux_mode),
                         )
                     st.subheader("2) 요약")
                     srow = summary_v90.iloc[0].to_dict()
