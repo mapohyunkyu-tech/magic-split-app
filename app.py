@@ -10187,6 +10187,54 @@ except Exception:
     T100_HYBRID_HISTORY_PATH = T100_HYBRID_LEGACY_HISTORY_PATH
     T100_HYBRID_CLEAR_MARKER_PATH = Path(".t100_hybrid_history_cleared")
 
+# Streamlit Cloud의 로컬 파일 저장소는 재부팅/하루 경과/재배포 때 사라질 수 있다.
+# 그래서 T100 70% 운용기록은 Google Sheets에 우선 저장한다.
+T100_HYBRID_SHEET_TITLE = "T100_70_HISTORY"
+
+
+def _t100_google_sheet_available_v94():
+    try:
+        return ("spreadsheet_id" in st.secrets) and ("gcp_service_account" in st.secrets)
+    except Exception:
+        return False
+
+
+def _load_t100_hybrid_history_from_sheet_v94():
+    if not _t100_google_sheet_available_v94():
+        return None
+    try:
+        ws = get_ws(T100_HYBRID_SHEET_TITLE, T100_HYBRID_HISTORY_COLUMNS)
+        df = read_worksheet_df(ws, T100_HYBRID_HISTORY_COLUMNS)
+        for col in T100_HYBRID_HISTORY_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[T100_HYBRID_HISTORY_COLUMNS]
+        if len(df) and "기준일" in df.columns:
+            df["기준일"] = pd.to_datetime(df["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
+            df = df.dropna(subset=["기준일"]).sort_values("기준일")
+        return df
+    except Exception as e:
+        try:
+            st.warning(f"Google Sheets T100 기록 불러오기 실패: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _save_t100_hybrid_history_to_sheet_v94(df):
+    if not _t100_google_sheet_available_v94():
+        return False
+    try:
+        ws = get_ws(T100_HYBRID_SHEET_TITLE, T100_HYBRID_HISTORY_COLUMNS)
+        write_worksheet(ws, df, T100_HYBRID_HISTORY_COLUMNS)
+        return True
+    except Exception as e:
+        try:
+            st.warning(f"Google Sheets T100 기록 저장 실패: {e}")
+        except Exception:
+            pass
+        return False
+
 
 def _empty_t100_hybrid_history_v74():
     return pd.DataFrame(columns=T100_HYBRID_HISTORY_COLUMNS)
@@ -10206,7 +10254,13 @@ def _migrate_t100_hybrid_history_v74():
 
 
 def _load_t100_hybrid_history_v63():
-    """고정 데이터 폴더에 저장된 T100 하이브리드 운용기록을 읽는다. v63~v74 기록도 v75 형식으로 보정한다."""
+    """T100 70% 운용기록을 읽는다. v94: Google Sheets 우선, 실패 시 로컬 CSV 백업 사용."""
+    # 1순위: Google Sheets. Streamlit Cloud에서 하루 지나도 살아남는 저장소다.
+    sheet_df = _load_t100_hybrid_history_from_sheet_v94()
+    if sheet_df is not None:
+        return sheet_df
+
+    # 2순위: 로컬 CSV. 로컬 실행에서는 유용하지만 Streamlit Cloud에서는 재시작 때 사라질 수 있다.
     try:
         _migrate_t100_hybrid_history_v74()
         if not T100_HYBRID_HISTORY_PATH.exists():
@@ -10237,7 +10291,7 @@ def _load_t100_hybrid_history_v63():
 
 
 def _save_t100_hybrid_history_v63(record: dict):
-    """동일 기준일 기록은 덮어쓰고 저장한다."""
+    """동일 기준일 기록은 덮어쓰고 저장한다. v94: Google Sheets + 로컬 백업 동시 저장."""
     try:
         if T100_HYBRID_CLEAR_MARKER_PATH.exists():
             T100_HYBRID_CLEAR_MARKER_PATH.unlink()
@@ -10252,7 +10306,23 @@ def _save_t100_hybrid_history_v63(record: dict):
             record[col] = ""
     hist = pd.concat([hist, pd.DataFrame([record])[T100_HYBRID_HISTORY_COLUMNS]], ignore_index=True)
     hist = hist.sort_values("기준일")
-    hist.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+
+    # Google Sheets에 우선 저장해서 Streamlit Cloud 재부팅/하루 경과에도 기록이 유지되게 한다.
+    saved_to_sheet = _save_t100_hybrid_history_to_sheet_v94(hist)
+
+    # 로컬에도 백업 저장. 로컬 실행/일시 재시작에는 도움이 된다.
+    try:
+        hist.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+    except Exception:
+        pass
+
+    try:
+        if saved_to_sheet:
+            st.caption("T100 70% 운용기록: Google Sheets에 저장됨")
+        else:
+            st.caption("T100 70% 운용기록: 로컬 CSV에만 저장됨. Streamlit Cloud에서는 재시작 시 사라질 수 있음")
+    except Exception:
+        pass
     return hist
 
 
