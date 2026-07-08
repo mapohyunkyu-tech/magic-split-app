@@ -1,7 +1,6 @@
-# Magic Split T100 Overheat 70 Persistent
+# 70% 과열회피 v94 Persistent
 
-T100 70% 운용기록을 Google Sheets에 저장하도록 수정한 버전입니다.
-Streamlit Cloud가 재부팅되거나 하루 지나도 기록이 유지됩니다.
+Streamlit Cloud용 패키지입니다.
 
 ## Files
 - app.py
@@ -9,5 +8,6 @@ Streamlit Cloud가 재부팅되거나 하루 지나도 기록이 유지됩니다
 - README.md
 
 ## Notes
-Streamlit Secrets에 기존 Google Sheets 설정이 있어야 합니다.
-저장 시 Google Sheet에 `T100_70_HISTORY` 시트가 자동 생성됩니다.
+- FinanceDataReader 설치 패키지명은 `finance-datareader` 입니다.
+- 앱 내부 import 이름은 `FinanceDataReader` 입니다.
+- Google Sheets 저장을 쓰려면 Streamlit Secrets에 서비스계정 정보를 넣어야 합니다.
