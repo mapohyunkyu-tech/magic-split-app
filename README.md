@@ -1,3 +1,25 @@
+# v102_OVERHEAT70_VISIBLE_DEFAULT_PLOTLY_FIX
+
+## 수정 내용
+- 7-1 메뉴명을 T100 70% 과열회피 운용모드로 노출
+- 기본 선택값을 확장형 과열회피 6개월 +70% 단독으로 설정
+- Streamlit Cloud에서 FinanceDataReader import 시 필요한 plotly 의존성 추가
+- Python 3.11 고정 유지
+- 기존 전체 기능 및 sector_leader_universe_20260629.csv 포함
+
+## 배포
+ZIP을 풀어서 아래 파일/폴더 전체를 GitHub에 덮어쓰세요.
+- app.py
+- requirements.txt
+- runtime.txt
+- README.md
+- sector_leader_universe_20260629.csv
+- .streamlit/config.toml
+
+배포 후 Streamlit Cloud에서 Clear cache 후 Reboot app 하세요.
+
+---
+
 # v101_OVERHEAT70_VISIBLE_DEFAULT_20260710
 
 ## 목적
