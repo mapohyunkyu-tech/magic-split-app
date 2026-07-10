@@ -2,9 +2,9 @@ streamlit>=1.36.0
 pandas>=2.0.0
 numpy>=1.26.0
 requests>=2.31.0
-finance-datareader
 yfinance>=0.2.40
-gspread>=6.0.0
-google-auth>=2.0.0
+finance-datareader
 beautifulsoup4
 lxml
+gspread>=6.0.0
+google-auth>=2.0.0
