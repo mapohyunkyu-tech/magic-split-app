@@ -1,13 +1,12 @@
-# 70% 과열회피 v94 Persistent
+# 70% 과열회피 v95 Optional Sheets
 
-Streamlit Cloud용 패키지입니다.
+- Google Sheets secrets가 있으면 T100_70_HISTORY 시트에 영구저장합니다.
+- secrets가 없어도 앱이 죽지 않고 임시 로컬 저장으로 실행됩니다.
+- Streamlit Cloud의 임시 로컬 저장은 재부팅/재배포/시간 경과 후 사라질 수 있으므로 CSV 백업을 내려받아 두세요.
 
-## Files
-- app.py
-- requirements.txt
-- README.md
+## 실행
 
-## Notes
-- FinanceDataReader 설치 패키지명은 `finance-datareader` 입니다.
-- 앱 내부 import 이름은 `FinanceDataReader` 입니다.
-- Google Sheets 저장을 쓰려면 Streamlit Secrets에 서비스계정 정보를 넣어야 합니다.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```

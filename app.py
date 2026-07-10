@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v88_T100_OVERHEAT_V84_HYBRID_COMBO_20260706"
+APP_VERSION = "v95_OVERHEAT70_OPTIONAL_SHEETS_20260710"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10101,21 +10101,24 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
 
 st.title("📈 매직스플릿 관리기 안정형")
 st.caption(f"{APP_VERSION}")
-st.caption("요양원 목록은 Google Sheets에 저장됩니다. 서버가 재시작돼도 목록은 유지됩니다.")
+st.caption("T100 70% 운용기록은 Google Sheets 설정이 있으면 영구저장, 없으면 임시 로컬 저장으로 동작합니다.")
 
-try:
-    # v11: 앱 시작 때 3개 탭을 전부 읽지 않는다.
-    # Google Sheets 429 쿼터 방지를 위해 연결 확인만 하고,
-    # 실제 탭은 메뉴에서 필요할 때만 읽는다.
-    get_spreadsheet()
-    st.success("Google Sheets 연결 완료")
-except Exception as e:
-    if is_quota_error(e):
-        st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요.")
-    else:
-        st.error("Google Sheets 연결 실패")
-        st.exception(e)
-    st.stop()
+# v95: 앱 시작 단계에서 Google Sheets 연결 실패 때문에 전체 앱이 죽지 않게 한다.
+# Streamlit Cloud에 secrets를 아직 넣지 않았거나 Google API가 잠깐 실패해도
+# 7-1 T100 70% 운용모드는 계속 사용할 수 있어야 한다.
+if _t100_google_sheet_available_v94():
+    try:
+        get_spreadsheet()
+        st.success("Google Sheets 연결 완료")
+    except Exception as e:
+        if is_quota_error(e):
+            st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요. 임시 로컬 저장으로 계속 실행합니다.")
+        else:
+            st.warning("Google Sheets 연결 실패. 앱은 임시 로컬 저장 모드로 계속 실행합니다.")
+            with st.expander("Google Sheets 오류 자세히 보기", expanded=False):
+                st.exception(e)
+else:
+    st.info("Google Sheets secrets가 아직 없습니다. 앱은 실행되지만 Streamlit Cloud 재부팅/하루 경과 시 저장기록이 사라질 수 있습니다. T100 70% 기록은 CSV 백업 버튼으로 내려받아두세요.")
 
 
 
