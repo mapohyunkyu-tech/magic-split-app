@@ -1,33 +1,23 @@
-# overheat70_v100_full_features_overheat70_runtimefix
+# v101_OVERHEAT70_VISIBLE_DEFAULT_20260710
 
 ## 목적
-오류 전 전체 기능을 유지하면서 `확장형 과열회피 6개월 +70%` 메뉴/함수를 살린 안정 배포판입니다.
+전체 기능을 유지하면서 `7-1` 메뉴에서 6개월 +70% 과열회피가 바로 보이도록 만든 버전입니다.
 
-## 포함 기능
-- 기존 매직스플릿 전체 메뉴 유지
-- `7-1. T100 하이브리드 운용모드` 유지
-- `9. 미국 ETF T100 백테스트` 내 과열회피/급등회피 계열 유지
-- `확장형 과열회피 6개월 +70%` 자산선택 로직 유지
-- 대장주 4슬롯 / Donchian 보조전략 코드 유지
-- Google Sheets 저장 구조 유지
+## 변경
+- 사이드바 메뉴명: `7-1. T100 70% 과열회피 운용모드`
+- 7-1 화면 기본 선택값: `확장형 과열회피 6개월 +70% 단독`
+- 기존 v84 방어/6310 금액판단 유지
+- 기존 Google Sheet T100 기록 복구/백업 버튼 유지
+- 대장주 4슬롯 / Donchian 보조전략 유지
 
-## 안정화
-- Python `3.11` 고정: `runtime.txt`
-- Streamlit `1.39.0` 고정
-- numpy/pandas/FinanceDataReader/gspread/google-auth 버전 고정
-- Streamlit file watcher OFF
+## 배포
+ZIP을 풀어서 아래 파일/폴더를 GitHub에 모두 덮어쓰기 하세요.
 
-## 배포 파일
-GitHub에 아래 파일/폴더를 그대로 올리세요.
+- app.py
+- requirements.txt
+- runtime.txt
+- README.md
+- sector_leader_universe_20260629.csv
+- .streamlit/config.toml
 
-```text
-app.py
-requirements.txt
-runtime.txt
-README.md
-sector_leader_universe_20260629.csv
-.streamlit/config.toml
-```
-
-## 주의
-직전 v85 안정 requirements 패키지는 v84 하이브리드 복구판이라 `6개월 +70% 과열회피` 메뉴가 빠져 있었습니다. 이 v100은 v99 전체기능 코드를 기준으로 런타임/패키지만 안정화한 버전입니다.
+Streamlit Cloud에서는 `Manage app → Clear cache → Reboot app`을 실행하세요.

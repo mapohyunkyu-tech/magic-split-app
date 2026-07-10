@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v99_FULL_FEATURES_T100_SHEETS_SAFE_20260710"
+APP_VERSION = "v101_OVERHEAT70_VISIBLE_DEFAULT_20260710"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10507,8 +10507,8 @@ def _t100_live_pick_extended_overheat70_v89(asof_date=None, max_assets=2):
 
 
 def _t100_hybrid_live_operation_v63():
-    st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
-    st.caption("v84: 1순위 개선안(방어 최소 20거래일) + 6310 잠금(최소 60거래일) 실전판입니다.")
+    st.header("7-1. T100 70% 과열회피 + v84 방어 운용모드")
+    st.caption("기본 자산선택은 v89 확장형 과열회피 6개월 +70% 단독입니다. 이후 v84 방어/6310 금액판단을 같이 봅니다.")
 
     with st.expander("운용 방식", expanded=True):
         st.markdown("""
@@ -10986,7 +10986,7 @@ def _t100_hybrid_live_operation_v63():
     asset_pick_mode = st.radio(
         "T100 자산선택 방식",
         options=["수동/v84 기본", "확장형 과열회피 6개월 +70% 단독"],
-        index=0,
+        index=1,
         horizontal=True,
         key="t100_v89_asset_pick_mode",
     )
@@ -12337,7 +12337,7 @@ def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=26
     price = price[valid_cols].dropna(how="all") if valid_cols else pd.DataFrame()
     return price, status_df
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "12. 대장주 4슬롯 백테스트", "11. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 70% 과열회피 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "12. 대장주 4슬롯 백테스트", "11. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -14601,7 +14601,7 @@ elif menu == "7. 실전 운영판":
 # 8. 실전 보유장부
 # =====================================================
 
-elif menu == "7-1. T100 하이브리드 운용모드":
+elif menu in ["7-1. T100 하이브리드 운용모드", "7-1. T100 70% 과열회피 운용모드"]:
     _t100_hybrid_live_operation_v63()
 
 elif menu == "8. 실전 보유장부":
