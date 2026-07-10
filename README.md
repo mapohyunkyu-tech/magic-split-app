@@ -1,27 +1,25 @@
-# T100 70% 운용모드 전용 안정판 + Google Sheets 복구
+# v85_RESTORE_V79_INPUT_HISTORY_PLUS_V84_HYBRID
 
-- 큰 70% 앱의 무거운 데이터 수집 기능 제거
-- T100 70% 운용기록 저장/방어판정/리밸런싱만 유지
-- 기존 Google Sheet 기록을 탐색해서 복구 가능
-- 저장은 원본 훼손 방지를 위해 `T100_70_SIMPLE_HISTORY` 탭에 저장
+## 목적
+v84 하이브리드 개선룰을 유지하면서 v79에서 쓰던 실전 입력/기록 기능을 확실히 복구한 버전입니다.
 
-## Streamlit Secrets
+## 복구/유지 기능
+- 7-1 T100 하이브리드 운용모드 유지
+- 현재 상황 통합판 유지
+- 최근 저장값 입력칸 자동 불러오기 유지
+- `최근 저장값 입력칸 불러오기` 버튼 유지
+- 최근 저장기록 표 유지
+- 운용기록 저장 위치 / 백업 / 복원 / 전체 초기화 유지
+- 사용자 홈 `magic_split_data` 폴더 저장 유지
+- v84 개선룰 유지
+  - 1일 -5% 또는 5일 누적 -6% 방어
+  - 방어 시 T100 70% / 현금 30%
+  - 방어 최소 20거래일 유지
+  - 6310 최소 60거래일 유지
+  - 회복조건: 30일선 회복 또는 최근 고점 대비 -5% 이내
 
-```toml
-spreadsheet_id = "구글시트_ID"
+## 사용 위치
+`7-1. T100 하이브리드 운용모드`
 
-[gcp_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "서비스계정이메일@프로젝트.iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-universe_domain = "googleapis.com"
-```
-
-Google Sheet는 서비스계정 이메일에 편집 권한으로 공유해야 합니다.
+## 주의
+ZIP을 풀어서 배포할 때 반드시 패키지 안의 `app.py`를 현재 배포 앱의 `app.py`로 교체하세요.
