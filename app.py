@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v88_T100_OVERHEAT_V84_HYBRID_COMBO_20260706"
+APP_VERSION = "v98_T100_OVERHEAT70_NOSHEETS_STARTFIX_20260710"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10101,21 +10101,23 @@ def build_universe_fdr(price_limit, max_codes, extra_codes=None):
 
 st.title("📈 매직스플릿 관리기 안정형")
 st.caption(f"{APP_VERSION}")
-st.caption("요양원 목록은 Google Sheets에 저장됩니다. 서버가 재시작돼도 목록은 유지됩니다.")
+st.caption("v98: Google Sheets 없이도 T100 70% 운용/백테스트 메뉴가 먼저 열리도록 수정한 안정판입니다.")
 
+# v98: Streamlit Cloud에서 Google Sheets secrets가 없어도 앱 시작이 죽지 않게 한다.
+# Google Sheets가 필요한 구형 메뉴(요양원/운영판단기 등)는 secrets 설정 후 사용하고,
+# T100 70% 과열회피 운용/백테스트 메뉴는 Sheets 없이도 사용할 수 있게 둔다.
+_sheets_ready = False
 try:
-    # v11: 앱 시작 때 3개 탭을 전부 읽지 않는다.
-    # Google Sheets 429 쿼터 방지를 위해 연결 확인만 하고,
-    # 실제 탭은 메뉴에서 필요할 때만 읽는다.
-    get_spreadsheet()
-    st.success("Google Sheets 연결 완료")
-except Exception as e:
-    if is_quota_error(e):
-        st.warning("Google Sheets 읽기 쿼터가 잠깐 초과됐습니다. 1~2분 뒤 새로고침하거나 Clear cache and reboot 하세요.")
+    if "spreadsheet_id" in st.secrets and "gcp_service_account" in st.secrets:
+        get_spreadsheet()
+        _sheets_ready = True
+        st.success("Google Sheets 연결 완료")
     else:
-        st.error("Google Sheets 연결 실패")
+        st.info("Google Sheets 미설정 상태입니다. T100 70% 운용/백테스트는 사용 가능하고, 저장은 CSV 백업으로 관리하세요.")
+except Exception as e:
+    st.warning("Google Sheets 연결은 실패했지만 앱은 계속 실행합니다. T100 70% 운용/백테스트는 사용 가능합니다.")
+    with st.expander("Sheets 연결 오류 보기"):
         st.exception(e)
-    st.stop()
 
 
 
@@ -12199,7 +12201,7 @@ def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=26
     price = price[valid_cols].dropna(how="all") if valid_cols else pd.DataFrame()
     return price, status_df
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "11. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "11. 도움말"], index=7)
 
 # =====================================================
 # 1. 요양원
