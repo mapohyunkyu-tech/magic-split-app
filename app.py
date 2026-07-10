@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v81_RESTORE_T100_LIVE_PLUS_US_ETF_DATA_FIX_20260703"
+APP_VERSION = "v99_FULL_FEATURES_T100_SHEETS_SAFE_20260710"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -5948,11 +5948,16 @@ def _bt_bunker_asset_prices(candidates, dates, start_date, end_date, return_stat
             return pd.DataFrame(), pd.DataFrame(status)
         return pd.DataFrame()
 
-def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False):
+def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_detail=False, overheat_exclude=False, overheat_return_threshold=70.0):
     """월간 듀얼모멘텀: 3개월+6개월 수익률 점수, 추세선 위, 점수 양수인 자산 상위 N개.
 
     초반 200일 데이터가 부족한 구간은 MA200 대신 MA120/MA60 순서로 완화한다.
     그래서 2020 초반처럼 검증 시작 직후에도 듀얼이 전부 CASH로 죽지 않는다.
+
+    overheat_exclude=True일 때는 최근 6개월 수익률(ret126)이 threshold 이상인 자산을
+    "이미 너무 오른 자산"으로 보고 이번 월간 편입에서 제외한다.
+    예: KODEX200이 6개월 +70% 이상 급등했으면 다음 달 편입 후보에서 빼고
+    남은 자산 중 점수 상위로 자동 이동한다.
     """
     picks = []
     detail_rows = []
@@ -5985,8 +5990,14 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
                 ma = float(ser.tail(60).mean()); ma_label = "MA60"
             else:
                 ma = float(ser.tail(45).mean()); ma_label = "MA45"
-            ok = (not pd.isna(score)) and close > ma and score > 0
-            d = {"asset": col, "score": score, "ret21": ret21, "ret63": ret63, "ret126": ret126, "trend_ma": ma_label, "close": close, "ma": ma, "pass": bool(ok)}
+            overheat_flag = False
+            try:
+                if bool(overheat_exclude) and (not pd.isna(ret126)) and float(ret126) >= float(overheat_return_threshold):
+                    overheat_flag = True
+            except Exception:
+                overheat_flag = False
+            ok = (not pd.isna(score)) and close > ma and score > 0 and (not overheat_flag)
+            d = {"asset": col, "score": score, "ret21": ret21, "ret63": ret63, "ret126": ret126, "trend_ma": ma_label, "close": close, "ma": ma, "pass": bool(ok), "overheat_excluded": bool(overheat_flag), "overheat_threshold": float(overheat_return_threshold)}
             detail_rows.append(d)
             if ok:
                 rows.append(d)
@@ -6000,7 +6011,7 @@ def _bt_pick_bunker_dual_momentum(price_df, asof_date, max_assets=2, return_deta
             fallback = []
             for d in detail_rows:
                 sc = d.get("score", np.nan)
-                if not pd.isna(sc) and float(sc) > 0:
+                if not pd.isna(sc) and float(sc) > 0 and (not bool(d.get("overheat_excluded", False))):
                     fallback.append(d)
             fallback = sorted(fallback, key=lambda x: x.get("score", -999), reverse=True)
             picks = [r["asset"] for r in fallback[:int(max_assets)]]
@@ -6108,9 +6119,26 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         mode = str(mode or "월간 듀얼모멘텀 상위2")
 
         mode_upper = mode.upper()
+        overheat_avoid_mode = ("과열회피" in mode) or ("급등회피" in mode) or ("OVERHEAT" in mode_upper)
+        overheat_threshold = 70.0
+        try:
+            # v87 FIX:
+            # 기존 정규식은 "과열회피 6개월 +50%"에서 '6개월' 숫자를 먼저 만나
+            # +50/+70/+100 값을 읽지 못하고 전부 기본값 70으로 돌아가는 문제가 있었다.
+            # 우선 +50%, +70%, +100%처럼 + 뒤의 수치를 읽고, 없으면 마지막 허용 수치를 사용한다.
+            m_plus = re.search(r"\+(30|40|50|60|70|80|90|100|120|150|200)\s*%?", mode, re.I)
+            if m_plus:
+                overheat_threshold = float(m_plus.group(1))
+            else:
+                nums = re.findall(r"(30|40|50|60|70|80|90|100|120|150|200)", mode, re.I)
+                if nums:
+                    overheat_threshold = float(nums[-1])
+        except Exception:
+            overheat_threshold = 70.0
         split_turbo = ("TURBO" in mode_upper) or ("T100" in mode_upper) or ("T90" in mode_upper) or ("T80" in mode_upper) or ("T70" in mode_upper)
         split_turbo_extended = split_turbo and (("확장" in mode) or ("SP500" in mode_upper) or ("S&P" in mode_upper) or ("BOND" in mode_upper))
         split_turbo_t100 = split_turbo and ("T100" in mode_upper)
+        v84_hybrid_mode = split_turbo and (("V84" in mode_upper) or ("복귀" in mode) or ("하이브리드" in mode))
         split_turbo_t90_c10 = split_turbo and ("T90" in mode_upper)
         split_turbo_t80_cash = split_turbo and ("T80" in mode_upper)
         split_turbo_t70_defense = split_turbo and ("T70" in mode_upper)
@@ -6299,7 +6327,7 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
                 cols = [c for c in turbo_asset_pool if price_df is not None and c in price_df.columns]
                 sub = price_df[cols].copy() if cols else pd.DataFrame(index=price_df.index if price_df is not None else [])
                 asof = prev_date if prev_date is not None else date
-                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True)
+                picks, _detail = _bt_pick_bunker_dual_momentum(sub, asof, max_assets=2, return_detail=True, overheat_exclude=overheat_avoid_mode, overheat_return_threshold=overheat_threshold)
                 if len(picks) == 0:
                     weights = {"CASH": 1.0}
                 else:
@@ -6610,6 +6638,134 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
         out = pd.DataFrame(rows)
         if len(out) == 0:
             return out, {"오류": "방공호 결과가 없습니다."}
+
+        v84_stats = {}
+        if v84_hybrid_mode and split_turbo:
+            try:
+                # v88: Turbo/과열회피 엔진의 일별 자산곡선 위에 v84 운용비중을 얹는다.
+                # 목적: 과열회피는 '자산 선택', v84는 '노출비중/현금잠금'으로 분리해 백테스트한다.
+                base_curve = pd.to_numeric(out["통합총자산"], errors="coerce").ffill().astype(float)
+                if len(base_curve) > 0 and float(base_curve.iloc[0]) > 0:
+                    base_ret = base_curve.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                    base_ret5 = (base_curve / base_curve.shift(5) - 1.0).replace([np.inf, -np.inf], np.nan)
+                    base_ma30 = base_curve.rolling(30, min_periods=10).mean()
+                    base_peak = base_curve.cummax()
+
+                    total_v = float(total_initial)
+                    state = "1순위공격"
+                    state_days = 0
+                    lock_used = False
+                    transitions = 0
+                    defense_days = 0
+                    lock_days = 0
+                    shock_count = 0
+                    recovery_count = 0
+
+                    totals = []
+                    statuses = []
+                    exposures = []
+                    shock_flags = []
+                    recovery_flags = []
+
+                    for j in range(len(base_curve)):
+                        if state == "6310잠금":
+                            exposure = 0.60
+                        elif state == "방어20":
+                            exposure = 0.70
+                        else:
+                            exposure = 1.00
+
+                        if j > 0:
+                            br = float(base_ret.iloc[j]) if not pd.isna(base_ret.iloc[j]) else 0.0
+                            total_v = float(total_v) * (1.0 + exposure * br + (1.0 - exposure) * float(daily_rate))
+
+                        recover_ok = False
+                        try:
+                            if not pd.isna(base_ma30.iloc[j]) and float(base_curve.iloc[j]) >= float(base_ma30.iloc[j]):
+                                recover_ok = True
+                            if float(base_peak.iloc[j]) > 0 and float(base_curve.iloc[j]) >= float(base_peak.iloc[j]) * 0.95:
+                                recover_ok = True
+                        except Exception:
+                            recover_ok = False
+
+                        shock_on = False
+                        try:
+                            one_day_shock = float(base_ret.iloc[j]) <= -0.05
+                            five_day_shock = (not pd.isna(base_ret5.iloc[j])) and float(base_ret5.iloc[j]) <= -0.06
+                            shock_on = bool(one_day_shock or five_day_shock)
+                        except Exception:
+                            shock_on = False
+
+                        totals.append(float(total_v))
+                        statuses.append(state)
+                        exposures.append(float(exposure))
+                        shock_flags.append("Y" if shock_on else "")
+                        recovery_flags.append("Y" if recover_ok else "")
+
+                        if state == "1순위공격":
+                            if (not lock_used) and float(total_v) >= float(total_initial) * 1.50:
+                                state = "6310잠금"
+                                state_days = 0
+                                lock_used = True
+                                transitions += 1
+                            elif shock_on:
+                                state = "방어20"
+                                state_days = 0
+                                shock_count += 1
+                                transitions += 1
+                        elif state == "방어20":
+                            state_days += 1
+                            defense_days += 1
+                            if state_days >= 20 and recover_ok:
+                                state = "1순위공격"
+                                state_days = 0
+                                recovery_count += 1
+                                transitions += 1
+                        elif state == "6310잠금":
+                            state_days += 1
+                            lock_days += 1
+                            if state_days >= 60 and recover_ok:
+                                state = "1순위공격"
+                                state_days = 0
+                                recovery_count += 1
+                                transitions += 1
+
+                    new_curve = pd.Series(totals, index=out.index, dtype=float)
+                    new_peak = new_curve.cummax()
+                    new_mdd = (new_curve / new_peak - 1.0) * 100.0
+                    exp_ser = pd.Series(exposures, index=out.index, dtype=float)
+                    risk_val = new_curve * exp_ser
+                    cash_val = new_curve * (1.0 - exp_ser)
+
+                    out["v84상태"] = statuses
+                    out["v84투입비중"] = (exp_ser * 100.0).round(1)
+                    out["v84충격방어신호"] = shock_flags
+                    out["v84회복조건"] = recovery_flags
+                    out["통합총자산"] = new_curve.round().astype(int)
+                    out["통합수익률"] = ((new_curve / float(total_initial) - 1.0) * 100.0).round(2)
+                    out["통합MDD"] = new_mdd.round(2)
+                    out["수익부스터평가금액"] = risk_val.round().astype(int)
+                    out["진짜방공호평가금액"] = cash_val.round().astype(int)
+                    out["방어구역평가금액"] = cash_val.round().astype(int)
+                    out["방공호평가금액"] = out["통합총자산"]
+                    out["수익부스터현재비중"] = out["v84투입비중"]
+                    out["진짜방공호현재비중"] = (100.0 - exp_ser * 100.0).round(2)
+                    out["방어구역현재비중"] = (100.0 - exp_ser * 100.0).round(2)
+                    out["방공호보유"] = out["방공호보유"].astype(str) + " / v84[" + out["v84상태"].astype(str) + ",T100노출 " + out["v84투입비중"].astype(str) + "%]"
+                    out["방공호모드"] = mode
+
+                    v84_stats = {
+                        "v84하이브리드사용": "사용",
+                        "v84상태전환횟수": int(transitions),
+                        "v84방어일수": int(defense_days),
+                        "v846310일수": int(lock_days),
+                        "v84충격방어발동횟수": int(shock_count),
+                        "v84복귀횟수": int(recovery_count),
+                        "v84현금연수익률가정": float(cash_annual_rate or 0.0),
+                    }
+            except Exception as _e:
+                v84_stats = {"v84하이브리드사용": "오류", "v84오류": str(_e)}
+
         final_total = float(out["통합총자산"].iloc[-1])
         # v32 핵심 성과지표: Turbo/방공호 공통으로 summary CSV에 저장한다.
         try:
@@ -6679,6 +6835,10 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             status_text = ""
         if split_turbo:
             memo_text = "Turbo 공격 ETF 전략은 방공호 전략이 아닙니다. KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR 공격 듀얼을 Turbo 엔진으로 운용하고, CTA/CASH/진짜방어자산은 비중별 완충재로만 둡니다. 기존 064-C10 오류본의 공격 ETF 중복 구조를 정식 전략으로 분리 검증하기 위한 모드입니다."
+            if overheat_avoid_mode:
+                memo_text += f" 과열회피 모드는 최근 6개월 수익률이 +{overheat_threshold:.0f}% 이상인 자산을 다음 월간 편입 후보에서 제외하고 남은 자산으로 재분산합니다."
+            if v84_hybrid_mode:
+                memo_text += " v84 복귀형은 Turbo 일별 수익률 위에 1일 -5% 또는 5일 -6% 방어, 방어 20거래일 유지, +50% 6310 잠금, 6310 60거래일 후 회복조건 복귀를 반영합니다."
         elif split_073:
             memo_text = "0/7/3 계열은 대장주를 제외하고 방어구역 70%와 부스터 30%로 운용합니다. C10/C15는 방어구역 안에 CTA를 10~15% 분리합니다. 매월 상위비중 강제 리밸런싱은 하지 않고, 분기마다 방공호65~80/부스터20~35 밴드를 점검하며 부스터40% 초과 시 즉시 35%선까지 잠급니다."
         elif split_064:
@@ -6747,6 +6907,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "부스터허용자산": "KODEX200/KOSDAQ150/NASDAQ100/GOLD/DOLLAR",
             "CTA우선순위": "자동조회 DBMF>KMLM>CTA",
             "ETF기본값": f"KODEX200 {kodex200_code}, KOSDAQ150 {kosdaq150_code}, NASDAQ100 {nasdaq_code}, SP500 {sp500_code}, GOLD {gold_code}, DOLLAR {dollar_code}, BOND {bond_code}, CTA {cta_code}",
+            "과열회피사용": "사용" if overheat_avoid_mode else "미사용",
+            "과열회피기준": f"6개월수익률 +{overheat_threshold:.0f}% 이상 제외" if overheat_avoid_mode else "",
             "CTA데이터사용": "업로드CSV" if len(cta_uploaded_series) > 0 else ("자동조회:" + str(cta_code) if cta_ratio > 0 else "미사용"),
             "방공호가격데이터자산수": len(loaded_assets),
             "방공호가격데이터자산": ",".join(loaded_assets),
@@ -6757,6 +6919,8 @@ def build_bunker_7030_backtest(daily_df, total_initial=100_000_000, leader_ratio
             "방공호데이터상태": status_text,
             "메모": memo_text,
         }
+        if v84_stats:
+            summary.update(v84_stats)
         return out, summary
     except Exception as e:
         return pd.DataFrame(), {"오류": str(e)}
@@ -10024,6 +10188,100 @@ except Exception:
     T100_HYBRID_CLEAR_MARKER_PATH = Path(".t100_hybrid_history_cleared")
 
 
+# =====================================================
+# v99: T100 운용기록 Google Sheets 안전 복구/저장
+# - 앱 시작 시에는 절대 Sheets에 접속하지 않는다.
+# - 7-1 운용모드 안에서 사용자가 버튼을 눌렀을 때만 접근한다.
+# - Secrets/권한/시트 오류가 있어도 앱 전체가 죽지 않게 문자열 오류만 반환한다.
+# =====================================================
+T100_SHEET_CANDIDATES_V99 = [
+    "T100_70_HISTORY",
+    "T100_70_SIMPLE_HISTORY",
+    "t100_hybrid_live_history",
+    "T100_HYBRID_HISTORY",
+    "T100_HISTORY",
+    "Sheet1",
+]
+T100_SHEET_SAVE_TITLE_V99 = "T100_70_SIMPLE_HISTORY"
+
+
+def _t100_sheets_enabled_v99():
+    try:
+        return ("spreadsheet_id" in st.secrets) and ("gcp_service_account" in st.secrets)
+    except Exception:
+        return False
+
+
+def _t100_get_spreadsheet_safe_v99():
+    if not _t100_sheets_enabled_v99():
+        return None, "Streamlit Secrets에 spreadsheet_id / gcp_service_account 설정이 없습니다."
+    try:
+        return get_spreadsheet(), ""
+    except Exception as e:
+        return None, str(e)
+
+
+def _coerce_t100_history_columns_v99(df):
+    if df is None or len(df) == 0:
+        return _empty_t100_hybrid_history_v74()
+    out = df.copy()
+    # Google Sheet/구버전 컬럼명 보정
+    rename_map = {
+        "date": "기준일",
+        "날짜": "기준일",
+        "투입금": "투입원금",
+        "누적투입원금": "투입원금",
+        "평가금액": "당일평가금액",
+        "오늘평가금액": "당일평가금액",
+        "T100평가금액": "당일평가금액",
+        "운용기준금액": "당일평가금액",
+    }
+    for old, new in rename_map.items():
+        if old in out.columns and new not in out.columns:
+            out[new] = out[old]
+    for col in T100_HYBRID_HISTORY_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[T100_HYBRID_HISTORY_COLUMNS].copy()
+    if "기준일" in out.columns:
+        out["기준일"] = out["기준일"].astype(str)
+        out = out[out["기준일"].astype(str).str.len() > 0]
+    return out
+
+
+def _t100_load_history_from_sheets_v99():
+    sheet, err = _t100_get_spreadsheet_safe_v99()
+    if sheet is None:
+        return _empty_t100_hybrid_history_v74(), "", err
+    tried = []
+    for title in T100_SHEET_CANDIDATES_V99:
+        try:
+            tried.append(title)
+            ws = sheet.worksheet(title)
+            records = ws.get_all_records()
+            df = pd.DataFrame(records)
+            df = _coerce_t100_history_columns_v99(df)
+            if len(df):
+                return df, title, ""
+        except Exception as e:
+            tried.append(f"{title}({str(e)[:80]})")
+            continue
+    return _empty_t100_hybrid_history_v74(), "", "기존 T100 기록 시트를 찾지 못했거나 비어 있습니다: " + ", ".join(tried[:8])
+
+
+def _t100_save_history_to_sheets_v99(df, title=T100_SHEET_SAVE_TITLE_V99):
+    sheet, err = _t100_get_spreadsheet_safe_v99()
+    if sheet is None:
+        return False, err
+    try:
+        safe_df = _coerce_t100_history_columns_v99(df)
+        ws = ensure_worksheet(sheet, title, T100_HYBRID_HISTORY_COLUMNS)
+        write_worksheet(ws, safe_df, T100_HYBRID_HISTORY_COLUMNS)
+        return True, f"Google Sheets `{title}` 탭에 저장했습니다."
+    except Exception as e:
+        return False, str(e)
+
+
 def _empty_t100_hybrid_history_v74():
     return pd.DataFrame(columns=T100_HYBRID_HISTORY_COLUMNS)
 
@@ -10163,6 +10421,91 @@ def _get_t100_hybrid_prior_values_v75(hist: pd.DataFrame, today_str: str, curren
     return prev_value, prev_label, prior_returns, len(tmp)
 
 
+# =====================================================
+# v89: 7-1 실전 운용용 확장형 과열회피 +70% 자산선택기
+# =====================================================
+def _t100_live_pick_extended_overheat70_v89(asof_date=None, max_assets=2):
+    """실전 운용판에서 이번 달 T100 자산을 자동 추천한다.
+
+    룰:
+    - 후보: KODEX200 / KOSDAQ150 / NASDAQ100 / SP500 / GOLD / DOLLAR / BOND
+    - 월간 듀얼모멘텀 상위 2개 선택
+    - 단, 최근 6개월(126거래일) 수익률이 +70% 이상인 자산은 과열로 제외
+    - 이 함수는 자산 선택만 한다. v84 방어/6310 비중룰은 적용하지 않는 "단독" 모드다.
+    """
+    try:
+        end_ts = pd.to_datetime(asof_date if asof_date is not None else datetime.now().date())
+        start_ts = end_ts - pd.DateOffset(days=620)
+        candidates = [
+            {"name": "KODEX200", "code": "069500|102110", "type": "asset", "market": "KR"},
+            {"name": "KOSDAQ150", "code": "229200|233740", "type": "asset", "market": "KR"},
+            {"name": "NASDAQ100", "code": "133690|379810|367380|381170", "type": "asset", "market": "KR"},
+            {"name": "SP500", "code": "360750|379800|143850", "type": "asset", "market": "KR"},
+            {"name": "GOLD", "code": "411060|132030|319640", "type": "asset", "market": "KR"},
+            {"name": "DOLLAR", "code": "261240|138230", "type": "asset", "market": "KR"},
+            {"name": "BOND", "code": "114260|152380", "type": "asset", "market": "KR"},
+        ]
+        # KODEX200 거래일을 캘린더로 쓰고, 실패하면 평일 캘린더로 fallback.
+        try:
+            cal_df, _cal_status = _bt_bunker_asset_prices([candidates[0]], [], start_ts, end_ts, return_status=True)
+            if cal_df is not None and len(cal_df) > 0:
+                dates = list(pd.DatetimeIndex(cal_df.index).sort_values().drop_duplicates())
+            else:
+                dates = list(pd.bdate_range(start_ts, end_ts))
+        except Exception:
+            dates = list(pd.bdate_range(start_ts, end_ts))
+        price_df, status_df = _bt_bunker_asset_prices(candidates, dates, start_ts, end_ts, return_status=True)
+        if price_df is None or len(price_df) == 0:
+            return [], pd.DataFrame(), status_df, "", "ETF 가격 데이터를 불러오지 못했습니다."
+        price_df = price_df.sort_index().ffill()
+        usable_idx = pd.DatetimeIndex(price_df.dropna(how="all").index)
+        usable_idx = usable_idx[usable_idx <= end_ts]
+        if len(usable_idx) == 0:
+            return [], pd.DataFrame(), status_df, "", "사용 가능한 기준일이 없습니다."
+        asof = usable_idx.max()
+        picks, detail_df = _bt_pick_bunker_dual_momentum(
+            price_df,
+            asof,
+            max_assets=int(max_assets),
+            return_detail=True,
+            overheat_exclude=True,
+            overheat_return_threshold=70.0,
+        )
+        # 전부 탈락하면 현금 대기. 임의 대체 진입을 하지 않는다.
+        if not picks:
+            picks = ["CASH"]
+        if detail_df is not None and len(detail_df):
+            d = detail_df.copy()
+            rename = {
+                "asset": "자산",
+                "score": "점수",
+                "ret21": "1개월%",
+                "ret63": "3개월%",
+                "ret126": "6개월%",
+                "trend_ma": "추세선",
+                "close": "종가",
+                "ma": "이평값",
+                "pass": "편입통과",
+                "overheat_excluded": "과열제외",
+                "overheat_threshold": "과열기준%",
+            }
+            d = d.rename(columns=rename)
+            for c in ["점수", "1개월%", "3개월%", "6개월%", "종가", "이평값"]:
+                if c in d.columns:
+                    d[c] = pd.to_numeric(d[c], errors="coerce").round(2)
+            if "과열제외" in d.columns:
+                d["과열판정"] = np.where(d["과열제외"].astype(bool), "6개월 +70% 이상 제외", "정상")
+            if "편입통과" in d.columns:
+                d["편입판정"] = np.where(d["편입통과"].astype(bool), "편입후보", "탈락")
+            sort_cols = [c for c in ["편입통과", "점수"] if c in d.columns]
+            if sort_cols:
+                d = d.sort_values(sort_cols, ascending=[False, False] if len(sort_cols) == 2 else [False])
+            detail_df = d
+        return picks, detail_df, status_df, asof.strftime("%Y-%m-%d"), ""
+    except Exception as e:
+        return [], pd.DataFrame(), pd.DataFrame(), "", f"확장형 과열회피 자산선택 실패: {e}"
+
+
 def _t100_hybrid_live_operation_v63():
     st.header("7-1. T100 HYBRID 1↔3 단순 운용모드")
     st.caption("v84: 1순위 개선안(방어 최소 20거래일) + 6310 잠금(최소 60거래일) 실전판입니다.")
@@ -10177,6 +10520,7 @@ def _t100_hybrid_live_operation_v63():
 - **5일 누적 -6%**는 최근 저장된 `1일변동률`을 누적해서 계산합니다. 추가입금이 있어도 실제 추가매수액을 보정하므로 수익으로 착각하지 않습니다.
 - **1순위 개선안**: 방어신호가 켜지면 T100 70% / 현금 30%로 낮추고, 최소 20거래일은 방어를 유지합니다. 이후 30일선 회복 또는 고점 대비 -5% 이내 회복 시 공격 복귀 가능합니다.
 - **6310 잠금**: 수익 +50% 도달 시 T100 60% / 대기현금 30% / 생활비잠금 10%로 전환합니다. 6310은 최소 60거래일 유지 후 회복 조건이 맞으면 1순위 복귀 가능합니다.
+- **v89 확장형 과열회피 +70% 단독**: 7개 ETF 후보(KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND) 중 월간 듀얼모멘텀 상위 2개를 고르되, 최근 6개월 +70% 이상 급등한 자산은 다음 달 후보에서 제외합니다. 이 모드는 v84 방어/6310 비중룰을 섞지 않고 자산선택만 과열회피형으로 바꿉니다.
 - 운용기록은 사용자 홈 폴더의 `magic_split_data`에 저장되어 새 ZIP을 덮어써도 유지됩니다.
 """)
 
@@ -10430,6 +10774,40 @@ def _t100_hybrid_live_operation_v63():
     with st.expander("운용기록 저장 위치 / 백업", expanded=False):
         st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
         st.code(str(T100_HYBRID_HISTORY_PATH))
+
+        st.markdown("#### Google Sheets 영구저장/복구")
+        if _t100_sheets_enabled_v99():
+            st.caption("Secrets 설정이 감지됐습니다. 버튼을 누를 때만 기존 Google Sheet에 접속합니다.")
+        else:
+            st.caption("Secrets 설정이 없으면 Google Sheets 복구/저장은 비활성입니다. 앱은 그대로 실행됩니다.")
+        st.checkbox("오늘 기록 저장 시 Google Sheets에도 자동 백업", value=False, key="t100_v99_autosave_sheets")
+        gs1, gs2 = st.columns(2)
+        with gs1:
+            if st.button("기존 Google Sheet에서 T100 기록 불러오기", key="t100_v99_load_from_sheets"):
+                df_sheet, sheet_title, err = _t100_load_history_from_sheets_v99()
+                if len(df_sheet):
+                    try:
+                        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+                            T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+                    except Exception:
+                        pass
+                    df_sheet.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+                    st.success(f"Google Sheet `{sheet_title}`에서 {len(df_sheet)}개 기록을 복구했습니다.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        pass
+                else:
+                    st.warning(err or "불러올 T100 기록이 없습니다.")
+        with gs2:
+            if st.button("현재 T100 기록을 Google Sheet에 백업", key="t100_v99_save_to_sheets"):
+                hist_now = _load_t100_hybrid_history_v63()
+                ok, msg = _t100_save_history_to_sheets_v99(hist_now)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(f"Google Sheets 백업 실패: {msg}")
+
         if T100_HYBRID_CLEAR_MARKER_PATH.exists():
             st.caption("전체 초기화 상태: 구버전 운용기록 자동복사를 막고 있습니다. 새로 저장하거나 백업을 복원하면 자동으로 해제됩니다.")
         hist_backup = _load_t100_hybrid_history_v63()
@@ -10506,6 +10884,16 @@ def _t100_hybrid_live_operation_v63():
                 "t100_v75_t100_buy": 0,
                 "t100_v75_t100_sell": 0,
             }
+            if st.session_state.get("t100_v99_autosave_sheets", False):
+                try:
+                    hist_after_save_v99 = _load_t100_hybrid_history_v63()
+                    ok_v99, msg_v99 = _t100_save_history_to_sheets_v99(hist_after_save_v99)
+                    if ok_v99:
+                        st.success(msg_v99)
+                    else:
+                        st.warning(f"Google Sheets 자동백업 실패: {msg_v99}")
+                except Exception as _e_v99:
+                    st.warning(f"Google Sheets 자동백업 실패: {_e_v99}")
             st.success(f"{today_str} 기록을 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다.")
             try:
                 st.rerun()
@@ -10595,8 +10983,45 @@ def _t100_hybrid_live_operation_v63():
 
     st.subheader("4) 오늘 결론")
     all_assets = ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]
-    default_assets = st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
-    t100_assets = st.multiselect("이번 달 T100 선택 자산", all_assets, default=[a for a in default_assets if a in all_assets] or ["KODEX200", "NASDAQ100"], key="t100_v65_assets")
+    asset_pick_mode = st.radio(
+        "T100 자산선택 방식",
+        options=["수동/v84 기본", "확장형 과열회피 6개월 +70% 단독"],
+        index=0,
+        horizontal=True,
+        key="t100_v89_asset_pick_mode",
+    )
+
+    auto_picks = []
+    auto_detail_df = pd.DataFrame()
+    auto_status_df = pd.DataFrame()
+    auto_asof = ""
+    if asset_pick_mode == "확장형 과열회피 6개월 +70% 단독":
+        with st.spinner("확장형 과열회피 +70% 자산선택 계산 중..."):
+            auto_picks, auto_detail_df, auto_status_df, auto_asof, auto_error = _t100_live_pick_extended_overheat70_v89(record_date, max_assets=2)
+        if auto_error:
+            st.warning(auto_error)
+        else:
+            st.success(f"확장형 과열회피 +70% 선택 기준일: {auto_asof} / 추천 자산: {', '.join(auto_picks)}")
+            st.caption("룰: KODEX200/KOSDAQ150/NASDAQ100/SP500/GOLD/DOLLAR/BOND 중 월간 듀얼모멘텀 상위 2개. 단, 6개월 수익률 +70% 이상 자산은 과열 제외.")
+        if len(auto_detail_df):
+            with st.expander("확장형 과열회피 +70% 상세 점수표", expanded=False):
+                show_cols = [c for c in ["자산", "편입판정", "과열판정", "점수", "1개월%", "3개월%", "6개월%", "추세선", "종가", "이평값"] if c in auto_detail_df.columns]
+                if 'show_pinned_dataframe' in globals():
+                    show_pinned_dataframe(auto_detail_df[show_cols], height=320)
+                else:
+                    st.dataframe(auto_detail_df[show_cols], use_container_width=True, height=320)
+        if len(auto_status_df):
+            with st.expander("ETF 데이터 로딩 상태", expanded=False):
+                st.dataframe(auto_status_df, use_container_width=True, height=220)
+
+    default_assets = auto_picks if (asset_pick_mode == "확장형 과열회피 6개월 +70% 단독" and auto_picks) else st.session_state.get("t100_v65_assets", ["KODEX200", "NASDAQ100"])
+    t100_assets = st.multiselect(
+        "이번 달 T100 선택 자산",
+        all_assets,
+        default=[a for a in default_assets if a in all_assets] or ["CASH"],
+        key="t100_v65_assets" if asset_pick_mode == "수동/v84 기본" else "t100_v89_overheat_assets",
+        help="확장형 과열회피 모드에서는 자동 추천값이 기본으로 들어갑니다. 필요하면 수동으로 조정할 수 있습니다.",
+    )
     if not t100_assets:
         t100_assets = ["CASH"]
 
@@ -10678,6 +11103,7 @@ def _t100_hybrid_live_operation_v63():
         "SP500": "360750",
         "GOLD": "411060",
         "DOLLAR": "261240",
+        "BOND": "114260",
         "CASH": "현금",
     }
     t100_target_rows = target_df[target_df["구분"].astype(str).eq("T100 내부자산")].copy() if len(target_df) else pd.DataFrame()
@@ -11911,7 +12337,7 @@ def _us_t100_load_price_frame(candidates, start_date, end_date, lookback_days=26
     price = price[valid_cols].dropna(how="all") if valid_cols else pd.DataFrame()
     return price, status_df
 
-menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "11. 도움말"])
+menu = st.sidebar.radio("메뉴", ["1. 요양원", "2. 운영판단기", "3. TOP50", "4. 보유종목 판단기", "5. 섹터 순환매 판단기", "6. 섹터전략 백테스트", "7. 실전 운영판", "7-1. T100 하이브리드 운용모드", "8. 실전 보유장부", "9. 미국 ETF T100 백테스트", "10. T100 A분할 백테스트", "12. 대장주 4슬롯 백테스트", "11. 도움말"])
 
 # =====================================================
 # 1. 요양원
@@ -13207,7 +13633,13 @@ elif menu == "6. 섹터전략 백테스트":
                     "0/5/5 참고공격형",
                     "0/5/5-C10 CTA방공호",
                     "T10/T100 Turbo 공격ETF 100% NO CTA",
+                    "T10/T100 Turbo 과열회피 6개월 +50%",
+                    "T10/T100 Turbo 과열회피 6개월 +70%",
+                    "T10/T100 Turbo 과열회피 6개월 +100%",
                     "T10/T100 Turbo 확장형 SP500+BOND",
+                    "T10/T100 Turbo 확장형 과열회피 6개월 +70%",
+                    "T10/T100 Turbo v84 복귀 하이브리드",
+                    "T10/T100 Turbo 확장형 과열회피 6개월 +70% + v84 복귀형",
                     "T90-C10 Turbo+CTA",
                     "T80-C10-CASH10 Turbo+CTA+CASH",
                     "T70-D20-C10 Turbo+진짜방어+CTA",
@@ -14705,6 +15137,496 @@ elif menu == "10. T100 A분할 백테스트":
             export_buffer.seek(0)
             st.download_button("T100 A분할 결과 ZIP 다운로드", data=export_buffer.getvalue(), file_name=f"magic_split_T100_A_SCALEIN_TP5_REBUY_result_{today_str()}.zip", mime="application/zip", key="v69_download_a_scalein")
 
+
+
+# =====================================================
+# 12. 대장주 4슬롯 백테스트
+# =====================================================
+
+elif menu == "12. 대장주 4슬롯 백테스트":
+    st.header("12. T100 보조 대장주 4슬롯 백테스트")
+    st.caption("앱 내부에서 확장형 과열회피 +70% T100 결과를 먼저 생성한 뒤, 국내 대장주 4슬롯 보조전략을 테스트합니다. GOLD/DOLLAR/BOND 구간에도 보조전략을 계속 굴릴지 선택할 수 있습니다.")
+
+    st.warning("주의: 이 메뉴는 개별주 전략 검증용입니다. 종목 유니버스가 2026-06-29 기준 대표주 목록이라 과거 생존편향이 있을 수 있습니다. 결과는 ETF 백테스트보다 보수적으로 해석하세요.")
+
+    def _v90_fmt_code(x):
+        s = str(x).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        s = re.sub(r"[^0-9]", "", s)
+        return s.zfill(6) if s else ""
+
+    def _v90_parse_assets(s):
+        txt = str(s).upper()
+        found = []
+        for a in ["KODEX200", "KOSDAQ150", "NASDAQ100", "SP500", "GOLD", "DOLLAR", "BOND", "CASH"]:
+            if a in txt:
+                found.append(a)
+        return found
+
+    @st.cache_data(show_spinner=False)
+    def _v90_read_krx_listing():
+        try:
+            lst = fdr.StockListing("KRX")
+            lst = lst.copy()
+            if "Code" in lst.columns:
+                lst["코드"] = lst["Code"].astype(str).str.zfill(6)
+            elif "Symbol" in lst.columns:
+                lst["코드"] = lst["Symbol"].astype(str).str.zfill(6)
+            else:
+                return pd.DataFrame(columns=["코드", "Market"])
+            if "Market" not in lst.columns:
+                lst["Market"] = ""
+            return lst[["코드", "Market"]].drop_duplicates()
+        except Exception:
+            return pd.DataFrame(columns=["코드", "Market"])
+
+    @st.cache_data(show_spinner=False)
+    def _v90_fetch_close(code, start_date, end_date):
+        code = _v90_fmt_code(code)
+        try:
+            px = fdr.DataReader(code, start_date, end_date)
+            if px is None or len(px) == 0:
+                return pd.Series(dtype="float64")
+            col = "Close" if "Close" in px.columns else px.columns[-1]
+            s = pd.to_numeric(px[col], errors="coerce").dropna()
+            s.name = code
+            return s
+        except Exception:
+            return pd.Series(dtype="float64")
+
+    def _v90_build_t100_monthly_regime(t100_daily_df):
+        d = t100_daily_df.copy()
+        if "기준일" not in d.columns:
+            raise ValueError("T100 daily CSV에 '기준일' 컬럼이 필요합니다.")
+        hold_col = None
+        for c in ["수익부스터보유", "방공호보유", "보유자산", "마지막보유"]:
+            if c in d.columns:
+                hold_col = c
+                break
+        if hold_col is None:
+            raise ValueError("T100 daily CSV에 '수익부스터보유' 또는 보유자산 컬럼이 필요합니다.")
+        d["기준일"] = pd.to_datetime(d["기준일"], errors="coerce")
+        d = d.dropna(subset=["기준일"]).sort_values("기준일")
+        d["월"] = d["기준일"].dt.to_period("M").astype(str)
+        last = d.groupby("월").tail(1).copy()
+        rows = []
+        for _, r in last.iterrows():
+            assets = _v90_parse_assets(r.get(hold_col, ""))
+            # 다음 달에 적용되는 월말 판단값
+            rows.append({
+                "월말기준일": r["기준일"],
+                "신호월": r["월"],
+                "다음운용월": (r["기준일"] + pd.offsets.MonthBegin(1)).strftime("%Y-%m"),
+                "T100보유": str(r.get(hold_col, "")),
+                "선택자산": ",".join(assets),
+                "KODEX200선택": "KODEX200" in assets,
+                "KOSDAQ150선택": "KOSDAQ150" in assets,
+                "국내위험자산선택": bool(("KODEX200" in assets) or ("KOSDAQ150" in assets)),
+            })
+        return pd.DataFrame(rows)
+
+    def _v90_calc_metrics(daily_df, initial_capital):
+        if daily_df is None or len(daily_df) == 0:
+            return {}
+        d = daily_df.copy()
+        d["기준일"] = pd.to_datetime(d["기준일"])
+        total = pd.to_numeric(d["총자산"], errors="coerce").dropna()
+        if len(total) == 0:
+            return {}
+        final = float(total.iloc[-1])
+        ret = (final / float(initial_capital) - 1.0) * 100.0
+        years = max((d["기준일"].iloc[-1] - d["기준일"].iloc[0]).days / 365.25, 1e-9)
+        cagr = ((final / float(initial_capital)) ** (1.0 / years) - 1.0) * 100.0
+        roll_max = total.cummax()
+        dd = total / roll_max - 1.0
+        mdd = float(dd.min() * 100.0)
+        # 최장회복: 고점 미회복 거래일 최대값
+        peak = -1
+        cur = 0
+        max_recovery = 0
+        for v in total:
+            if v >= peak:
+                peak = v
+                cur = 0
+            else:
+                cur += 1
+                if cur > max_recovery:
+                    max_recovery = cur
+        worst_day = float(total.pct_change().min() * 100.0) if len(total) > 1 else 0.0
+        return {
+            "초기자금": float(initial_capital),
+            "최종자산": final,
+            "총수익률(%)": ret,
+            "연복리(%)": cagr,
+            "MDD(%)": mdd,
+            "최악하루(%)": worst_day,
+            "최장회복거래일": int(max_recovery),
+            "시작일": d["기준일"].iloc[0].strftime("%Y-%m-%d"),
+            "종료일": d["기준일"].iloc[-1].strftime("%Y-%m-%d"),
+        }
+
+    def _v90_pick_leaders(asof_date, price_df, universe_df, allowed_markets, per_market_count, total_slots, include_roles, min_20d_ret, mode_fill):
+        if price_df is None or len(price_df) == 0:
+            return []
+        hist = price_df.loc[:asof_date].dropna(axis=1, how="all")
+        if len(hist) < 70:
+            return []
+        last = hist.iloc[-1]
+        r20 = hist.iloc[-1] / hist.iloc[-21] - 1.0 if len(hist) >= 21 else pd.Series(index=hist.columns, dtype="float64")
+        r60 = hist.iloc[-1] / hist.iloc[-61] - 1.0 if len(hist) >= 61 else pd.Series(index=hist.columns, dtype="float64")
+        rows = []
+        u = universe_df.copy()
+        for _, row in u.iterrows():
+            code = row["코드"]
+            if code not in hist.columns:
+                continue
+            role = str(row.get("섹터역할", ""))
+            if include_roles and role not in include_roles:
+                continue
+            market = str(row.get("Market", ""))
+            if allowed_markets and market not in allowed_markets:
+                continue
+            if pd.isna(last.get(code, np.nan)) or pd.isna(r20.get(code, np.nan)) or pd.isna(r60.get(code, np.nan)):
+                continue
+            if float(r20.get(code, 0)) < min_20d_ret:
+                continue
+            role_bonus = 0.05 if role == "대장주" else (0.03 if role == "2등대표주" else 0.0)
+            score = float(r20.get(code, 0)) * 0.4 + float(r60.get(code, 0)) * 0.6 + role_bonus
+            rows.append({
+                "코드": code,
+                "종목": row.get("종목", code),
+                "섹터": row.get("섹터", ""),
+                "섹터역할": role,
+                "Market": market,
+                "20일수익률": float(r20.get(code, 0)) * 100,
+                "60일수익률": float(r60.get(code, 0)) * 100,
+                "점수": score,
+            })
+        cand = pd.DataFrame(rows)
+        if len(cand) == 0:
+            return []
+        selected = []
+        if mode_fill == "T100자산별 2개" and len(allowed_markets) > 0:
+            for m in allowed_markets:
+                sub = cand[cand["Market"] == m].sort_values("점수", ascending=False).head(per_market_count)
+                selected.extend(sub.to_dict("records"))
+            selected = selected[:total_slots]
+        else:
+            selected = cand.sort_values("점수", ascending=False).head(total_slots).to_dict("records")
+        # 코드 중복 제거
+        out = []
+        seen = set()
+        for r in selected:
+            if r["코드"] not in seen:
+                out.append(r)
+                seen.add(r["코드"])
+        return out
+
+    def _v90_run_leader_backtest(universe_df, t100_daily_df, start_date, end_date, initial_capital, slots, per_market_count, tp_pct, stop_pct, use_stop, fee_rate, include_roles, min_20d_ret, risk_off_exit, mode_fill, integer_shares=True, expensive_policy="슬롯금액 초과 종목 제외", aux_mode="위험자산 선택 때만 신규진입 / 방어자산이면 청산"):
+        regime = _v90_build_t100_monthly_regime(t100_daily_df)
+        regime_map = {r["다음운용월"]: r for _, r in regime.iterrows()}
+        codes = universe_df["코드"].dropna().astype(str).map(_v90_fmt_code).drop_duplicates().tolist()
+        px_list = []
+        status = []
+        for code in codes:
+            s = _v90_fetch_close(code, start_date, end_date)
+            if len(s) > 120:
+                px_list.append(s)
+                status.append({"코드": code, "상태": "성공", "데이터수": len(s), "시작일": s.index.min().strftime("%Y-%m-%d"), "종료일": s.index.max().strftime("%Y-%m-%d")})
+            else:
+                status.append({"코드": code, "상태": "부족", "데이터수": len(s), "시작일": "", "종료일": ""})
+        if len(px_list) == 0:
+            raise ValueError("개별주 가격 데이터를 불러오지 못했습니다.")
+        price = pd.concat(px_list, axis=1).sort_index()
+        price = price.loc[(price.index >= pd.to_datetime(start_date)) & (price.index <= pd.to_datetime(end_date))]
+        all_days = price.index
+        if len(all_days) == 0:
+            raise ValueError("테스트 기간에 가격 데이터가 없습니다.")
+        cash = float(initial_capital)
+        positions = {}  # code -> dict
+        daily_rows = []
+        trade_rows = []
+        monthly_rows = []
+        last_month = None
+
+        for dt in all_days:
+            month = dt.strftime("%Y-%m")
+            # 일별 TP/SL 먼저 처리
+            for code in list(positions.keys()):
+                if code not in price.columns or pd.isna(price.loc[dt, code]):
+                    continue
+                p = float(price.loc[dt, code])
+                pos = positions[code]
+                ret = p / pos["진입가"] - 1.0
+                sell_reason = None
+                if ret >= tp_pct:
+                    sell_reason = "익절"
+                elif use_stop and ret <= -abs(stop_pct):
+                    sell_reason = "손절"
+                if sell_reason:
+                    value = pos["수량"] * p * (1 - fee_rate)
+                    pnl = value - pos["매입금액"]
+                    cash += value
+                    trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": sell_reason, "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": ret * 100, "메모": "TP/SL"})
+                    del positions[code]
+
+            # 월초 리밸런싱/신규진입
+            if month != last_month:
+                last_month = month
+                r = regime_map.get(month)
+                allowed_markets = []
+                t100_hold = ""
+                if r is not None:
+                    t100_hold = r.get("T100보유", "")
+                    if bool(r.get("KODEX200선택", False)):
+                        allowed_markets.append("KOSPI")
+                    if bool(r.get("KOSDAQ150선택", False)):
+                        allowed_markets.append("KOSDAQ")
+                allowed_markets = list(dict.fromkeys(allowed_markets))
+
+                # 보조전략 운용 범위
+                # 1) 기본: KODEX200/KOSDAQ150 같은 국내 위험자산이 선택된 달에만 신규진입하고, 방어자산 구간은 청산
+                # 2) 보유분만 관리: 방어자산 구간에는 신규진입/월교체를 하지 않고 TP/SL만 본다
+                # 3) 상시 운용: GOLD/DOLLAR/BOND 구간에도 보조전략은 KOSPI/KOSDAQ 전체 대장주에서 계속 굴린다
+                no_domestic_risk_signal = not bool(allowed_markets)
+                if no_domestic_risk_signal and aux_mode == "GOLD/DOLLAR/BOND 구간도 국내 대장주 상시 운용":
+                    allowed_markets = ["KOSPI", "KOSDAQ"]
+                    t100_hold = str(t100_hold) + " / 보조상시운용"
+                hold_only_mode = no_domestic_risk_signal and aux_mode == "위험자산 선택 때만 신규진입 / 방어자산이면 보유분만 관리"
+                force_exit_mode = risk_off_exit and no_domestic_risk_signal and aux_mode == "위험자산 선택 때만 신규진입 / 방어자산이면 청산"
+
+                if force_exit_mode:
+                    for code in list(positions.keys()):
+                        if code in price.columns and not pd.isna(price.loc[dt, code]):
+                            p = float(price.loc[dt, code])
+                            pos = positions[code]
+                            value = pos["수량"] * p * (1 - fee_rate)
+                            pnl = value - pos["매입금액"]
+                            cash += value
+                            trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "위험자산OFF청산", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
+                            del positions[code]
+                selected = []
+                if allowed_markets and not hold_only_mode:
+                    selected = _v90_pick_leaders(dt, price, universe_df, allowed_markets, per_market_count, slots, include_roles, min_20d_ret, mode_fill)
+                selected_codes = [x["코드"] for x in selected]
+                # 월초에는 선택 밖 종목 청산하고 재선택 종목으로 4분할 재투자
+                # 단, 방어자산 구간 보유분만 관리 모드에서는 강제 월교체를 하지 않는다.
+                if not hold_only_mode:
+                    for code in list(positions.keys()):
+                        if code not in selected_codes:
+                            if code in price.columns and not pd.isna(price.loc[dt, code]):
+                                p = float(price.loc[dt, code])
+                                pos = positions[code]
+                                value = pos["수량"] * p * (1 - fee_rate)
+                                pnl = value - pos["매입금액"]
+                                cash += value
+                                trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월교체매도", "코드": code, "종목": pos["종목"], "가격": p, "수량": pos["수량"], "매매금액": value, "실현손익": pnl, "수익률(%)": (p/pos["진입가"]-1)*100, "메모": str(t100_hold)})
+                                del positions[code]
+                # 총자산 기준 4분할 금액 계산
+                pos_value = 0.0
+                for code, pos in positions.items():
+                    if code in price.columns and not pd.isna(price.loc[dt, code]):
+                        pos_value += pos["수량"] * float(price.loc[dt, code])
+                equity = cash + pos_value
+                slot_budget = equity / float(slots)
+                for sel in selected:
+                    code = sel["코드"]
+                    if code in positions:
+                        continue
+                    if code not in price.columns or pd.isna(price.loc[dt, code]):
+                        continue
+                    if cash <= 0:
+                        break
+                    target_amount = min(slot_budget, cash)
+                    if target_amount < 100000:
+                        continue
+                    p = float(price.loc[dt, code])
+                    buy_amount = target_amount
+                    if integer_shares:
+                        # 실전 한국주식은 소수점 수량 매수가 안 되므로 정수 주식으로 계산한다.
+                        # 슬롯금액보다 주가가 비싼 종목은 기본적으로 제외한다. 필요하면 1주 허용 정책을 선택한다.
+                        qty = int((target_amount * (1 - fee_rate)) // p)
+                        if qty <= 0:
+                            one_share_cost = p * (1 + fee_rate)
+                            if expensive_policy == "1주 매수 허용" and cash >= one_share_cost:
+                                qty = 1
+                                buy_amount = one_share_cost
+                            else:
+                                trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "고가주제외", "코드": code, "종목": sel["종목"], "가격": p, "수량": 0, "매매금액": 0.0, "실현손익": 0.0, "수익률(%)": 0.0, "메모": f"슬롯 {target_amount:,.0f}원보다 1주 가격이 높아 제외 / {t100_hold}"})
+                                continue
+                        else:
+                            buy_amount = qty * p * (1 + fee_rate)
+                        if buy_amount > cash:
+                            continue
+                    else:
+                        qty = (buy_amount * (1 - fee_rate)) / p
+                    positions[code] = {"종목": sel["종목"], "섹터": sel.get("섹터", ""), "Market": sel.get("Market", ""), "진입가": p, "수량": qty, "매입금액": buy_amount, "진입일": dt.strftime("%Y-%m-%d")}
+                    cash -= buy_amount
+                    trade_rows.append({"매매일": dt.strftime("%Y-%m-%d"), "구분": "월초매수", "코드": code, "종목": sel["종목"], "가격": p, "수량": qty, "매매금액": buy_amount, "실현손익": 0.0, "수익률(%)": 0.0, "메모": f"{t100_hold} / {sel.get('Market','')} / 점수 {sel.get('점수',0):.4f} / 정수주식={integer_shares}"})
+                monthly_rows.append({"월": month, "T100보유": t100_hold, "허용시장": ",".join(allowed_markets), "선택종목": ", ".join([f"{x['종목']}({x['코드']})" for x in selected]), "현금": cash})
+
+            pos_value = 0.0
+            hold_names = []
+            for code, pos in positions.items():
+                if code in price.columns and not pd.isna(price.loc[dt, code]):
+                    v = pos["수량"] * float(price.loc[dt, code])
+                    pos_value += v
+                    hold_names.append(f"{pos['종목']}({code})")
+            total = cash + pos_value
+            daily_rows.append({"기준일": dt.strftime("%Y-%m-%d"), "현금": cash, "주식평가": pos_value, "총자산": total, "보유종목수": len(positions), "보유종목": ", ".join(hold_names)})
+        daily = pd.DataFrame(daily_rows)
+        trades = pd.DataFrame(trade_rows)
+        monthly = pd.DataFrame(monthly_rows)
+        status_df = pd.DataFrame(status)
+        summary = _v90_calc_metrics(daily, initial_capital)
+        return daily, trades, monthly, status_df, pd.DataFrame([summary])
+
+    st.subheader("1) 입력")
+    st.info("확장형 과열회피 +70% T100 daily는 별도 CSV 업로드 없이 앱 내부에서 자동 생성합니다.")
+    universe_file = st.file_uploader("대표주 유니버스 CSV 업로드(없으면 기본 파일 사용)", type=["csv"], key="v90_universe_upload")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        v90_start = st.date_input("시작일", value=pd.to_datetime("2014-01-01"), key="v90_start")
+    with c2:
+        v90_end = st.date_input("종료일", value=pd.to_datetime(datetime.today().date()), key="v90_end")
+    with c3:
+        v90_initial = st.number_input("초기자금", min_value=1000000, value=40000000, step=1000000, key="v90_initial")
+    with c4:
+        v90_slots = st.number_input("슬롯 수", min_value=1, max_value=10, value=4, step=1, key="v90_slots")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        v90_per_market = st.number_input("T100자산별 선택 수", min_value=1, max_value=5, value=2, step=1, key="v90_per_market")
+    with c6:
+        v90_tp = st.number_input("익절률(%)", min_value=5.0, max_value=300.0, value=100.0, step=5.0, key="v90_tp") / 100.0
+    with c7:
+        v90_use_stop = st.checkbox("손절 사용", value=True, key="v90_use_stop")
+    with c8:
+        v90_stop = st.number_input("손절률(%)", min_value=5.0, max_value=80.0, value=25.0, step=5.0, key="v90_stop") / 100.0
+
+    c9, c10, c11, c12 = st.columns(4)
+    with c9:
+        v90_fee = st.number_input("수수료/세금", min_value=0.0, max_value=0.01, value=0.0003, step=0.0001, format="%.4f", key="v90_fee")
+    with c10:
+        v90_min20 = st.number_input("최소 20일 수익률(%)", min_value=-50.0, max_value=50.0, value=0.0, step=1.0, key="v90_min20") / 100.0
+    with c11:
+        v90_fill_mode = st.selectbox("선택 방식", ["T100자산별 2개", "허용시장 전체 상위4"], index=0, key="v90_fill_mode")
+    with c12:
+        v90_risk_off_exit = st.checkbox("방어자산 구간 청산 옵션", value=True, key="v90_risk_off_exit")
+
+    v90_aux_mode = st.selectbox(
+        "GOLD/DOLLAR/BOND 구간 보조전략 운용",
+        [
+            "위험자산 선택 때만 신규진입 / 방어자산이면 청산",
+            "위험자산 선택 때만 신규진입 / 방어자산이면 보유분만 관리",
+            "GOLD/DOLLAR/BOND 구간도 국내 대장주 상시 운용",
+        ],
+        index=0,
+        key="v90_aux_mode",
+    )
+    st.caption("보조전략을 완전히 분리해 보고 싶으면 '상시 운용'을 선택하세요. 방어자산 구간에도 KOSPI/KOSDAQ 대장주 4슬롯을 계속 돌립니다.")
+
+    role_options = ["대장주", "2등대표주", "회전형중형주", "ETF대체", "핵심대표주", "핵심보유"]
+    v90_roles = st.multiselect("포함할 역할", options=role_options, default=["대장주", "2등대표주"], key="v90_roles")
+
+    c13, c14 = st.columns(2)
+    with c13:
+        v90_integer = st.checkbox("정수 주식 기준으로 백테스트", value=True, key="v90_integer")
+    with c14:
+        v90_expensive_policy = st.selectbox("고가 대장주 처리", ["슬롯금액 초과 종목 제외", "1주 매수 허용"], index=0, key="v90_expensive_policy")
+    st.caption("정수 주식 기준 ON이면 100만원 슬롯에서 1주 가격이 100만원을 넘는 종목은 기본 제외됩니다. '1주 매수 허용'을 고르면 슬롯금액을 초과해도 1주만 매수합니다.")
+
+    if st.button("대장주 4슬롯 백테스트 실행", type="primary", key="v90_run_leader_4slot"):
+        try:
+            with st.spinner("확장형 과열회피 +70% T100 daily 자동 생성 중..."):
+                seed_daily = _bt_make_bunker_only_daily_df(str(v90_start), str(v90_end), total_initial=100_000_000)
+                t100_daily, t100_summary = build_bunker_7030_backtest(
+                    seed_daily,
+                    total_initial=100_000_000,
+                    leader_ratio=0.0,
+                    mode="T10/T100 Turbo 확장형 과열회피 6개월 +70%",
+                    cash_annual_rate=3.0,
+                )
+            if t100_daily is None or len(t100_daily) == 0:
+                st.error("확장형 과열회피 +70% T100 daily 자동 생성에 실패했습니다. ETF 가격 데이터 조회 상태를 확인하세요.")
+            else:
+                st.caption(f"자동 생성 T100 기간: {t100_daily['기준일'].iloc[0]} ~ {t100_daily['기준일'].iloc[-1]} / 행수 {len(t100_daily):,}개")
+                if universe_file is not None:
+                    universe = pd.read_csv(universe_file)
+                else:
+                    default_u = Path("sector_leader_universe_20260629.csv")
+                    if default_u.exists():
+                        universe = pd.read_csv(default_u)
+                    elif Path("/mnt/data/sector_leader_universe_20260629.csv").exists():
+                        universe = pd.read_csv("/mnt/data/sector_leader_universe_20260629.csv")
+                    else:
+                        st.error("대표주 유니버스 CSV가 필요합니다.")
+                        universe = None
+                if universe is not None:
+                    universe = universe.copy()
+                    universe["코드"] = universe["코드"].map(_v90_fmt_code)
+                    universe = universe[universe["코드"] != ""].copy()
+                    if "사용여부" in universe.columns:
+                        universe = universe[universe["사용여부"].astype(str).str.upper().isin(["Y", "YES", "TRUE", "1", "사용", "ON"])]
+                    krx = _v90_read_krx_listing()
+                    if len(krx) > 0:
+                        universe = universe.merge(krx, on="코드", how="left")
+                    if "Market" not in universe.columns:
+                        universe["Market"] = ""
+                    universe["Market"] = universe["Market"].fillna("")
+                    # FDR Market 표기가 KOSPI/KOSDAQ이 아닌 경우 대비
+                    universe.loc[universe["Market"].str.contains("KOSPI", case=False, na=False), "Market"] = "KOSPI"
+                    universe.loc[universe["Market"].str.contains("KOSDAQ", case=False, na=False), "Market"] = "KOSDAQ"
+                    with st.spinner("개별주 가격 수집 및 4슬롯 백테스트 계산 중..."):
+                        daily_v90, trades_v90, monthly_v90, status_v90, summary_v90 = _v90_run_leader_backtest(
+                            universe,
+                            t100_daily,
+                            str(v90_start),
+                            str(v90_end),
+                            float(v90_initial),
+                            int(v90_slots),
+                            int(v90_per_market),
+                            float(v90_tp),
+                            float(v90_stop),
+                            bool(v90_use_stop),
+                            float(v90_fee),
+                            list(v90_roles),
+                            float(v90_min20),
+                            bool(v90_risk_off_exit),
+                            str(v90_fill_mode),
+                            bool(v90_integer),
+                            str(v90_expensive_policy),
+                            str(v90_aux_mode),
+                        )
+                    st.subheader("2) 요약")
+                    srow = summary_v90.iloc[0].to_dict()
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("최종자산", f"{srow.get('최종자산',0):,.0f}원")
+                    m2.metric("총수익률", f"{srow.get('총수익률(%)',0):.2f}%")
+                    m3.metric("연복리", f"{srow.get('연복리(%)',0):.2f}%")
+                    m4.metric("MDD", f"{srow.get('MDD(%)',0):.2f}%")
+                    show_pinned_dataframe(summary_v90, height=120)
+                    tab1, tab2, tab3, tab4 = st.tabs(["일별", "매매내역", "월별선택", "데이터상태"])
+                    with tab1:
+                        show_pinned_dataframe(daily_v90.tail(1000), height=520)
+                    with tab2:
+                        show_pinned_dataframe(trades_v90.tail(1000), height=520)
+                    with tab3:
+                        show_pinned_dataframe(monthly_v90.tail(500), height=520)
+                    with tab4:
+                        show_pinned_dataframe(status_v90, height=420)
+                    export_buffer = io.BytesIO()
+                    with zipfile.ZipFile(export_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        zf.writestr(f"leader_4slot_summary_{today_str()}.csv", summary_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_daily_{today_str()}.csv", daily_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_trades_{today_str()}.csv", trades_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_monthly_{today_str()}.csv", monthly_v90.to_csv(index=False).encode("utf-8-sig"))
+                        zf.writestr(f"leader_4slot_data_status_{today_str()}.csv", status_v90.to_csv(index=False).encode("utf-8-sig"))
+                    export_buffer.seek(0)
+                    st.download_button("대장주 4슬롯 결과 ZIP 다운로드", data=export_buffer.getvalue(), file_name=f"leader_4slot_result_{today_str()}.zip", mime="application/zip", key="v90_download")
+        except Exception as e:
+            st.exception(e)
 
 # =====================================================
 # 9. 도움말
