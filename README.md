@@ -1,12 +1,14 @@
-# 70% 과열회피 v95 Optional Sheets
+# Magic Split T100 70% Overheat App v96
 
-- Google Sheets secrets가 있으면 T100_70_HISTORY 시트에 영구저장합니다.
-- secrets가 없어도 앱이 죽지 않고 임시 로컬 저장으로 실행됩니다.
-- Streamlit Cloud의 임시 로컬 저장은 재부팅/재배포/시간 경과 후 사라질 수 있으므로 CSV 백업을 내려받아 두세요.
+- Fixes NameError: `_t100_google_sheet_available_v94` not defined.
+- Google Sheets 저장 설정이 없어도 앱이 우선 실행됩니다.
+- 영구저장은 Streamlit Secrets에 Google Sheets 설정을 넣었을 때 작동합니다.
 
-## 실행
+## Deploy
+Upload these files to GitHub:
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+- app.py
+- requirements.txt
+- README.md
+
+Then reboot the Streamlit app.

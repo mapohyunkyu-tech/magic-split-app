@@ -10103,6 +10103,13 @@ st.title("📈 매직스플릿 관리기 안정형")
 st.caption(f"{APP_VERSION}")
 st.caption("T100 70% 운용기록은 Google Sheets 설정이 있으면 영구저장, 없으면 임시 로컬 저장으로 동작합니다.")
 
+# v96: 아래에서 정의되기 전 앱 시작 안내에서 먼저 호출되어 NameError가 나던 문제 방지.
+def _t100_google_sheet_available_v94():
+    try:
+        return ("spreadsheet_id" in st.secrets) and ("gcp_service_account" in st.secrets)
+    except Exception:
+        return False
+
 # v95: 앱 시작 단계에서 Google Sheets 연결 실패 때문에 전체 앱이 죽지 않게 한다.
 # Streamlit Cloud에 secrets를 아직 넣지 않았거나 Google API가 잠깐 실패해도
 # 7-1 T100 70% 운용모드는 계속 사용할 수 있어야 한다.
