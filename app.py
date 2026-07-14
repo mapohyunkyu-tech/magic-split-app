@@ -10251,14 +10251,28 @@ def _coerce_t100_history_columns_v99(df):
     return out
 
 
+def _t100_normalize_history_for_sheet_v104(df):
+    """T100 기록을 Sheets 저장/불러오기용으로 날짜 정규화하고 중복 날짜를 마지막 기록 기준으로 정리한다."""
+    out = _coerce_t100_history_columns_v99(df)
+    if out is None or len(out) == 0:
+        return _empty_t100_hybrid_history_v74()
+    out = out.copy()
+    out["기준일"] = pd.to_datetime(out["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out = out.dropna(subset=["기준일"])
+    if len(out) == 0:
+        return _empty_t100_hybrid_history_v74()
+    out = out.drop_duplicates(subset=["기준일"], keep="last")
+    out = out.sort_values("기준일")
+    return out[T100_HYBRID_HISTORY_COLUMNS]
+
+
 def _t100_load_history_from_sheets_v99():
     """Google Sheet의 T100 기록을 안전하게 불러온다.
 
-    v103 핵심 수정:
-    - 저장 대상인 T100_70_SIMPLE_HISTORY를 우선 사용한다.
-    - 여러 후보 탭에 기록이 흩어져 있으면 병합한다.
-    - 같은 기준일이 여러 탭에 있으면 후보 목록 앞쪽 탭, 즉 최신 저장 탭의 값을 우선한다.
-      이 때문에 저장 후 불러오기가 오래된 T100_70_HISTORY로 되돌아가지 않는다.
+    v104 핵심 수정:
+    - 저장/갱신 탭인 T100_70_SIMPLE_HISTORY를 기준 장부로 사용한다.
+    - 구버전 탭은 보조로만 읽고, 같은 기준일은 무조건 SIMPLE_HISTORY 값을 우선한다.
+    - 불러온 뒤 다시 SIMPLE_HISTORY에 병합본을 써서 다음부터 오래된 탭으로 회귀하지 않게 한다.
     """
     sheet, err = _t100_get_spreadsheet_safe_v99()
     if sheet is None:
@@ -10272,10 +10286,10 @@ def _t100_load_history_from_sheets_v99():
             tried.append(title)
             ws = sheet.worksheet(title)
             records = ws.get_all_records()
-            df = pd.DataFrame(records)
-            df = _coerce_t100_history_columns_v99(df)
+            df = _t100_normalize_history_for_sheet_v104(pd.DataFrame(records))
             if len(df):
                 df = df.copy()
+                # 숫자가 클수록 오래된/보조 탭. 나중에 SIMPLE이 같은 날짜를 덮게 만든다.
                 df["__sheet_priority"] = priority
                 df["__sheet_title"] = title
                 frames.append(df)
@@ -10291,11 +10305,19 @@ def _t100_load_history_from_sheets_v99():
     merged["기준일"] = pd.to_datetime(merged["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
     merged = merged.dropna(subset=["기준일"])
 
-    # 우선순위가 낮은 숫자일수록 더 신뢰. sort 후 keep=first로 최신 저장 탭 값을 살린다.
-    merged = merged.sort_values(["기준일", "__sheet_priority"])
-    merged = merged.drop_duplicates(subset=["기준일"], keep="first")
+    # 오래된 탭 먼저, SIMPLE_HISTORY 나중. keep=last라 SIMPLE_HISTORY가 같은 날짜를 이긴다.
+    merged = merged.sort_values(["기준일", "__sheet_priority"], ascending=[True, False])
+    merged = merged.drop_duplicates(subset=["기준일"], keep="last")
     merged = merged.sort_values("기준일")
     merged = merged.drop(columns=[c for c in ["__sheet_priority", "__sheet_title"] if c in merged.columns])
+    merged = _t100_normalize_history_for_sheet_v104(merged)
+
+    # 병합본을 저장 탭에 다시 저장해, 다음 불러오기부터는 저장 탭이 단일 기준 장부가 되게 한다.
+    try:
+        ws_save = ensure_worksheet(sheet, T100_SHEET_SAVE_TITLE_V99, T100_HYBRID_HISTORY_COLUMNS)
+        write_worksheet(ws_save, merged, T100_HYBRID_HISTORY_COLUMNS)
+    except Exception:
+        pass
 
     return merged[T100_HYBRID_HISTORY_COLUMNS], "+".join(used_titles), ""
 
@@ -10305,10 +10327,40 @@ def _t100_save_history_to_sheets_v99(df, title=T100_SHEET_SAVE_TITLE_V99):
     if sheet is None:
         return False, err
     try:
-        safe_df = _coerce_t100_history_columns_v99(df)
+        safe_df = _t100_normalize_history_for_sheet_v104(df)
         ws = ensure_worksheet(sheet, title, T100_HYBRID_HISTORY_COLUMNS)
         write_worksheet(ws, safe_df, T100_HYBRID_HISTORY_COLUMNS)
-        return True, f"Google Sheets `{title}` 탭에 저장했습니다."
+        latest_date = str(safe_df["기준일"].max()) if len(safe_df) else "없음"
+        return True, f"Google Sheets `{title}` 탭에 {len(safe_df)}개 기록을 저장했습니다. 최신 기준일: {latest_date}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _t100_upsert_record_to_sheets_v104(record: dict, title=T100_SHEET_SAVE_TITLE_V99):
+    """오늘 저장 버튼에서 방금 만든 record를 Sheets에 직접 upsert한다.
+    로컬 CSV를 다시 읽지 않으므로, Streamlit rerun/세션 때문에 이전 기록이 백업되는 문제를 막는다.
+    """
+    sheet, err = _t100_get_spreadsheet_safe_v99()
+    if sheet is None:
+        return False, err
+    try:
+        ws = ensure_worksheet(sheet, title, T100_HYBRID_HISTORY_COLUMNS)
+        try:
+            existing = pd.DataFrame(ws.get_all_records())
+        except Exception:
+            existing = _empty_t100_hybrid_history_v74()
+        existing = _t100_normalize_history_for_sheet_v104(existing)
+        one = _t100_normalize_history_for_sheet_v104(pd.DataFrame([record]))
+        if len(one) == 0:
+            return False, "저장할 오늘 기록의 기준일이 비어 있습니다."
+        day = str(one.iloc[-1]["기준일"])
+        if len(existing):
+            existing = existing[existing["기준일"].astype(str) != day]
+        out = pd.concat([existing, one], ignore_index=True)
+        out = _t100_normalize_history_for_sheet_v104(out)
+        write_worksheet(ws, out, T100_HYBRID_HISTORY_COLUMNS)
+        latest_date = str(out["기준일"].max()) if len(out) else day
+        return True, f"Google Sheets `{title}` 탭에 {day} 기록을 직접 저장했습니다. 총 {len(out)}개 / 최신 {latest_date}"
     except Exception as e:
         return False, str(e)
 
@@ -10839,6 +10891,22 @@ def _t100_hybrid_live_operation_v63():
                 else:
                     st.warning(f"Google Sheets 백업 실패: {msg}")
 
+        if st.button("Google Sheet 저장탭만 다시 확인", key="t100_v104_check_simple_sheet"):
+            try:
+                sheet_chk, err_chk = _t100_get_spreadsheet_safe_v99()
+                if sheet_chk is None:
+                    st.warning(err_chk)
+                else:
+                    ws_chk = sheet_chk.worksheet(T100_SHEET_SAVE_TITLE_V99)
+                    df_chk = _t100_normalize_history_for_sheet_v104(pd.DataFrame(ws_chk.get_all_records()))
+                    if len(df_chk):
+                        st.success(f"저장탭 `{T100_SHEET_SAVE_TITLE_V99}` 확인: {len(df_chk)}개 / 최신 기준일 {df_chk['기준일'].max()}")
+                        st.dataframe(df_chk.tail(10), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning(f"저장탭 `{T100_SHEET_SAVE_TITLE_V99}`에 기록이 없습니다.")
+            except Exception as e:
+                st.warning(f"저장탭 확인 실패: {e}")
+
         if T100_HYBRID_CLEAR_MARKER_PATH.exists():
             st.caption("전체 초기화 상태: 구버전 운용기록 자동복사를 막고 있습니다. 새로 저장하거나 백업을 복원하면 자동으로 해제됩니다.")
         hist_backup = _load_t100_hybrid_history_v63()
@@ -10905,7 +10973,7 @@ def _t100_hybrid_live_operation_v63():
     save1, save2, save3 = st.columns(3)
     with save1:
         if st.button("오늘 운용기록 저장/갱신", type="primary", key="t100_v65_save"):
-            _save_t100_hybrid_history_v63({
+            today_record_v104 = {
                 "기준일": today_str,
                 "투입원금": int(round(base_after)),
                 "전일평가금액": int(round(prev_eval)) if prior_count >= 1 else "",
@@ -10934,7 +11002,8 @@ def _t100_hybrid_live_operation_v63():
                 "계좌예수금메모": int(round(account_cash)),
                 "운용모드": str(status),
                 "메모": "v84 1순위 개선안 최소20일 방어 + 6310 최소60일 잠금",
-            })
+            }
+            _save_t100_hybrid_history_v63(today_record_v104)
             st.session_state["_t100_v76_pending_widget_updates"] = {
                 "t100_v65_base": int(round(base_after)),
                 "t100_v65_value": int(round(current_t100)),
@@ -10947,8 +11016,7 @@ def _t100_hybrid_live_operation_v63():
             }
             if st.session_state.get("t100_v99_autosave_sheets", False):
                 try:
-                    hist_after_save_v99 = _load_t100_hybrid_history_v63()
-                    ok_v99, msg_v99 = _t100_save_history_to_sheets_v99(hist_after_save_v99)
+                    ok_v99, msg_v99 = _t100_upsert_record_to_sheets_v104(today_record_v104)
                     if ok_v99:
                         st.success(msg_v99)
                     else:
