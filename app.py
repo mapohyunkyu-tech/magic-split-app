@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v103_OVERHEAT70_SHEETS_LOADFIX_MOBILE_RESTORE_20260710"
+APP_VERSION = "v105_OVERHEAT70_SHEETS_MERGE_LOCAL_SAVEFIX_20260714"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10298,6 +10298,22 @@ def _t100_load_history_from_sheets_v99():
             tried.append(f"{title}({str(e)[:80]})")
             continue
 
+    # v105: 로컬 앱 기록도 함께 병합한다.
+    # Google Sheet 자동백업이 실패했거나 메시지가 rerun으로 사라져도,
+    # 로컬에 저장된 7/14 같은 최신 기록을 불러오기 버튼이 다시 지워버리지 않게 한다.
+    try:
+        if T100_HYBRID_HISTORY_PATH.exists():
+            local_raw = pd.read_csv(T100_HYBRID_HISTORY_PATH, encoding="utf-8-sig")
+            local_df = _t100_normalize_history_for_sheet_v104(local_raw)
+            if len(local_df):
+                local_df = local_df.copy()
+                local_df["__sheet_priority"] = -1
+                local_df["__sheet_title"] = "LOCAL_APP_HISTORY"
+                frames.append(local_df)
+                used_titles.append("LOCAL_APP_HISTORY")
+    except Exception as e:
+        tried.append(f"LOCAL_APP_HISTORY({str(e)[:80]})")
+
     if not frames:
         return _empty_t100_hybrid_history_v74(), "", "기존 T100 기록 시트를 찾지 못했거나 비어 있습니다: " + ", ".join(tried[:8])
 
@@ -10854,6 +10870,21 @@ def _t100_hybrid_live_operation_v63():
             f"오늘 입출금/매매 보정 적용: 판정기준 = 어제 평가 {_fmt_won(prev_eval)} + T100추가매수 {_fmt_won(t100_buy_today)} - T100현금화매도 {_fmt_won(t100_sell_today)} = {_fmt_won(decision_basis)}"
         )
 
+    pending_v105 = st.session_state.pop("_t100_v105_pending_msg", None)
+    if pending_v105:
+        try:
+            level_v105, msg_v105 = pending_v105
+        except Exception:
+            level_v105, msg_v105 = "info", str(pending_v105)
+        if level_v105 == "success":
+            st.success(msg_v105)
+        elif level_v105 == "warning":
+            st.warning(msg_v105)
+        elif level_v105 == "error":
+            st.error(msg_v105)
+        else:
+            st.info(msg_v105)
+
     with st.expander("운용기록 저장 위치 / 백업", expanded=False):
         st.caption("새 앱을 설치해도 유지되도록 앱 폴더 밖의 고정 데이터 폴더에 저장합니다.")
         st.code(str(T100_HYBRID_HISTORY_PATH))
@@ -10863,7 +10894,10 @@ def _t100_hybrid_live_operation_v63():
             st.caption("Secrets 설정이 감지됐습니다. 버튼을 누를 때만 기존 Google Sheet에 접속합니다.")
         else:
             st.caption("Secrets 설정이 없으면 Google Sheets 복구/저장은 비활성입니다. 앱은 그대로 실행됩니다.")
-        st.checkbox("오늘 기록 저장 시 Google Sheets에도 자동 백업", value=False, key="t100_v99_autosave_sheets")
+        # v105: Sheets 설정이 있으면 기본값을 켜둔다.
+        if "t100_v99_autosave_sheets" not in st.session_state:
+            st.session_state["t100_v99_autosave_sheets"] = bool(_t100_sheets_enabled_v99())
+        st.checkbox("오늘 기록 저장 시 Google Sheets에도 자동 백업", key="t100_v99_autosave_sheets")
         gs1, gs2 = st.columns(2)
         with gs1:
             if st.button("기존 Google Sheet에서 T100 기록 불러오기", key="t100_v99_load_from_sheets"):
@@ -10875,7 +10909,11 @@ def _t100_hybrid_live_operation_v63():
                     except Exception:
                         pass
                     df_sheet.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
-                    st.success(f"Google Sheet `{sheet_title}`에서 {len(df_sheet)}개 기록을 복구했습니다.")
+                    latest_loaded_v105 = str(df_sheet["기준일"].max()) if len(df_sheet) and "기준일" in df_sheet.columns else "없음"
+                    st.session_state["_t100_v105_pending_msg"] = (
+                        "success",
+                        f"Google Sheet + 로컬 기록을 병합해 {len(df_sheet)}개 기록을 불러왔습니다. 최신 기준일: {latest_loaded_v105} / 사용원본: {sheet_title}"
+                    )
                     try:
                         st.rerun()
                     except Exception:
@@ -10906,6 +10944,14 @@ def _t100_hybrid_live_operation_v63():
                         st.warning(f"저장탭 `{T100_SHEET_SAVE_TITLE_V99}`에 기록이 없습니다.")
             except Exception as e:
                 st.warning(f"저장탭 확인 실패: {e}")
+
+        if st.button("로컬 최신기록을 Google Sheet 저장탭에 강제 덮어쓰기", key="t100_v105_force_local_to_sheet"):
+            hist_force_v105 = _load_t100_hybrid_history_v63()
+            ok_force_v105, msg_force_v105 = _t100_save_history_to_sheets_v99(hist_force_v105)
+            if ok_force_v105:
+                st.success("로컬 기록을 Google Sheet 저장탭에 강제 저장했습니다. " + msg_force_v105)
+            else:
+                st.warning(f"강제 저장 실패: {msg_force_v105}")
 
         if T100_HYBRID_CLEAR_MARKER_PATH.exists():
             st.caption("전체 초기화 상태: 구버전 운용기록 자동복사를 막고 있습니다. 새로 저장하거나 백업을 복원하면 자동으로 해제됩니다.")
@@ -11014,16 +11060,23 @@ def _t100_hybrid_live_operation_v63():
                 "t100_v75_t100_buy": 0,
                 "t100_v75_t100_sell": 0,
             }
+            pending_save_level_v105 = "success"
+            pending_save_msg_v105 = f"{today_str} 기록을 로컬에 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다."
             if st.session_state.get("t100_v99_autosave_sheets", False):
                 try:
                     ok_v99, msg_v99 = _t100_upsert_record_to_sheets_v104(today_record_v104)
                     if ok_v99:
-                        st.success(msg_v99)
+                        pending_save_msg_v105 += f"\nGoogle Sheets 자동백업 완료: {msg_v99}"
                     else:
-                        st.warning(f"Google Sheets 자동백업 실패: {msg_v99}")
+                        pending_save_level_v105 = "warning"
+                        pending_save_msg_v105 += f"\n단, Google Sheets 자동백업 실패: {msg_v99}"
                 except Exception as _e_v99:
-                    st.warning(f"Google Sheets 자동백업 실패: {_e_v99}")
-            st.success(f"{today_str} 기록을 저장했습니다. 투입원금은 {_fmt_won(base_after)}로 갱신됩니다.")
+                    pending_save_level_v105 = "warning"
+                    pending_save_msg_v105 += f"\n단, Google Sheets 자동백업 실패: {_e_v99}"
+            else:
+                pending_save_level_v105 = "warning"
+                pending_save_msg_v105 += "\n주의: Google Sheets 자동백업 체크가 꺼져 있어 시트에는 저장하지 않았습니다."
+            st.session_state["_t100_v105_pending_msg"] = (pending_save_level_v105, pending_save_msg_v105)
             try:
                 st.rerun()
             except Exception:
