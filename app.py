@@ -27,7 +27,7 @@ import requests
 # 기본 설정
 # =====================================================
 
-APP_VERSION = "v101_OVERHEAT70_VISIBLE_DEFAULT_20260710"
+APP_VERSION = "v103_OVERHEAT70_SHEETS_LOADFIX_MOBILE_RESTORE_20260710"
 
 st.set_page_config(
     page_title="매직스플릿 관리기",
@@ -10194,9 +10194,11 @@ except Exception:
 # - 7-1 운용모드 안에서 사용자가 버튼을 눌렀을 때만 접근한다.
 # - Secrets/권한/시트 오류가 있어도 앱 전체가 죽지 않게 문자열 오류만 반환한다.
 # =====================================================
+# v103: 저장 대상인 T100_70_SIMPLE_HISTORY를 가장 먼저 읽는다.
+# 이전 버전은 오래된 T100_70_HISTORY를 먼저 읽어서, 저장 후 다시 불러오면 옛날 금액으로 되돌아가는 문제가 있었다.
 T100_SHEET_CANDIDATES_V99 = [
-    "T100_70_HISTORY",
     "T100_70_SIMPLE_HISTORY",
+    "T100_70_HISTORY",
     "t100_hybrid_live_history",
     "T100_HYBRID_HISTORY",
     "T100_HISTORY",
@@ -10250,11 +10252,22 @@ def _coerce_t100_history_columns_v99(df):
 
 
 def _t100_load_history_from_sheets_v99():
+    """Google Sheet의 T100 기록을 안전하게 불러온다.
+
+    v103 핵심 수정:
+    - 저장 대상인 T100_70_SIMPLE_HISTORY를 우선 사용한다.
+    - 여러 후보 탭에 기록이 흩어져 있으면 병합한다.
+    - 같은 기준일이 여러 탭에 있으면 후보 목록 앞쪽 탭, 즉 최신 저장 탭의 값을 우선한다.
+      이 때문에 저장 후 불러오기가 오래된 T100_70_HISTORY로 되돌아가지 않는다.
+    """
     sheet, err = _t100_get_spreadsheet_safe_v99()
     if sheet is None:
         return _empty_t100_hybrid_history_v74(), "", err
+
     tried = []
-    for title in T100_SHEET_CANDIDATES_V99:
+    frames = []
+    used_titles = []
+    for priority, title in enumerate(T100_SHEET_CANDIDATES_V99):
         try:
             tried.append(title)
             ws = sheet.worksheet(title)
@@ -10262,11 +10275,29 @@ def _t100_load_history_from_sheets_v99():
             df = pd.DataFrame(records)
             df = _coerce_t100_history_columns_v99(df)
             if len(df):
-                return df, title, ""
+                df = df.copy()
+                df["__sheet_priority"] = priority
+                df["__sheet_title"] = title
+                frames.append(df)
+                used_titles.append(title)
         except Exception as e:
             tried.append(f"{title}({str(e)[:80]})")
             continue
-    return _empty_t100_hybrid_history_v74(), "", "기존 T100 기록 시트를 찾지 못했거나 비어 있습니다: " + ", ".join(tried[:8])
+
+    if not frames:
+        return _empty_t100_hybrid_history_v74(), "", "기존 T100 기록 시트를 찾지 못했거나 비어 있습니다: " + ", ".join(tried[:8])
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged["기준일"] = pd.to_datetime(merged["기준일"], errors="coerce").dt.strftime("%Y-%m-%d")
+    merged = merged.dropna(subset=["기준일"])
+
+    # 우선순위가 낮은 숫자일수록 더 신뢰. sort 후 keep=first로 최신 저장 탭 값을 살린다.
+    merged = merged.sort_values(["기준일", "__sheet_priority"])
+    merged = merged.drop_duplicates(subset=["기준일"], keep="first")
+    merged = merged.sort_values("기준일")
+    merged = merged.drop(columns=[c for c in ["__sheet_priority", "__sheet_title"] if c in merged.columns])
+
+    return merged[T100_HYBRID_HISTORY_COLUMNS], "+".join(used_titles), ""
 
 
 def _t100_save_history_to_sheets_v99(df, title=T100_SHEET_SAVE_TITLE_V99):
@@ -10832,6 +10863,7 @@ def _t100_hybrid_live_operation_v63():
                         T100_HYBRID_CLEAR_MARKER_PATH.unlink()
                 except Exception:
                     pass
+                restore_df = _coerce_t100_history_columns_v99(restore_df)
                 restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
                 st.success("T100 운용기록을 복원했습니다.")
                 try:
@@ -10840,6 +10872,35 @@ def _t100_hybrid_live_operation_v63():
                     pass
             except Exception as e:
                 st.error(f"복원 실패: {e}")
+
+        st.markdown("##### 모바일에서 파일 선택이 안 될 때")
+        st.caption("백업 CSV 파일을 열어서 전체 내용을 복사한 뒤 아래 칸에 붙여넣고 복원할 수 있습니다.")
+        pasted_history_csv = st.text_area(
+            "백업 CSV 내용 붙여넣기 복원",
+            key="t100_v103_history_restore_paste",
+            height=120,
+            placeholder="기준일,투입원금,당일평가금액,...",
+        )
+        if st.button("붙여넣은 CSV로 복원", key="t100_v103_history_restore_paste_button"):
+            try:
+                if not str(pasted_history_csv).strip():
+                    st.warning("붙여넣은 CSV 내용이 없습니다.")
+                else:
+                    restore_df = pd.read_csv(io.StringIO(str(pasted_history_csv).strip()))
+                    restore_df = _coerce_t100_history_columns_v99(restore_df)
+                    try:
+                        if T100_HYBRID_CLEAR_MARKER_PATH.exists():
+                            T100_HYBRID_CLEAR_MARKER_PATH.unlink()
+                    except Exception:
+                        pass
+                    restore_df.to_csv(T100_HYBRID_HISTORY_PATH, index=False, encoding="utf-8-sig")
+                    st.success("붙여넣은 CSV 내용으로 T100 운용기록을 복원했습니다.")
+                    try:
+                        st.rerun()
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"붙여넣기 복원 실패: {e}")
 
     save1, save2, save3 = st.columns(3)
     with save1:
